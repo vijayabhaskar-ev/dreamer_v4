@@ -36,15 +36,17 @@ class MultiheadSelfAttention(nn.Module):
         assert (
             self.head_dim * num_heads == embed_dim
         ), "embed_dim must be divisible by num_heads"
-
-        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=True)
+        """
+        Using single matrix instead of separate matrices for Q, K, V
+        """
+        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=True) #TODO Need to check the advantages/disadvantages of using single matrix
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor:
         B, L, C = x.shape
         qkv = self.qkv(x)
-        qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim)
+        qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim) #TODO Check efficient no of heads needed
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, L, D)
         q, k, v = qkv[0], qkv[1], qkv[2]
 

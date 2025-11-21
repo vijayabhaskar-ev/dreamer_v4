@@ -1,0 +1,8 @@
+torch>=2.1
+torchvision>=0.16
+gymnasium>=0.29
+numpy>=1.24
+opencv-python>=4.8 ; extra == 'images'
+tensorboard>=2.14
+tyro>=0.8.5
+dataclasses-json>=0.6

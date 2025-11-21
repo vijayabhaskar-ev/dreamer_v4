@@ -19,7 +19,7 @@ class LossOutputs:
     metrics: Dict[str, torch.Tensor]
 
 
-class MaskedAutoencoderLoss(nn.Module):
+class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handling of total with LPIPS
     """Combines reconstruction losses (MSE + LPIPS) for masked autoencoding."""
 
     def __init__(self, lpips_module: Optional[nn.Module] = None):

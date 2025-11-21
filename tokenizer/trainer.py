@@ -14,7 +14,7 @@ from .model import MaskedAutoencoderTokenizer
 
 
 @dataclass
-class TokenizerTrainingConfig:
+class TokenizerTrainingConfig: #TODO Need to move this to config.py
     epochs: int = 10
     batch_size: int = 32
     lr: float = 1e-4
@@ -56,7 +56,7 @@ class TokenizerTrainer:
         for epoch in range(1, self.training_cfg.epochs + 1):
             train_metrics = self._run_epoch(train_loader, epoch, training=True)
             val_metrics = None
-            if val_loader is not None:
+            if val_loader is not None: #TODO Need to refactor this including _run_epoch
                 val_metrics = self._run_epoch(val_loader, epoch, training=False)
 
             print(
@@ -137,7 +137,7 @@ class TokenizerTrainer:
         return metrics
 
 
-def create_dataloader(dataset, batch_size: int, shuffle: bool = True) -> DataLoader:
+def create_dataloader(dataset, batch_size: int, shuffle: bool = True) -> DataLoader: #TODO Need to refactor this after completion of the tokenizer
     if isinstance(dataset, IterableDataset):
         return DataLoader(dataset, batch_size=None)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)

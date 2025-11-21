@@ -41,7 +41,7 @@ class MovingSquareIterableDataset(IterableDataset):
             yield self.dataset.sample(self.batch_size)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser: #TODO Need to check the defeault values of the arguments
     parser = argparse.ArgumentParser(description="Train the Dreamer V4 tokenizer (MAE)")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -53,21 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/tokenizer")
     parser.add_argument("--save-final", type=str, default="checkpoints/tokenizer/final.pt")
-    parser.add_argument("--image-size", type=int, nargs=2, default=(84, 84))
-    parser.add_argument("--patch-size", type=int, nargs=2, default=(6, 6))
     parser.add_argument("--seq-length", type=int, default=4)
-    parser.add_argument("--channels", type=int, default=3)
     parser.add_argument("--square-size", type=int, default=8)
-    parser.add_argument("--mask-prob-min", type=float, default=0.0)
-    parser.add_argument("--mask-prob-max", type=float, default=0.9)
-    parser.add_argument("--num-heads", type=int, default=8)
-    parser.add_argument("--depth", type=int, default=8)
-    parser.add_argument("--embed-dim", type=int, default=512)
-    parser.add_argument("--latent-tokens", type=int, default=32)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--drop-path", type=float, default=0.1)
-    parser.add_argument("--mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--grad-checkpoint", action="store_true")
     parser.add_argument("--lpips", type=str, choices=["none", "vgg", "alex", "squeeze"], default="none")
     return parser
 
@@ -78,23 +65,10 @@ def main(args: Optional[list[str]] = None) -> None:
 
     Path(parsed.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     if parsed.save_final:
-        Path(parsed.save_final).parent.mkdir(parents=True, exist_ok=True)
+        Path(parsed.save_final).parent.mkdir(parents=True, exist_ok=True) #TODO Need to check the implementation of save_final
 
     tokenizer_cfg = TokenizerConfig(
-        image_size=tuple(parsed.image_size),
-        patch_size=tuple(parsed.patch_size),
-        in_channels=parsed.channels,
-        embed_dim=parsed.embed_dim,
-        depth=parsed.depth,
-        num_heads=parsed.num_heads,
-        mlp_ratio=parsed.mlp_ratio,
-        dropout=parsed.dropout,
-        drop_path=parsed.drop_path,
-        mask_prob_min=parsed.mask_prob_min,
-        mask_prob_max=parsed.mask_prob_max,
-        num_latent_tokens=parsed.latent_tokens,
-        lpips_net=(parsed.lpips if parsed.lpips != "none" else "vgg"),
-        use_grad_checkpoint=parsed.grad_checkpoint,
+        lpips_net=(parsed.lpips if parsed.lpips != "none" else TokenizerConfig.lpips_net)
     )
 
     training_cfg = TokenizerTrainingConfig(
@@ -113,17 +87,17 @@ def main(args: Optional[list[str]] = None) -> None:
         try:
             import lpips
 
-            lpips_module = lpips.LPIPS(net=parsed.lpips).to(parsed.device)
+            lpips_module = lpips.LPIPS(net=parsed.lpips).to(parsed.device) #TODO Need to install lpips
         except ImportError:
             raise ImportError(
                 "LPIPS requested but library not installed. Install `lpips` package or rerun with --lpips none."
             )
 
     moving_square = MovingSquareDataset(
-        H=parsed.image_size[0],
-        W=parsed.image_size[1],
+        H=tokenizer_cfg.image_size[0],
+        W=tokenizer_cfg.image_size[1],
         T=parsed.seq_length,
-        C=parsed.channels,
+        C=tokenizer_cfg.in_channels,
         square_size=parsed.square_size,
     )
     iterable_dataset = MovingSquareIterableDataset(

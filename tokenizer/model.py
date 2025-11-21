@@ -61,7 +61,7 @@ class LatentTokenEmbedding(nn.Module):
         self.latent_tokens = nn.Parameter(
             torch.randn(1, config.num_latent_tokens, config.embed_dim) * 0.02
         )
-        self.cls_tokens = nn.Parameter(
+        self.cls_tokens = nn.Parameter( #TODO No noeed for cls tokens in dreamer v4
             torch.randn(
                 1,
                 config.learned_cls_tokens,
@@ -71,7 +71,7 @@ class LatentTokenEmbedding(nn.Module):
         )
 
     def forward(self, batch: int) -> torch.Tensor:
-        tokens = torch.cat([self.cls_tokens, self.latent_tokens], dim=1)
+        tokens = torch.cat([self.cls_tokens, self.latent_tokens], dim=1) #TODO No need for cls tokens in dreamer v4
         return tokens.expand(batch, -1, -1)
 
 
@@ -81,7 +81,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
         self.config = config
         self.patch_embed = PatchEmbed(config)
         self.pos_embed = nn.Parameter(
-            torch.randn(1, self.patch_embed.num_patches() * 1, config.embed_dim) * 0.02
+            torch.randn(1, self.patch_embed.num_patches() * 1, config.embed_dim) * 0.02    #TODO Neeed to implement ROPE  and temporal embedding after initial implementation
         )
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
         self.latent_tokens = LatentTokenEmbedding(config)
@@ -113,7 +113,10 @@ class MaskedAutoencoderTokenizer(nn.Module):
     ) -> TokenizerOutputs:
         batch = frames.size(0)
         patches = self.patch_embed(frames)
-        patches = patches + self.pos_embed[:, : patches.size(1), :]
+        base_pos = self.pos_embed
+        pos = base_pos.repeat(1, frames.size(1), 1)[:, : patches.size(1), :] #TODO Need to implement ROPE and temporal embedding after initial implementation
+        patches = patches + pos #TODO Implemented just to make sure MAE pipeline is working
+        #patches = patches + self.pos_embed[:, : patches.size(1), :]
 
         if mask is None:
             mask = sample_random_mask(
@@ -130,7 +133,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
             mask_token=self.mask_token.expand(batch, patches.size(1), -1),
         )
         latent_tokens = self.latent_tokens(batch)
-        sequence = torch.cat([masked_patches, latent_tokens], dim=1)
+        sequence = torch.cat([masked_patches, latent_tokens], dim=1) #(B, N + L, D) where N = patches per frame (256) and L = latent tokens (32).
 
         attn_mask = AttentionMask(causal=True)
         for block in self.blocks:
