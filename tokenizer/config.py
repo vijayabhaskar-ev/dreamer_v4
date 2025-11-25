@@ -12,6 +12,13 @@ class TokenizerConfig:
     embed_dim: int = 512
     depth: int = 8
     num_heads: int = 8
+    # Dataset
+    dataset_name: str = "dm_control"
+    task_name: str = "cheetah_run"
+    action_repeat: int = 2
+    seq_len: int = 4 # Number of frames per sequence
+
+    # Optimization
     mlp_ratio: float = 4.0 #TODO Need to check the implementation of mlp_ratio after completion of the tokenizer
     dropout: float = 0.1
     drop_path: float = 0.1 #TODO Dreawer v4 uses droppath instead of dropout. Need to check the implementation of drop_path after completion of the tokenizer

@@ -43,21 +43,22 @@ class MultiheadSelfAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
 
+
     def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor:
         B, L, C = x.shape
         qkv = self.qkv(x)
-        qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim) #TODO Check efficient no of heads needed
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, L, D)
+        qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim) #TODO Check efficient no of heads needed 
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, L, D)  torch.Size([3, 32, 8, 288, 64])
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5) #torch.Size([32, 8, 288, 288])
         attn_scores = attn_mask.apply(attn_scores)
         attn = F.softmax(attn_scores, dim=-1)
         attn = self.dropout(attn)
 
-        out = torch.matmul(attn, v)
-        out = out.transpose(1, 2).reshape(B, L, C)
-        out = self.out_proj(out)
+        out = torch.matmul(attn, v) 
+        out = out.transpose(1, 2).reshape(B, L, C)#torch.Size([32, 288, 512])
+        out = self.out_proj(out) # linear layer to combine heads and mix features
         return out
 
 
@@ -94,10 +95,10 @@ class TransformerBlock(nn.Module):
         self.attn = MultiheadSelfAttention(embed_dim, num_heads, dropout)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.ff = FeedForward(embed_dim, mlp_ratio, dropout)
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity()
+        self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity() #Drops entire residual connection with probability drop_path
 
-    def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor:
-        x = x + self.drop_path(self.attn(self.norm1(x), attn_mask))
+    def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor: #TODO implemenent drop_path to be skipped  during eval/inference. Current implenetaaion will not be skipped during eval. Also current implementeation is wrong fpor drop_path
+        x = x + self.drop_path(self.attn(self.norm1(x), attn_mask)) #TODO  check if resdula ocnnection is implenented correctly
         x = x + self.drop_path(self.ff(self.norm2(x)))
         return x
 

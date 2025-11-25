@@ -19,7 +19,7 @@ class LossOutputs:
     metrics: Dict[str, torch.Tensor]
 
 
-class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handling of total with LPIPS
+class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handling of total with LPIPS . Need more research on this
     """Combines reconstruction losses (MSE + LPIPS) for masked autoencoding."""
 
     def __init__(self, lpips_module: Optional[nn.Module] = None):
@@ -31,13 +31,11 @@ class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handlin
         recon: torch.Tensor,
         target: torch.Tensor,
         mask: torch.Tensor,
+        patch_size: tuple[int, int] = (8, 8),
         normalize_by: str = "pixels",
     ) -> LossOutputs:
-        mse = F.mse_loss(recon, target, reduction="none")
-        if normalize_by == "pixels":
-            mse = mse.mean()
-        else:
-            mse = (mse.view(mse.size(0), -1).mean(dim=-1) * mask.float().mean(dim=-1)).mean()
+
+        mse_loss = F.mse_loss(recon, target)
 
         lpips_loss = None
         if self.lpips is not None:
@@ -47,10 +45,10 @@ class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handlin
             target_video = target.view(b * t, *target.shape[2:])
             lpips_val = self.lpips(recon_video, target_video)
             lpips_loss = lpips_val.mean()
-        total = mse if lpips_loss is None else mse + lpips_loss
+        total = mse_loss if lpips_loss is None else mse_loss +0.2 *  lpips_loss
 
         metrics = {
-            "loss/mse": mse.detach(),
+            "loss/mse": mse_loss.detach(),
             "loss/total": total.detach(),
         }
         if lpips_loss is not None:
@@ -58,7 +56,7 @@ class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handlin
 
         return LossOutputs(
             total_loss=total,
-            mse_loss=mse,
+            mse_loss=mse_loss,
             lpips_loss=lpips_loss,
             mask_ratio=mask.float().mean(),
             metrics=metrics,
