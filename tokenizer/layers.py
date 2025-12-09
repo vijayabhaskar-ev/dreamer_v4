@@ -12,58 +12,63 @@ import torch.nn.functional as F
 
 @dataclass
 class AttentionMask:
-    causal: bool
-    mask: Optional[torch.Tensor] = None
+    """
+    Wrapper for handling masks in Scaled Dot Product Attention.
+    For Flash Attention (SDPA), a boolean mask (True = -inf, False = 0) is preferred.
+    """
+    is_causal: bool = False
+    mask: Optional[torch.Tensor] = None  # Expected shape: (L, L) or (B, 1, L, L)
 
-    def apply(self, attn_scores: torch.Tensor) -> torch.Tensor:
+    def apply_to_sdpa(self, size: tuple) -> Optional[torch.Tensor]:
+        """Returns the mask argument formatted for F.scaled_dot_product_attention."""
+        # If we have a custom mask (like block causal), we return it.
+        # SDPA expects a float mask (added to scores) or a bool mask (True positions are masked out).
         if self.mask is not None:
-            attn_scores = attn_scores + self.mask
-        if self.causal:
-            L = attn_scores.size(-1)
-            causal_mask = torch.triu(torch.ones(L, L, device=attn_scores.device), diagonal=1)
-            attn_scores = attn_scores.masked_fill(causal_mask.bool(), float("-inf"))
-        return attn_scores
+            return self.mask
+        return None 
 
 
 class MultiheadSelfAttention(nn.Module):
-    """Block-causal self-attention with optional additional masking."""
-
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        assert (
-            self.head_dim * num_heads == embed_dim
-        ), "embed_dim must be divisible by num_heads"
-        """
-        Using single matrix instead of separate matrices for Q, K, V
-        """
-        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=True) #TODO Need to check the advantages/disadvantages of using single matrix
+        assert self.head_dim * num_heads == embed_dim 
+
+        # Packed QKV is standard and efficient
+        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=True) #TODO Is it really efficient? Need to do more research on this later.
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
-
 
     def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor:
         B, L, C = x.shape
         qkv = self.qkv(x)
-        qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim) #TODO Check efficient no of heads needed 
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, L, D)  torch.Size([3, 32, 8, 288, 64])
+        
+        # Reshape to (B, L, 3, H, D) -> Permute to (3, B, H, L, D)
+        qkv = qkv.reshape(B, L, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5) #torch.Size([32, 8, 288, 288])
-        attn_scores = attn_mask.apply(attn_scores)
-        attn = F.softmax(attn_scores, dim=-1)
-        attn = self.dropout(attn)
+        # Get mask for SDPA
+        sdpa_mask = attn_mask.apply_to_sdpa((B, self.num_heads, L, L))
 
-        out = torch.matmul(attn, v) 
-        out = out.transpose(1, 2).reshape(B, L, C)#torch.Size([32, 288, 512])
-        out = self.out_proj(out) # linear layer to combine heads and mix features
+        # Flash Attention / SDPA
+        # Note: If is_causal=True in SDPA, it applies strict triangular masking. 
+        # Since we use Block Causal (custom), we pass is_causal=False and provide the explicit mask.
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=sdpa_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=attn_mask.is_causal if sdpa_mask is None else False 
+        )
+
+        out = out.transpose(1, 2).reshape(B, L, C)
+        out = self.out_proj(out)
         return out
 
 
 class FeedForward(nn.Module):
-    def __init__(self, embed_dim: int, mlp_ratio: float = 4.0, dropout: float = 0.0):
+    def __init__(self, embed_dim: int, mlp_ratio: float, dropout: float):
         super().__init__()
         hidden_dim = int(embed_dim * mlp_ratio)
         self.fc1 = nn.Linear(embed_dim, hidden_dim)
@@ -72,7 +77,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
-        x = F.gelu(x)
+        x = F.gelu(x) #TODO Need to add swiglu activation
         x = self.dropout(x)
         x = self.fc2(x)
         x = self.dropout(x)
@@ -80,8 +85,6 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Standard Pre-LN transformer block with block-causal self-attention."""
-
     def __init__(
         self,
         embed_dim: int,
@@ -95,16 +98,10 @@ class TransformerBlock(nn.Module):
         self.attn = MultiheadSelfAttention(embed_dim, num_heads, dropout)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.ff = FeedForward(embed_dim, mlp_ratio, dropout)
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity() #Drops entire residual connection with probability drop_path
+        # Identity used if drop_path is 0 to avoid graph overhead of unused Dropout layer
+        self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity()
 
-    def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor: #TODO implemenent drop_path to be skipped  during eval/inference. Current implenetaaion will not be skipped during eval. Also current implementeation is wrong fpor drop_path
-        x = x + self.drop_path(self.attn(self.norm1(x), attn_mask)) #TODO  check if resdula ocnnection is implenented correctly
+    def forward(self, x: torch.Tensor, attn_mask: AttentionMask) -> torch.Tensor:
+        x = x + self.drop_path(self.attn(self.norm1(x), attn_mask))
         x = x + self.drop_path(self.ff(self.norm2(x)))
         return x
-
-
-__all__ = [
-    "AttentionMask",
-    "MultiheadSelfAttention",
-    "TransformerBlock",
-]

@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from .config import TokenizerConfig
 from .trainer import TokenizerTrainer, TokenizerTrainingConfig, MaskedAutoencoderLoss
 from .dataset import DatasetFactory
+import wandb
 
 try:
     from mock_data import MovingSquareDataset
@@ -70,8 +71,6 @@ def main(args: Optional[list[str]] = None) -> None:
     parser = build_parser()
     parsed = parser.parse_args(args=args)
 
-    # Initialize WandB
-    import wandb
     wandb.init(
         project=parsed.wandb_project,
         entity=parsed.wandb_entity,

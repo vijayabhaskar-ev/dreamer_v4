@@ -6,7 +6,7 @@ into latent tokens.
 """
 
 from .config import TokenizerConfig
-from .model import MaskedAutoencoderTokenizer
+from .tokenizer import MaskedAutoencoderTokenizer
 from .losses import MaskedAutoencoderLoss
 
 __all__ = [

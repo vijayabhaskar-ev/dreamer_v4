@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from .config import TokenizerConfig
 from .losses import MaskedAutoencoderLoss
-from .model import MaskedAutoencoderTokenizer
+from .tokenizer import MaskedAutoencoderTokenizer
 from PIL import Image
 import wandb
 
