@@ -45,7 +45,7 @@ class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handlin
             target_video = target.view(b * t, *target.shape[2:])
             lpips_val = self.lpips(recon_video, target_video)
             lpips_loss = lpips_val.mean()
-        total = mse_loss if lpips_loss is None else mse_loss +0.2 *  lpips_loss
+        total = mse_loss if lpips_loss is None else mse_loss + 0.2 *  lpips_loss
 
         metrics = {
             "loss/mse": mse_loss.detach(),

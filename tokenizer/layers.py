@@ -71,14 +71,13 @@ class FeedForward(nn.Module):
     def __init__(self, embed_dim: int, mlp_ratio: float, dropout: float):
         super().__init__()
         hidden_dim = int(embed_dim * mlp_ratio)
-        self.fc1 = nn.Linear(embed_dim, hidden_dim)
+        self.fc1 = nn.Linear(embed_dim, 2 * hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = F.gelu(x) #TODO Need to add swiglu activation
-        x = self.dropout(x)
+        x_gate, x_val = self.fc1(x).chunk(2, dim=-1)
+        x = x_val * F.silu(x_gate) 
         x = self.fc2(x)
         x = self.dropout(x)
         return x

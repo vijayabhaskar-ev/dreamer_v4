@@ -56,8 +56,9 @@ class TokenizerTrainer:
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
         checkpoint_dir: Optional[str] = None,
+        start_epoch: int = 1,
     ) -> None:
-        for epoch in range(1, self.training_cfg.epochs + 1):
+        for epoch in range(start_epoch, self.training_cfg.epochs + 1):
             train_metrics = self._run_epoch(train_loader, epoch, training=True) #TODO Need to refacto r this to make sure it runs only duyirng traingin
             val_metrics = None
             if val_loader is not None: #TODO Need to refactor this including _run_epoch
@@ -74,13 +75,14 @@ class TokenizerTrainer:
                 and epoch % self.training_cfg.checkpoint_interval == 0
             ):
                 ckpt_path = f"{checkpoint_dir}/tokenizer_epoch_{epoch:03d}.pt" # TODO: refactor to use a more robust checkpointing strategy
-                self.save_checkpoint(ckpt_path)
+                self.save_checkpoint(ckpt_path, epoch)
                 
                 if val_loader is not None:
                     self.visualize_reconstruction(val_loader, epoch, checkpoint_dir)
 
-    def save_checkpoint(self, path: str) -> None:
+    def save_checkpoint(self, path: str, epoch: int) -> None:
         state = {
+            "epoch": epoch,
             "tokenizer_cfg": self.tokenizer_cfg,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -88,11 +90,13 @@ class TokenizerTrainer:
         torch.save(state, path)
         print(f"Saved tokenizer checkpoint to {path}")
 
-    def load_checkpoint(self, path: str, strict: bool = True) -> None:
+    def load_checkpoint(self, path: str, strict: bool = True) -> int:
         state = torch.load(path, map_location=self.device, weights_only=False) #TODO Need to check the weights_only
         self.model.load_state_dict(state["model"], strict=strict)
         if "optimizer" in state:
             self.optimizer.load_state_dict(state["optimizer"])
+        
+        return state.get("epoch", 0) + 1
 
     def _run_epoch(
         self, loader: DataLoader, epoch: int, training: bool
@@ -131,7 +135,6 @@ class TokenizerTrainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 
-                # Log training metrics per step
                 wandb.log({
                     "train/loss": loss.item(),
                     "train/mse": loss_outputs.mse_loss.item(),
@@ -141,11 +144,9 @@ class TokenizerTrainer:
 
             total_loss += loss_outputs.total_loss.item()
             total_mse += loss_outputs.mse_loss.item()
-            if loss_outputs.lpips_loss is not None: #TODO need to implement LPIPS loss
+            if loss_outputs.lpips_loss is not None:
                 total_lpips += loss_outputs.lpips_loss.item()
             total_steps += 1
-
-            # print(f"Epoch {epoch}, Step {total_steps}, Loss: {loss.item()}")
 
         metrics = {
             "loss/tokenizer_total": total_loss / max(total_steps, 1),

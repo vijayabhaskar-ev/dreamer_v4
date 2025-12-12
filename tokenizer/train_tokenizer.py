@@ -121,10 +121,7 @@ def main(args: Optional[list[str]] = None) -> None:
 
     train_dataset = DatasetFactory.get_dataset(tokenizer_cfg, parsed.batch_size, steps_per_worker)
     
-    # Create DataLoader
-    # Note: For IterableDataset, batch_size must be None in DataLoader if the dataset yields batches
-    # But our factory returns a dataset that yields batches (B, T, C, H, W)
-    # So we set batch_size=None
+
     #TODO Maybe need to modify the dataset factory to yield batches of size batch_size
     train_loader = DataLoader(
         train_dataset,
@@ -132,6 +129,10 @@ def main(args: Optional[list[str]] = None) -> None:
         num_workers=parsed.num_workers, #TODO Need to check the implementation of num_workers. Right now num_workers  > 0 is getting stuck
         pin_memory=True,
     )
+
+    val_steps = max(1, steps_per_worker // 10)  
+    val_dataset = DatasetFactory.get_dataset(tokenizer_cfg, parsed.batch_size, val_steps)
+    val_loader = DataLoader(val_dataset, batch_size=None, num_workers=0, pin_memory=True)
 
     trainer = TokenizerTrainer(
         tokenizer_cfg=tokenizer_cfg,
@@ -146,13 +147,15 @@ def main(args: Optional[list[str]] = None) -> None:
         trainer.evaluate(train_loader, output_dir="evaluation_results")
         return
     
+    start_epoch = 1
     if parsed.resume_from:
-        trainer.load_checkpoint(parsed.resume_from, strict=False)
+        start_epoch = trainer.load_checkpoint(parsed.resume_from, strict=False)
 
     trainer.fit(
         train_loader=train_loader,
-        val_loader=None,
+        val_loader=val_loader,
         checkpoint_dir=parsed.checkpoint_dir,
+        start_epoch=start_epoch,
     )
 
     if parsed.save_final:
