@@ -159,7 +159,7 @@ def main(args: Optional[list[str]] = None) -> None:
     )
 
     if parsed.save_final:
-        trainer.save_checkpoint(parsed.save_final)
+        trainer.save_checkpoint(parsed.save_final, epoch=parsed.epochs)
 
 
 if __name__ == "__main__":
