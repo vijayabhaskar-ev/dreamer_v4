@@ -116,6 +116,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                     dropout=config.dropout,
                     drop_path=config.drop_path,
                     use_temporal=use_temporal,
+                    is_decoder=True,
                 )
             )
         self.decoder_blocks = nn.ModuleList(decoder_blocks)

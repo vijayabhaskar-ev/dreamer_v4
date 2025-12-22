@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -71,10 +72,17 @@ def main(args: Optional[list[str]] = None) -> None:
     parser = build_parser()
     parsed = parser.parse_args(args=args)
 
+    # Generate unique run name if not provided
+    if parsed.wandb_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"{parsed.dataset}_{parsed.task}_{timestamp}"
+    else:
+        run_name = parsed.wandb_name
+
     wandb.init(
         project=parsed.wandb_project,
         entity=parsed.wandb_entity,
-        name=parsed.wandb_name,
+        name=run_name,
         mode="offline" if parsed.wandb_offline else "online",
         config=vars(parsed),
     )

@@ -28,7 +28,7 @@ class AttentionMask:
         return None 
 
 
-class MultiheadSelfAttention(nn.Module):
+class MultiheadSelfAttention(nn.Module): #TODO Remove it after final implementation
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         self.embed_dim = embed_dim
@@ -123,6 +123,68 @@ class LatentCrossAttention(nn.Module):
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=sdpa_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+        )
+        
+        out = out.transpose(1, 2).reshape(B, L_q, C)
+        out = self.out_proj(out)
+        return out
+
+
+class PatchToLatentCrossAttention(nn.Module):
+    """
+    Cross-attention for decoder patches to read from latent tokens (DreamerV4 decoder).
+    
+    Per DreamerV4 paper: "each decoder modality attends within itself and to the latents"
+    
+    Q: from patches (decoder queries)
+    K, V: from latent tokens (z_latents)
+    
+    This allows the decoder to reconstruct images by reading compressed info from latents.
+    """
+    
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim
+        
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(
+        self, 
+        patches: torch.Tensor, 
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            patches: Decoder query tokens (B, T*N, D) - these are the queries
+            latents: Latent tokens (B, L, D) - these are K, V
+        
+        Returns:
+            Updated patch tokens (B, T*N, D)
+        """
+        B, L_q, C = patches.shape
+        _, L_kv, _ = latents.shape
+        
+        # Project Q from patches, K/V from latents
+        q = self.q_proj(patches)
+        k = self.k_proj(latents)
+        v = self.v_proj(latents)
+        
+        # Reshape for multi-head attention
+        q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_q, D)
+        k = k.view(B, L_kv, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_kv, D)
+        v = v.view(B, L_kv, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_kv, D)
+        
+        # No mask needed - all patches can attend to all latents freely
+        out = F.scaled_dot_product_attention(
+            q, k, v,
             dropout_p=self.dropout.p if self.training else 0.0,
         )
         
@@ -264,8 +326,13 @@ class TransformerBlock(nn.Module):
     DreamerV4-style Transformer Block with factorized spatial-temporal attention.
     
     Architecture per DreamerV4 paper:
-    - Latent tokens: cross-attention to ALL tokens (latents + patches) with block causal mask
-    - Patch tokens: factorized spatial + temporal attention
+    - Encoder: Latent tokens cross-attend to ALL tokens (latents + patches)
+              Patch tokens do spatial + temporal self-attention only
+    - Decoder: Latent tokens attend within themselves
+              Patch tokens do spatial + temporal self-attention AND cross-attend to latents
+    
+    Per the paper: "each decoder modality attends within itself and to the latents,
+                   while the latents only attend within themselves."
     """
     def __init__(
         self,
@@ -274,17 +341,26 @@ class TransformerBlock(nn.Module):
         mlp_ratio: float,
         dropout: float,
         drop_path: float,
-        use_temporal: bool = False, 
+        use_temporal: bool = False,
+        is_decoder: bool = False,
     ):
         super().__init__()
         self.use_temporal = use_temporal
+        self.is_decoder = is_decoder
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         
-        # For latent tokens: cross-attention to all tokens
-        self.latent_norm = nn.LayerNorm(embed_dim)
-        self.context_norm = nn.LayerNorm(embed_dim)
-        self.latent_cross_attn = LatentCrossAttention(embed_dim, num_heads, dropout)
+        # For latent tokens: cross-attention to all tokens (encoder only)
+        if not is_decoder:
+            self.latent_norm = nn.LayerNorm(embed_dim)
+            self.context_norm = nn.LayerNorm(embed_dim)
+            self.latent_cross_attn = LatentCrossAttention(embed_dim, num_heads, dropout)
+        
+        # For decoder: patches cross-attend to latents
+        if is_decoder:
+            self.patch_to_latent_norm = nn.LayerNorm(embed_dim)
+            self.latent_kv_norm = nn.LayerNorm(embed_dim)
+            self.patch_to_latent_attn = PatchToLatentCrossAttention(embed_dim, num_heads, dropout)
         
         # For patch tokens: spatial attention
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -320,30 +396,40 @@ class TransformerBlock(nn.Module):
             latents = x[:, :num_latents, :]
             patches = x[:, num_latents:, :]
             
-            # 1. Latent cross-attention: latents attend to ALL tokens
-            context = torch.cat([latents, patches], dim=1)  # Full sequence
-            latents = latents + self.drop_path(
-                self.latent_cross_attn(
-                    self.latent_norm(latents), 
-                    self.context_norm(context),
-                    latent_cross_mask
+            if self.is_decoder:
+                # DECODER: patches cross-attend to latents (read compressed info)
+                # Per paper: "each decoder modality attends within itself and to the latents"
+                patches = patches + self.drop_path(
+                    self.patch_to_latent_attn(
+                        self.patch_to_latent_norm(patches),
+                        self.latent_kv_norm(latents),
+                    )
                 )
-            )
+                # Latents in decoder don't update - they only serve as keys/values
+            else:
+                # ENCODER: latents cross-attend to all tokens
+                context = torch.cat([latents, patches], dim=1)
+                latents = latents + self.drop_path(
+                    self.latent_cross_attn(
+                        self.latent_norm(latents), 
+                        self.context_norm(context),
+                        latent_cross_mask
+                    )
+                )
             
-            # 2. Spatial attention: patches attend to same-frame patches
+            # Spatial attention for patches (both encoder and decoder)
             patches = patches + self.drop_path(
                 self.spatial_attn(self.norm1(patches), num_frames)
             )
             
-            # 3. Temporal attention: same position across frames (if enabled)
+            # Temporal attention for patches (both encoder and decoder)
             if self.use_temporal:
                 patches = patches + self.drop_path(
                     self.temporal_attn(self.norm_temporal(patches), num_frames, temporal_mask)
                 )
             
             x = torch.cat([latents, patches], dim=1)
-        else: 
-            # No latent tokens, just patches
+        else: #TODO May be remove this else block if not needed 
             x = x + self.drop_path(self.spatial_attn(self.norm1(x), num_frames))
             
             if self.use_temporal:
