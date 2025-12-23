@@ -88,6 +88,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                     dropout=config.dropout,
                     drop_path=config.drop_path,
                     use_temporal=use_temporal,
+                    num_kv_heads=config.num_kv_heads,
                 )
             )
         self.blocks = nn.ModuleList(encoder_blocks)
@@ -117,6 +118,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                     drop_path=config.drop_path,
                     use_temporal=use_temporal,
                     is_decoder=True,
+                    num_kv_heads=config.num_kv_heads,
                 )
             )
         self.decoder_blocks = nn.ModuleList(decoder_blocks)

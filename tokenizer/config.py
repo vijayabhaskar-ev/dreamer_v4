@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 
 @dataclass
@@ -12,6 +12,7 @@ class TokenizerConfig:
     embed_dim: int = 512
     depth: int = 8
     num_heads: int = 8
+    num_kv_heads: int = 2  # GQA: if < num_heads, enables grouped query attention
     # Dataset
     dataset_name: str = "dm_control"
     task_name: str = "cheetah_run"
