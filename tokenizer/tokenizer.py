@@ -92,7 +92,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                 )
             )
         self.blocks = nn.ModuleList(encoder_blocks)
-        self.norm = nn.LayerNorm(config.embed_dim)
+        self.norm = nn.RMSNorm(config.embed_dim)
 
         # Temporal Embedding
         self.max_frames = 32 #TODO add as config param
@@ -122,7 +122,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                 )
             )
         self.decoder_blocks = nn.ModuleList(decoder_blocks)
-        self.decoder_norm = nn.LayerNorm(config.embed_dim) #why two serprate layernorm for encoder and decoder?
+        self.decoder_norm = nn.RMSNorm(config.embed_dim) 
         
         self.to_pixels = nn.Linear(
             config.embed_dim, 

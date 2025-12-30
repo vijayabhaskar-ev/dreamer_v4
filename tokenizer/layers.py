@@ -454,35 +454,35 @@ class TransformerBlock(nn.Module):
         
         # For latent tokens: cross-attention to all tokens (encoder only)
         if not is_decoder:
-            self.latent_norm = nn.LayerNorm(embed_dim)
-            self.context_norm = nn.LayerNorm(embed_dim)
+            self.latent_norm = nn.RMSNorm(embed_dim)
+            self.context_norm = nn.RMSNorm(embed_dim)
             self.latent_cross_attn = LatentCrossAttention(
                 embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
             )
         
         # For decoder: patches cross-attend to latents
         if is_decoder:
-            self.patch_to_latent_norm = nn.LayerNorm(embed_dim)
-            self.latent_kv_norm = nn.LayerNorm(embed_dim)
+            self.patch_to_latent_norm = nn.RMSNorm(embed_dim)
+            self.latent_kv_norm = nn.RMSNorm(embed_dim)
             self.patch_to_latent_attn = PatchToLatentCrossAttention(
                 embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
             )
         
         # For patch tokens: spatial attention (with GQA support)
-        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm1 = nn.RMSNorm(embed_dim)
         self.spatial_attn = SpatialAttention(
             embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
         )
         
         # For patch tokens: temporal attention (every Nth layer, with GQA support)
         if use_temporal:
-            self.norm_temporal = nn.LayerNorm(embed_dim)
+            self.norm_temporal = nn.RMSNorm(embed_dim)
             self.temporal_attn = TemporalAttention(
                 embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
             )
         
         # Shared feed-forward
-        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.RMSNorm(embed_dim)
         self.ff = FeedForward(embed_dim, mlp_ratio, dropout)
         self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity()
 
