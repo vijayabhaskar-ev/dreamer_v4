@@ -113,7 +113,7 @@ class TokenizerTrainer:
             if frames.dim() == 4: #TODO change it after intial implementation
                 frames = frames.unsqueeze(1)
 
-            with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
+            with torch.cuda.amp.autocast(enabled=self.training_cfg.amp): #TODO Replace the deprecated class
                 outputs = self.model(frames)
                 loss_outputs = self.loss_module(
                     recon=outputs.reconstructed,

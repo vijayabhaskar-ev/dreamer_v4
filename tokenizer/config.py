@@ -25,14 +25,14 @@ class TokenizerConfig:
     drop_path: float = 0.1 #TODO Dreawer v4 uses droppath instead of dropout. Need to check the implementation of drop_path after completion of the tokenizer
     mask_prob_min: float = 0.0
     mask_prob_max: float = 0.9
-    latent_dim: int = 1024
+    latent_dim: int = 64
     num_latent_tokens: int = 32 #TODO Should mopdify the num_latent_tokens based on the image size and patch size. Maybe compute it dyamically?
     learned_cls_tokens: int = 0 #TODO Not used in dreamer v4/ MAE
     reconstruction_loss: Literal["mse_lpips"] = "mse" #TODO FOr inital debugging chnageing this pnly to MSE and not mse_lpips
     norm_loss_by: Literal["pixels", "tokens"] = "pixels"
     tokenizer_lr: float = 1e-4 #TODO Adjust base don the normaal size. Need to check the implementation of tokenizer_lr after completion of the tokenizer
     weight_decay: float = 0.05
-    lpips_net: Literal["vgg", "alex", "squeeze"] = "vgg" #TODO Need to check the implementation of lpips_net after  completion of the tokenizer
+    lpips_net: Literal["vgg", "alex", "squeeze"] = "alex" #TODO Need to check the implementation of lpips_net after  completion of the tokenizer
     use_grad_checkpoint: bool = False #TODO Do more research on this
 
 

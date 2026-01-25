@@ -3,11 +3,116 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class RotaryPositionEmbedding(nn.Module):
+
+    
+    def __init__(self, dim: int, max_positions: int = 512, base: float = 10000.0):
+        """
+        Args:
+            dim: Dimension per head (head_dim).
+            max_positions: Maximum sequence length to precompute embeddings for.
+            base: Base for frequency computation (default 10000 per RoPE paper).
+        """
+        super().__init__()
+        assert dim % 2 == 0, f"RoPE dim must be even, got {dim}"
+        self.dim = dim
+        self.max_positions = max_positions
+        self.base = base
+        
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        self._cos_cached: Optional[torch.Tensor] = None
+        self._sin_cached: Optional[torch.Tensor] = None
+        self._cached_seq_len: int = 0
+    
+    def _update_cache(self, seq_len: int, device: torch.device, dtype: torch.dtype):
+        """Update cos/sin cache if needed."""
+        if seq_len > self._cached_seq_len or self._cos_cached is None:
+            self._cached_seq_len = max(seq_len, self.max_positions)
+            
+            t = torch.arange(self._cached_seq_len, device=device, dtype=dtype)
+            
+            freqs = torch.outer(t, self.inv_freq.to(device=device, dtype=dtype))
+            
+            # Duplicate for both sin and cos application: (seq_len, dim)
+            emb = torch.cat([freqs, freqs], dim=-1)
+            
+            # Cache: (1, seq_len, 1, dim) for broadcasting with (B, L, H, D)
+            self._cos_cached = emb.cos()[None, :, None, :]
+            self._sin_cached = emb.sin()[None, :, None, :]
+    
+    def forward(
+        self, 
+        seq_len: int, 
+        device: torch.device, 
+        dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get cos and sin embeddings for positions [0, seq_len).
+        
+        Args:
+            seq_len: Sequence length
+            device: Target device
+            dtype: Target dtype
+            
+        Returns:
+            (cos, sin) tensors of shape (1, seq_len, 1, dim)
+        """
+        self._update_cache(seq_len, device, dtype)
+        return (
+            self._cos_cached[:, :seq_len, :, :].to(dtype),
+            self._sin_cached[:, :seq_len, :, :].to(dtype),
+        )
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """
+    Rotates half the hidden dims of the input.
+    [x1, x2, x3, x4, ...] -> [-x_{d/2+1}, -x_{d/2+2}, ..., x1, x2, ...]
+    
+    This is used for the RoPE rotation formula.
+    """
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat([-x2, x1], dim=-1)
+
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor, 
+    k: torch.Tensor, 
+    cos: torch.Tensor, 
+    sin: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply Rotary Position Embedding to Q and K tensors.
+    
+    Formula for each position m and dimension pair:
+        q_rot = q * cos(m*theta) + rotate_half(q) * sin(m*theta)
+        k_rot = k * cos(m*theta) + rotate_half(k) * sin(m*theta)
+    
+    Args:
+        q: Query tensor of shape (B, H, L, D) or (B, L, H, D)
+        k: Key tensor of shape (B, H, L, D) or (B, L, H, D)  
+        cos: Cosine embeddings of shape (1, L, 1, D)
+        sin: Sine embeddings of shape (1, L, 1, D)
+        
+    Returns:
+        (q_rotated, k_rotated) with same shapes as inputs
+    """
+    # q, k are (B, H, L, D) - need to match cos/sin (1, L, 1, D)
+    # Transpose to (B, L, H, D) for broadcasting, then transpose back
+    q_embed = (q.transpose(1, 2) * cos) + (rotate_half(q.transpose(1, 2)) * sin)
+    k_embed = (k.transpose(1, 2) * cos) + (rotate_half(k.transpose(1, 2)) * sin)
+    
+    return q_embed.transpose(1, 2), k_embed.transpose(1, 2)
 
 
 @dataclass
@@ -24,6 +129,10 @@ class AttentionMask:
         # If we have a custom mask (like block causal), we return it.
         # SDPA expects a float mask (added to scores) or a bool mask (True positions are masked out).
         if self.mask is not None:
+            # Convert boolean mask to float mask (0.0 for FaIse/Attend, -inf for True/Masked)
+            # This avoids issues where SDPA behaves inconsistently with all-False boolean masks
+            if self.mask.dtype == torch.bool:
+                return torch.zeros_like(self.mask, dtype=torch.float32).masked_fill_(self.mask, float("-inf"))
             return self.mask
         return None 
 
@@ -242,13 +351,15 @@ class SpatialAttention(nn.Module):
         embed_dim: int, 
         num_heads: int, 
         num_kv_heads: Optional[int] = None,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        rope: Optional[RotaryPositionEmbedding] = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_dim = embed_dim // num_heads
+        self.rope = rope
         
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         assert num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
@@ -281,6 +392,12 @@ class SpatialAttention(nn.Module):
         # Reshape K, V with num_kv_heads
         k = k.view(BT, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BT, Hkv, N, D)
         v = v.view(BT, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BT, Hkv, N, D)
+        
+        # Apply RoPE to Q and K (before GQA head repetition for K)
+        if self.rope is not None:
+            cos, sin = self.rope(N, q.device, q.dtype)
+            # RoPE applied to full Q heads and KV heads separately
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         # GQA: Repeat K, V heads to match Q heads if num_kv_heads < num_heads
         if self.num_kv_heads < self.num_heads:
@@ -318,13 +435,15 @@ class TemporalAttention(nn.Module):
         embed_dim: int, 
         num_heads: int, 
         num_kv_heads: Optional[int] = None,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        rope: Optional[RotaryPositionEmbedding] = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_dim = embed_dim // num_heads
+        self.rope = rope
         
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         assert num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
@@ -376,6 +495,12 @@ class TemporalAttention(nn.Module):
         # Reshape K, V with num_kv_heads
         k = k.view(BN, T, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BN, Hkv, T, D)
         v = v.view(BN, T, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BN, Hkv, T, D)
+        
+        # Apply RoPE to Q and K (before GQA head repetition for K)
+        if self.rope is not None:
+            cos, sin = self.rope(T, q.device, q.dtype)
+            # RoPE applied to full Q heads and KV heads separately
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         # GQA: Repeat K, V heads to match Q heads if num_kv_heads < num_heads
         if self.num_kv_heads < self.num_heads:
@@ -444,6 +569,8 @@ class TransformerBlock(nn.Module):
         use_temporal: bool = False,
         is_decoder: bool = False,
         num_kv_heads: Optional[int] = None,
+        rope_spatial: Optional[RotaryPositionEmbedding] = None,
+        rope_temporal: Optional[RotaryPositionEmbedding] = None,
     ):
         super().__init__()
         self.use_temporal = use_temporal
@@ -468,17 +595,19 @@ class TransformerBlock(nn.Module):
                 embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
             )
         
-        # For patch tokens: spatial attention (with GQA support)
+        # For patch tokens: spatial attention (with GQA and RoPE support)
         self.norm1 = nn.RMSNorm(embed_dim)
         self.spatial_attn = SpatialAttention(
-            embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
+            embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout,
+            rope=rope_spatial,
         )
         
-        # For patch tokens: temporal attention (every Nth layer, with GQA support)
+        # For patch tokens: temporal attention (every Nth layer, with GQA and RoPE support)
         if use_temporal:
             self.norm_temporal = nn.RMSNorm(embed_dim)
             self.temporal_attn = TemporalAttention(
-                embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
+                embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout,
+                rope=rope_temporal,
             )
         
         # Shared feed-forward

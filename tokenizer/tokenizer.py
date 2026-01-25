@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from .config import TokenizerConfig
-from .layers import AttentionMask, TransformerBlock
+from .layers import AttentionMask, RotaryPositionEmbedding, TransformerBlock
 from .masking import apply_mask, sample_random_mask
 
 
@@ -36,7 +36,7 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Linear(patch_dim, config.embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, T, C, H, W)
+
         b, t, c, h, w = x.shape
         ph, pw = self.patch_size
         x = x.reshape(b * t, c, h, w)
@@ -61,8 +61,11 @@ class LatentTokenEmbedding(nn.Module):
             torch.randn(1, config.num_latent_tokens, config.embed_dim) * 0.02
         )
 
-    def forward(self, batch: int) -> torch.Tensor:
-        return self.latent_tokens.expand(batch, -1, -1)
+    def forward(self, batch: int, num_frames:int) -> torch.Tensor:
+        latents = self.latent_tokens.expand(batch, -1, -1)
+        latents = latents.unsqueeze(1).expand(-1, num_frames, -1, -1)  # (B, T, 32, D)
+        latents = latents.flatten(1, 2) 
+        return latents
 
 
 class MaskedAutoencoderTokenizer(nn.Module):
@@ -70,12 +73,23 @@ class MaskedAutoencoderTokenizer(nn.Module):
         super().__init__()
         self.config = config
         self.patch_embed = PatchEmbed(config)
-        self.pos_embed = nn.Parameter( #TODO add ROPE
-            torch.randn(1, self.patch_embed.num_patches(), config.embed_dim) * 0.02
-        )
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
         self.latent_tokens = LatentTokenEmbedding(config)
 
+        # RoPE for relative position encoding in attention
+        head_dim = config.embed_dim // config.num_heads
+        self.rope_spatial = RotaryPositionEmbedding(
+            dim=head_dim,
+            max_positions=self.patch_embed.num_patches(),
+            base=10000.0,
+        )
+        self.rope_temporal = RotaryPositionEmbedding(
+            dim=head_dim,
+            max_positions=64,  # Max frames
+            base=10000.0,
+        )
+        
+      
         self.temporal_interval = 4  # TODO Make this a config param
         encoder_blocks = []
         for i in range(config.depth):
@@ -89,21 +103,20 @@ class MaskedAutoencoderTokenizer(nn.Module):
                     drop_path=config.drop_path,
                     use_temporal=use_temporal,
                     num_kv_heads=config.num_kv_heads,
+                    rope_spatial=self.rope_spatial,
+                    rope_temporal=self.rope_temporal,
                 )
             )
         self.blocks = nn.ModuleList(encoder_blocks)
         self.norm = nn.RMSNorm(config.embed_dim)
 
-        # Temporal Embedding
-        self.max_frames = 32 #TODO add as config param
-        self.temporal_embed = nn.Parameter(torch.zeros(1, self.max_frames, 1, config.embed_dim))
-        torch.nn.init.trunc_normal_(self.temporal_embed, std=0.02)
-
         # Bottleneck
-        self.latent_proj = nn.Linear(config.embed_dim, config.embed_dim)
+        self.latent_proj = nn.Linear(config.embed_dim, config.latent_dim)
+        self.latent_expand = nn.Linear(config.latent_dim, config.embed_dim)
+
 
         # Decoder Setup
-        self.decoder_queries = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
+        self.decoder_queries = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches(), config.embed_dim))
         torch.nn.init.normal_(self.decoder_queries, std=0.02)
 
         decoder_blocks = []
@@ -119,6 +132,8 @@ class MaskedAutoencoderTokenizer(nn.Module):
                     use_temporal=use_temporal,
                     is_decoder=True,
                     num_kv_heads=config.num_kv_heads,
+                    rope_spatial=self.rope_spatial,
+                    rope_temporal=self.rope_temporal,
                 )
             )
         self.decoder_blocks = nn.ModuleList(decoder_blocks)
@@ -127,9 +142,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
         self.to_pixels = nn.Linear(
             config.embed_dim, 
             self.patch_embed.patch_size[0] * self.patch_embed.patch_size[1] * config.in_channels
-        )
-
-  
+        )  
     def forward(
         self,
         frames: torch.Tensor,
@@ -137,17 +150,13 @@ class MaskedAutoencoderTokenizer(nn.Module):
     ) -> TokenizerOutputs:
         batch, t, c, h, w = frames.shape
         
-        patches = self.patch_embed(frames) # (B, T*N, D)
+        # Patchify frames
+        patches = self.patch_embed(frames)  # (B, T*N, D)
         
-        n_patches_per_frame = self.patch_embed.num_patches() #TODO Refactor position embedding for both encoder and decoder
-        pos = self.pos_embed[:, :n_patches_per_frame, :].repeat(1, t, 1) #TODO add ROPE
-        patches = patches + pos
-
-        temp_embed = self._get_temporal_embed(t) # (1, T, 1, D)
-        temp_broadcast = temp_embed.expand(-1, -1, n_patches_per_frame, -1).reshape(1, t * n_patches_per_frame, -1)
-        patches = patches + temp_broadcast
-
-        latent_tokens = self.latent_tokens(batch) # (B, L, D)
+        
+        latent_tokens = self.latent_tokens(batch, t)  # (B, L, D)
+        latents_per_frame = self.config.num_latent_tokens  # 32
+        total_latents = latent_tokens.size(1)  # T * 32 = 128
         
         if mask is None:
              mask = sample_random_mask(
@@ -174,7 +183,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
         # Build latent cross-attention mask (latents attend to all tokens)
         num_latents = latent_tokens.size(1)
         num_patches = masked_patches.size(1)
-        latent_cross_mask = self._build_latent_cross_mask(num_latents, num_patches, t, frames.device)
+        latent_cross_mask = self._build_latent_cross_mask(latents_per_frame, num_patches, t, frames.device)
         latent_cross_attn_mask = AttentionMask(is_causal=False, mask=latent_cross_mask)
         
         # --- 4. Encoder Forward ---
@@ -184,21 +193,22 @@ class MaskedAutoencoderTokenizer(nn.Module):
                 num_frames=t, 
                 temporal_mask=temporal_attn_mask,
                 latent_cross_mask=latent_cross_attn_mask,
-                num_latents=num_latents,
+                num_latents=total_latents,
             )
         encoder_sequence = self.norm(encoder_sequence)
 
         # Extract Latents and bottleneck
-        z_latents = encoder_sequence[:, :num_latents, :]
+        z_latents = encoder_sequence[:, :total_latents, :]
         z_latents = torch.tanh(self.latent_proj(z_latents))
+        z_expanded = self.latent_expand(z_latents) 
 
         # --- 5. Decoder Preparation ---
-        # Decoder Input: [Latents, Decoder Queries]
-        # Queries need pos + temp info
-        decoder_queries = self.decoder_queries.expand(batch, t * n_patches_per_frame, -1) 
-        decoder_queries = decoder_queries + pos + temp_broadcast
+        # Decoder queries with spatial and temporal position embeddings
+        decoder_queries = self.decoder_queries.expand(batch, -1, -1)
+        decoder_queries = decoder_queries.unsqueeze(1).expand(-1, t, -1, -1)  # (B, T, N, D)
+        decoder_queries = decoder_queries.flatten(1, 2)  # (B, T*N, D)
         
-        decoder_sequence = torch.cat([z_latents, decoder_queries], dim=1)
+        decoder_sequence = torch.cat([z_expanded, decoder_queries], dim=1)
         
         # --- 6. Decoder Forward ---
         x = decoder_sequence
@@ -208,12 +218,12 @@ class MaskedAutoencoderTokenizer(nn.Module):
                 num_frames=t, 
                 temporal_mask=temporal_attn_mask,
                 latent_cross_mask=latent_cross_attn_mask,
-                num_latents=num_latents,
+                num_latents=total_latents,
             )
         x = self.decoder_norm(x)
         
         # Extract pixels from query positions
-        recon_tokens = x[:, num_latents:, :]
+        recon_tokens = x[:, total_latents:, :]
         recon_patches = self.to_pixels(recon_tokens)
         recon_frames = self._unpatchify(recon_patches, frames.shape)
 
@@ -227,17 +237,6 @@ class MaskedAutoencoderTokenizer(nn.Module):
 
 
 
-    def _get_temporal_embed(self, t: int) -> torch.Tensor:
-        """Safe retrieval of temporal embeddings with truncation/interpolation."""
-        if t <= self.max_frames:
-            return self.temporal_embed[:, :t, :, :]
-        else:
-            # Simple interpolation for T > max_frames
-            # (1, MaxT, 1, D) -> (1, D, MaxT, 1) -> Interpolate -> (1, T, 1, D)
-            permuted = self.temporal_embed.permute(0, 3, 1, 2)
-            interp = torch.nn.functional.interpolate(permuted, size=(t, 1), mode='bilinear')
-            return interp.permute(0, 2, 3, 1)
-
     def _build_temporal_causal_mask(self, t: int, device: torch.device) -> torch.Tensor:
         frame_idx = torch.arange(t, device=device)
         q_frames = frame_idx.unsqueeze(1)  # (T, 1)
@@ -248,7 +247,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
 
     def _build_latent_cross_mask(
         self, 
-        num_latents: int, 
+        latents_per_frame: int, 
         num_patches: int, 
         t: int, 
         device: torch.device
@@ -257,29 +256,37 @@ class MaskedAutoencoderTokenizer(nn.Module):
         Build block causal mask for latent cross-attention.
         
         Latents (queries) attend to all tokens (keys) with block causal constraints:
-        - Latents can attend to all other latents (no mask)
+        - Latents can attend to all other latents (no mask logic applied here for latents keys)
         - Latents can attend to patches with block causal (past/current frames only)
         
         Shape: (L, L+T*N) where L=num_latents, T*N=num_patches
         """
-        total_kv = num_latents + num_patches
+        total_latents = t * latents_per_frame  
+        total_kv = total_latents + num_patches
+        patches_per_frame = num_patches // t
+
         
-        # Start with no masking (False = can attend)
-        mask = torch.zeros(num_latents, total_kv, dtype=torch.bool, device=device)
+        mask = torch.zeros(total_latents, total_kv, dtype=torch.bool, device=device)
         
-        # For the patch portion, apply block causal masking
-        # Latent i can see patch from frame j only if j <= i's corresponding frame
-        # For simplicity, we allow latents to see all past/current frame patches
-        # This means latent tokens see all patches (no strict per-latent causality)
         
-        # Actually per DreamerV4: latents attend to everything with block causal
-        # The "block causal" means patches from future frames are masked
-        # Since latents don't have a "frame", we let them see all available context
-        # This is effectively: latents see [all latents, all patches up to current context]
+        # Latent frame indices: shape (L, 1)
+        latent_frames_q = torch.arange(total_latents, device=device) // latents_per_frame
+        latent_frames_q = latent_frames_q.unsqueeze(1)
         
-        # For the encoder, all patches are available (masked tokens replaced)
-        # For the decoder, we use same mask pattern
-        # No additional masking needed here - latents see full context
+        # Latent key frame indices: shape (1, L)
+        latent_frames_k = torch.arange(total_latents, device=device) // latents_per_frame
+        latent_frames_k = latent_frames_k.unsqueeze(0)
+        
+        # Patch frame indices: shape (1, P)
+        patch_frames = torch.arange(num_patches, device=device) // patches_per_frame
+        patch_frames = patch_frames.unsqueeze(0)
+        
+        patch_mask = patch_frames > latent_frames_q
+        
+        latent_mask = latent_frames_k > latent_frames_q
+        
+        mask[:, :total_latents] = latent_mask
+        mask[:, total_latents:] = patch_mask
         
         return mask
 
