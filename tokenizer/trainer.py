@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from .config import TokenizerConfig
 from .losses import MaskedAutoencoderLoss
 from .tokenizer import MaskedAutoencoderTokenizer
+from .metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
 from PIL import Image
 import wandb
 
@@ -25,6 +26,12 @@ class TokenizerTrainingConfig: #TODO Need to move this to config.py
     amp: bool = False
     checkpoint_interval: int = 1
     device: str = "cuda"
+    # Logging configuration
+    log_interval: int = 10          # Log every N steps
+    log_smooth_window: int = 10     # Rolling average window size
+    log_model_stats: bool = True    # Log weight/gradient statistics
+    log_model_stats_interval: int = 50   # Model stats every N steps
+    log_memory: bool = True         # Track GPU memory
 
 
 class TokenizerTrainer:
@@ -50,6 +57,10 @@ class TokenizerTrainer:
             weight_decay=training_cfg.weight_decay,
         )
         self.scaler = torch.cuda.amp.GradScaler(enabled=training_cfg.amp)
+        
+        self.global_step = 0
+        self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
+        self.throughput_tracker = ThroughputTracker()
 
     def fit(
         self,
@@ -101,11 +112,23 @@ class TokenizerTrainer:
     def _run_epoch(
         self, loader: DataLoader, epoch: int, training: bool
     ) -> Dict[str, float]:
+        """        
+        Logs include:
+        - Smoothed losses (MSE, LPIPS, total)
+        - Gradient norms (useful for detecting exploding/vanishing gradients)
+        - Optimizer state (learning rate, AMP scale)
+        - Model statistics (weight norms by layer type)
+        - GPU memory utilization
+        - Training throughput (samples/sec)
+        """
         self.model.train(training)
         total_loss = 0.0
         total_mse = 0.0
         total_lpips = 0.0
         total_steps = 0
+        
+        log_interval = self.training_cfg.log_interval
+        model_stats_interval = self.training_cfg.log_model_stats_interval
         
         for batch in loader:
             #save_debug_gif(batch, "test_pipeline.gif")
@@ -128,33 +151,69 @@ class TokenizerTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
+                
+                # clip_grad_norm_ returns the pre-clip gradient norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     self.training_cfg.grad_clip,
                 )
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 
-                wandb.log({
+                self.global_step += 1
+                
+                # Always update smoothing buffer
+                self.metrics_buffer.update({
                     "train/loss": loss.item(),
                     "train/mse": loss_outputs.mse_loss.item(),
                     "train/lpips": loss_outputs.lpips_loss.item() if loss_outputs.lpips_loss is not None else 0.0,
-                    "epoch": epoch,
+                    "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                    "train/mask_ratio": loss_outputs.mask_ratio.item(),
                 })
+                
+                # Log smoothed metrics every N steps
+                if self.global_step % log_interval == 0:
+                    metrics = self.metrics_buffer.get_averages()
+                    
+                    # Optimizer state
+                    metrics.update({
+                        "train/lr": self.optimizer.param_groups[0]['lr'],
+                        "train/scale": self.scaler.get_scale(),
+                        "epoch": epoch,
+                        "global_step": self.global_step,
+                        "samples_seen": self.global_step * frames.size(0),
+                    })
+                    
+                    # Throughput metrics
+                    metrics.update(self.throughput_tracker.step(frames.size(0)))
+                    
+                    # GPU memory tracking
+                    if self.training_cfg.log_memory:
+                        metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
+                    
+                    # Model statistics (less frequently to reduce overhead)
+                    if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
+                        metrics.update(ModelStatistics.compute_weight_stats(self.model))
+                        metrics.update(ModelStatistics.compute_gradient_stats(self.model))
+                    
+                    wandb.log(metrics, step=self.global_step)
 
+            # Accumulate for epoch-level metrics
             total_loss += loss_outputs.total_loss.item()
             total_mse += loss_outputs.mse_loss.item()
             if loss_outputs.lpips_loss is not None:
                 total_lpips += loss_outputs.lpips_loss.item()
             total_steps += 1
 
-        metrics = {
+        # Epoch-level aggregated metrics
+        epoch_metrics = {
             "loss/tokenizer_total": total_loss / max(total_steps, 1),
             "loss/tokenizer_mse": total_mse / max(total_steps, 1),
         }
         if total_lpips > 0:
-            metrics["loss/tokenizer_lpips"] = total_lpips / max(total_steps, 1)
-        return metrics
+            epoch_metrics["loss/tokenizer_lpips"] = total_lpips / max(total_steps, 1)
+        return epoch_metrics
 
     @torch.no_grad()
     def evaluate(self, val_loader: DataLoader, output_dir: str = "evaluation_results") -> Dict[str, float]:
@@ -225,43 +284,46 @@ class TokenizerTrainer:
         self.model.eval()
         batch = next(iter(val_loader))
         frames = batch.to(self.device)
-        if frames.dim() == 4: frames = frames.unsqueeze(1)
+        if frames.dim() == 4:
+            frames = frames.unsqueeze(1)
 
-        # Calculate sequence length dynamically
         b, t, c, h, w = frames.shape
         ph, pw = self.tokenizer_cfg.patch_size
         num_patches = (h // ph) * (w // pw)
         seq_len = t * num_patches
 
-        # Use a high mask ratio to see if the model actually "learned" structure
-        # or is just copying unmasked patches.
         from .masking import sample_random_mask
-        mask = sample_random_mask(frames.size(0), seq_len, 0.75, 0.75, self.device) #TODO Need to do more research  on the masking ratio during evaluatiom'
-        
-        outputs = self.model(frames, mask=mask)
-        
-        # Unnormalize if your data was normalized (e.g., mean/std)
-        # Assuming data is 0-1 or -1 to 1.
-        
-        recon = outputs.reconstructed
-        
         import wandb
-        from PIL import Image
-        
-        # Take first video of first batch item
-        # frames: (B, T, C, H, W) -> (T, C, H, W)
+
         original = frames[0]
-        reconstruction = recon[0]
-        
-        # Stitch side-by-side: (T, C, H, W*2)
-        combined = torch.cat([original, reconstruction], dim=3) 
-        
-        save_path = f"{save_dir}/epoch_{epoch}_recon.gif"
-        save_video_grid(combined, save_path)
-        
-        # Log to WandB as a video
-        # WandB expects (T, C, H, W) or path
-        wandb.log({"eval/reconstruction": wandb.Video(save_path, caption=f"Epoch {epoch} Reconstruction", fps=10, format="gif")})
+
+        # === 1. TRUE RECONSTRUCTION (no masking) ===
+        # This shows the actual autoencoder quality through the bottleneck
+        mask_none = torch.zeros(b, seq_len, dtype=torch.bool, device=self.device)
+        outputs_clean = self.model(frames, mask=mask_none)
+
+        recon_clean = outputs_clean.reconstructed[0]
+        combined_clean = torch.cat([original, recon_clean], dim=3)
+
+        clean_path = f"{save_dir}/epoch_{epoch}_recon_clean.gif"
+        save_video_grid(combined_clean, clean_path)
+        wandb.log({
+            "eval/reconstruction_clean": wandb.Video(clean_path, caption=f"Epoch {epoch} - No Mask", fps=10, format="gif")
+        })
+
+        # === 2. MASKED RECONSTRUCTION (75% masking) ===
+        # This shows the model's ability to fill in missing information
+        mask_high = sample_random_mask(b, seq_len, 0.75, 0.75, self.device)
+        outputs_masked = self.model(frames, mask=mask_high)
+
+        recon_masked = outputs_masked.reconstructed[0]
+        combined_masked = torch.cat([original, recon_masked], dim=3)
+
+        masked_path = f"{save_dir}/epoch_{epoch}_recon_masked.gif"
+        save_video_grid(combined_masked, masked_path)
+        wandb.log({
+            "eval/reconstruction_masked": wandb.Video(masked_path, caption=f"Epoch {epoch} - 75% Masked", fps=10, format="gif")
+        })
 
 
 def create_dataloader(dataset, batch_size: int, shuffle: bool = True) -> DataLoader: #TODO Need to refactor this after completion of the tokenizer
