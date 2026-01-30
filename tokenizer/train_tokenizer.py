@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser: #TODO Need to check the defeault 
     parser.add_argument("--save-final", type=str, default="checkpoints/tokenizer/final.pt")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--image-size", type=int, default=64)
-    parser.add_argument("--patch-size", type=int, default=4)
+    parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--embed-dim", type=int, default=768)
     parser.add_argument("--lpips", type=str, choices=["none", "vgg", "alex", "squeeze"], default="vgg")
     parser.add_argument("--dataset", type=str, default="dm_control", help="Dataset name (dm_control, moving_square)")

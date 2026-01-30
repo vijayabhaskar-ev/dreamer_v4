@@ -85,7 +85,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
         )
         self.rope_temporal = RotaryPositionEmbedding(
             dim=head_dim,
-            max_positions=64,  # Max frames
+            max_positions=64,  
             base=10000.0,
         )
         
@@ -104,8 +104,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                     use_temporal=use_temporal,
                     num_kv_heads=config.num_kv_heads,
                     rope_spatial=self.rope_spatial,
-                    rope_temporal=self.rope_temporal,
-                )
+                    rope_temporal=self.rope_temporal                )
             )
         self.blocks = nn.ModuleList(encoder_blocks)
         self.norm = nn.RMSNorm(config.embed_dim)
@@ -150,13 +149,11 @@ class MaskedAutoencoderTokenizer(nn.Module):
     ) -> TokenizerOutputs:
         batch, t, c, h, w = frames.shape
         
-        # Patchify frames
         patches = self.patch_embed(frames)  # (B, T*N, D)
-        
-        
+               
         latent_tokens = self.latent_tokens(batch, t)  # (B, L, D)
-        latents_per_frame = self.config.num_latent_tokens  # 32
-        total_latents = latent_tokens.size(1)  # T * 32 = 128
+        latents_per_frame = self.config.num_latent_tokens  
+        total_latents = latent_tokens.size(1) 
         
         if mask is None:
              mask = sample_random_mask(
@@ -165,6 +162,7 @@ class MaskedAutoencoderTokenizer(nn.Module):
                 mask_prob_min=self.config.mask_prob_min,
                 mask_prob_max=self.config.mask_prob_max,
                 device=patches.device,
+                num_frames=t,
             )
         
         masked_patches = apply_mask(
@@ -173,44 +171,36 @@ class MaskedAutoencoderTokenizer(nn.Module):
             mask_token=self.mask_token.expand(batch, patches.size(1), -1),
         )
         
-        # Sequence: [Latents, Masked Patches]
         encoder_sequence = torch.cat([latent_tokens, masked_patches], dim=1) 
         
 
         temporal_causal_mask = self._build_temporal_causal_mask(t, frames.device)
         temporal_attn_mask = AttentionMask(is_causal=False, mask=temporal_causal_mask)
         
-        # Build latent cross-attention mask (latents attend to all tokens)
         num_latents = latent_tokens.size(1)
         num_patches = masked_patches.size(1)
         latent_cross_mask = self._build_latent_cross_mask(latents_per_frame, num_patches, t, frames.device)
         latent_cross_attn_mask = AttentionMask(is_causal=False, mask=latent_cross_mask)
         
-        # --- 4. Encoder Forward ---
         for block in self.blocks:
             encoder_sequence = block(
                 encoder_sequence, 
                 num_frames=t, 
                 temporal_mask=temporal_attn_mask,
                 latent_cross_mask=latent_cross_attn_mask,
-                num_latents=total_latents,
-            )
+                num_latents=total_latents            )
         encoder_sequence = self.norm(encoder_sequence)
 
-        # Extract Latents and bottleneck
         z_latents = encoder_sequence[:, :total_latents, :]
         z_latents = torch.tanh(self.latent_proj(z_latents))
         z_expanded = self.latent_expand(z_latents) 
 
-        # --- 5. Decoder Preparation ---
-        # Decoder queries with spatial and temporal position embeddings
         decoder_queries = self.decoder_queries.expand(batch, -1, -1)
         decoder_queries = decoder_queries.unsqueeze(1).expand(-1, t, -1, -1)  # (B, T, N, D)
         decoder_queries = decoder_queries.flatten(1, 2)  # (B, T*N, D)
         
         decoder_sequence = torch.cat([z_expanded, decoder_queries], dim=1)
         
-        # --- 6. Decoder Forward ---
         x = decoder_sequence
         for block in self.decoder_blocks:
             x = block(
@@ -218,11 +208,10 @@ class MaskedAutoencoderTokenizer(nn.Module):
                 num_frames=t, 
                 temporal_mask=temporal_attn_mask,
                 latent_cross_mask=latent_cross_attn_mask,
-                num_latents=total_latents,
-            )
+                num_latents=total_latents
+                )
         x = self.decoder_norm(x)
         
-        # Extract pixels from query positions
         recon_tokens = x[:, total_latents:, :]
         recon_patches = self.to_pixels(recon_tokens)
         recon_frames = self._unpatchify(recon_patches, frames.shape)

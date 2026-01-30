@@ -115,6 +115,35 @@ def apply_rotary_pos_emb(
     return q_embed.transpose(1, 2), k_embed.transpose(1, 2)
 
 
+def apply_rotary_pos_emb_with_indices(
+    x: torch.Tensor,  # (B, H, L, D)
+    cos: torch.Tensor,  # (1, max_pos, 1, D)
+    sin: torch.Tensor,  # (1, max_pos, 1, D)
+    position_ids: torch.Tensor,  # (L,) integer indices
+) -> torch.Tensor:
+
+    """
+    Apply RoPE using explicit position indices (not sequential 0,1,2,...).    
+
+    This is needed for latent cross-attention where tokens from different
+    frames need RoPE based on their frame index, not their sequence position.    
+
+    Args:
+        x: Input tensor (B, H, L, D)
+        cos, sin: RoPE embeddings (1, max_pos, 1, D)
+        position_ids: Integer indices for each position (L,)       
+
+    Returns:
+        x with RoPE applied based on position_ids
+    """
+    cos_indexed = cos[:, position_ids, :, :]
+    sin_indexed = sin[:, position_ids, :, :]
+    x = x.transpose(1,2)
+    x_embed =  (x * cos_indexed) + (rotate_half(x) * sin_indexed)
+    return x_embed.transpose(1,2)
+
+
+
 @dataclass
 class AttentionMask:
     """
@@ -190,9 +219,11 @@ class LatentCrossAttention(nn.Module):
         embed_dim: int, 
         num_heads: int, 
         num_kv_heads: Optional[int] = None,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        rope_temporal: Optional[RotaryPositionEmbedding] = None
     ):
         super().__init__()
+        self.rope = rope_temporal
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
@@ -214,7 +245,9 @@ class LatentCrossAttention(nn.Module):
         self, 
         latents: torch.Tensor, 
         context: torch.Tensor,
-        attn_mask: Optional[AttentionMask] = None
+        num_frames: int,
+        attn_mask: Optional[AttentionMask] = None,
+ 
     ) -> torch.Tensor:
         """
         Args:
@@ -227,8 +260,9 @@ class LatentCrossAttention(nn.Module):
         """
         B, L_q, C = latents.shape
         _, L_kv, _ = context.shape
+
+
         
-        # Project Q from latents, K/V from context
         q = self.q_proj(latents)
         k = self.k_proj(context)
         v = self.v_proj(context)
@@ -236,7 +270,27 @@ class LatentCrossAttention(nn.Module):
         q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_q, D)
         k = k.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         v = v.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
-        
+
+        if self.rope is not None and num_frames > 1:
+            num_patches = L_kv - L_q
+            latents_per_frame = L_q // num_frames
+            patches_per_frame = num_patches // num_frames
+
+            assert latents_per_frame * num_frames == L_q
+            assert patches_per_frame * num_frames == num_patches
+            
+            q_frame_idx = torch.arange(L_q, device=q.device) // latents_per_frame
+            k_latent_frames = torch.arange(L_q, device=k.device) // latents_per_frame
+            k_patches_frames = torch.arange(num_patches, device=k.device) // patches_per_frame
+            k_frame_idx = torch.cat([k_latent_frames, k_patches_frames])
+
+
+            cos, sin = self.rope(num_frames, latents.device, latents.dtype)
+
+            q = apply_rotary_pos_emb_with_indices(q, cos, sin, q_frame_idx)
+            k = apply_rotary_pos_emb_with_indices(k, cos, sin, k_frame_idx)
+
+
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -275,13 +329,15 @@ class PatchToLatentCrossAttention(nn.Module):
         embed_dim: int, 
         num_heads: int, 
         num_kv_heads: Optional[int] = None,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        rope_temporal: Optional[RotaryPositionEmbedding] = None
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_dim = embed_dim // num_heads
+        self.rope = rope_temporal
         
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         assert num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
@@ -298,6 +354,7 @@ class PatchToLatentCrossAttention(nn.Module):
         self, 
         patches: torch.Tensor, 
         latents: torch.Tensor,
+        num_frames: int,
     ) -> torch.Tensor:
         """
         Args:
@@ -310,19 +367,25 @@ class PatchToLatentCrossAttention(nn.Module):
         B, L_q, C = patches.shape
         _, L_kv, _ = latents.shape
         
-        # Project Q from patches, K/V from latents
         q = self.q_proj(patches)
         k = self.k_proj(latents)
         v = self.v_proj(latents)
         
-        # Reshape Q for multi-head attention
         q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_q, D)
         
-        # Reshape K, V with num_kv_heads
         k = k.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         v = v.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         
-        # GQA: Repeat K, V heads to match Q heads if num_kv_heads < num_heads
+
+        if self.rope is not None and num_frames > 1:
+             cos, sin = self.rope(num_frames, q.device, q.dtype)      
+             latents_per_frame = L_kv // num_frames
+             patches_per_frame = L_q // num_frames
+             q_frame_idx = torch.arange(L_q, device=q.device) // patches_per_frame
+             k_frame_idx = torch.arange(L_kv, device=k.device) // latents_per_frame 
+             q = apply_rotary_pos_emb_with_indices(q, cos, sin, q_frame_idx)
+             k = apply_rotary_pos_emb_with_indices(k, cos, sin, k_frame_idx)
+            
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -386,25 +449,19 @@ class SpatialAttention(nn.Module):
         k = self.k_proj(x)  # (BT, N, num_kv_heads * head_dim)
         v = self.v_proj(x)  # (BT, N, num_kv_heads * head_dim)
         
-        # Reshape Q for multi-head attention
         q = q.view(BT, N, self.num_heads, self.head_dim).transpose(1, 2)  # (BT, H, N, D)
         
-        # Reshape K, V with num_kv_heads
         k = k.view(BT, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BT, Hkv, N, D)
         v = v.view(BT, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BT, Hkv, N, D)
         
-        # Apply RoPE to Q and K (before GQA head repetition for K)
         if self.rope is not None:
             cos, sin = self.rope(N, q.device, q.dtype)
-            # RoPE applied to full Q heads and KV heads separately
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
-        # GQA: Repeat K, V heads to match Q heads if num_kv_heads < num_heads
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
         
-        # No mask needed - all patches in same frame attend freely to each other
         out = F.scaled_dot_product_attention(
             q, k, v,
             dropout_p=self.dropout.p if self.training else 0.0,
@@ -584,7 +641,7 @@ class TransformerBlock(nn.Module):
             self.latent_norm = nn.RMSNorm(embed_dim)
             self.context_norm = nn.RMSNorm(embed_dim)
             self.latent_cross_attn = LatentCrossAttention(
-                embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
+                embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout, rope_temporal=rope_temporal
             )
         
         # For decoder: patches cross-attend to latents
@@ -592,7 +649,7 @@ class TransformerBlock(nn.Module):
             self.patch_to_latent_norm = nn.RMSNorm(embed_dim)
             self.latent_kv_norm = nn.RMSNorm(embed_dim)
             self.patch_to_latent_attn = PatchToLatentCrossAttention(
-                embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout
+                embed_dim, num_heads, num_kv_heads=num_kv_heads, dropout=dropout,  rope_temporal=rope_temporal
             )
         
         # For patch tokens: spatial attention (with GQA and RoPE support)
@@ -642,6 +699,7 @@ class TransformerBlock(nn.Module):
                     self.patch_to_latent_attn(
                         self.patch_to_latent_norm(patches),
                         self.latent_kv_norm(latents),
+                        num_frames
                     )
                 )
                 # Latents in decoder don't update - they only serve as keys/values
@@ -652,16 +710,15 @@ class TransformerBlock(nn.Module):
                     self.latent_cross_attn(
                         self.latent_norm(latents), 
                         self.context_norm(context),
+                        num_frames,
                         latent_cross_mask
                     )
                 )
             
-            # Spatial attention for patches (both encoder and decoder)
             patches = patches + self.drop_path(
                 self.spatial_attn(self.norm1(patches), num_frames)
             )
             
-            # Temporal attention for patches (both encoder and decoder)
             if self.use_temporal:
                 patches = patches + self.drop_path(
                     self.temporal_attn(self.norm_temporal(patches), num_frames, temporal_mask)

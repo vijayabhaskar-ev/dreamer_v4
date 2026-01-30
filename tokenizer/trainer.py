@@ -242,7 +242,7 @@ class TokenizerTrainer:
 
             # Use a fixed mask ratio for evaluation consistency
             from .masking import sample_random_mask
-            mask = sample_random_mask(frames.size(0), seq_len, 0.75, 0.75, self.device) #TODO need to check the mask ratio for evaluation
+            mask = sample_random_mask(frames.size(0), seq_len, 0.75, 0.75, self.device, num_frames=t) #TODO need to check the mask ratio for evaluation
             
             with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
                 outputs = self.model(frames, mask=mask)
@@ -313,7 +313,7 @@ class TokenizerTrainer:
 
         # === 2. MASKED RECONSTRUCTION (75% masking) ===
         # This shows the model's ability to fill in missing information
-        mask_high = sample_random_mask(b, seq_len, 0.75, 0.75, self.device)
+        mask_high = sample_random_mask(b, seq_len, 0.75, 0.75, self.device, num_frames=t)
         outputs_masked = self.model(frames, mask=mask_high)
 
         recon_masked = outputs_masked.reconstructed[0]
