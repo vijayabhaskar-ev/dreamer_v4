@@ -58,29 +58,32 @@ class DMControlDataset(VideoDataset):
         
         for _ in range(self.steps_per_epoch): #TODO Need to refactor this after debugging the initial training pipleline.
             batch_videos = []
+            batch_actions= []
             for _ in range(self.batch_size):
                 video = []
+                actions = []
                 time_step = env.reset()
                 
-                # Collect sequence
                 for _ in range(self.seq_len):
-                    # Render frame
                     pixels = env.physics.render(
                         height=self.img_size[0], 
                         width=self.img_size[1], 
                         camera_id=self.camera_id
                     )
-                    # (H, W, C) -> (C, H, W) and normalize to [0, 1] or [-0.5, 0.5]
-                    # Here we use 0-1 float
+
                     frame = torch.from_numpy(pixels.copy()).permute(2, 0, 1).float() / 255.0
                     video.append(frame)
-                    
-                    # Step environment
+
                     action = np.random.uniform(   #TODO Right now they mutiple workers may genarate same actions  as they copy from the parent process. Need to check this issue.
                         env.action_spec().minimum,
                         env.action_spec().maximum,
                         size=env.action_spec().shape
                     )
+
+                    actions.append(torch.from_numpy(action.copy()).float())
+
+                    print(f"Generated action: {action}")
+
                     for _ in range(self.action_repeat):
                         time_step = env.step(action)
                         if time_step.last():
@@ -92,12 +95,13 @@ class DMControlDataset(VideoDataset):
                          # Note: This creates a cut in the video, but for tokenizer training it's acceptable
                          time_step = env.reset()
 
-                # Stack frames: (T, C, H, W)
                 video_tensor = torch.stack(video)
+                action_tensor = torch.stack(actions[:-1])
                 batch_videos.append(video_tensor)
+                batch_actions.append(action_tensor)
             
-            # Stack batch: (B, T, C, H, W)
-            yield torch.stack(batch_videos)
+            yield (torch.stack(batch_videos), # (B, T, C, H, W)
+                  torch.stack(batch_actions)) # (B, T-1, action_dim)
 
 class DatasetFactory:
     @staticmethod

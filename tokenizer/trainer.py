@@ -132,7 +132,9 @@ class TokenizerTrainer:
         
         for batch in loader:
             #save_debug_gif(batch, "test_pipeline.gif")
-            frames = batch.to(self.device)
+            frames, actions = batch
+            frames = frames.to(self.device)
+            actions = actions.to(self.device)
             if frames.dim() == 4: #TODO change it after intial implementation
                 frames = frames.unsqueeze(1)
 
@@ -230,7 +232,9 @@ class TokenizerTrainer:
         os.makedirs(output_dir, exist_ok=True)
 
         for i, batch in enumerate(val_loader):
-            frames = batch.to(self.device)
+            frames = batch    
+            frames = frames.to(self.device)
+            actions = actions.to(self.device) 
             if frames.dim() == 4:
                 frames = frames.unsqueeze(1)
 
@@ -283,7 +287,10 @@ class TokenizerTrainer:
     def visualize_reconstruction(self, val_loader: DataLoader, epoch: int, save_dir: str):
         self.model.eval()
         batch = next(iter(val_loader))
-        frames = batch.to(self.device)
+        frames = batch
+        frames = frames.to(self.device)
+        actions = actions.to(self.device) 
+        
         if frames.dim() == 4:
             frames = frames.unsqueeze(1)
 
