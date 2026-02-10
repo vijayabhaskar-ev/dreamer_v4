@@ -1,4 +1,5 @@
-
+import torch
+import torch.nn as nn
 
 class ActionEmbedding(nn.Module):
     """
@@ -27,8 +28,7 @@ class ActionEmbedding(nn.Module):
             assert batch_size is not None
             return self.no_action_emb.expand(batch_size, -1, -1)
 
-        return self.proj(actions)    #TODO Need to add learned bias for multi actiopn component
-                                     #+ self.no_action_emb
+        return self.proj(actions) + self.no_action_emb    
 
 
 class TauDEmbedding(nn.Module):
@@ -54,13 +54,13 @@ class TauDEmbedding(nn.Module):
             (B, 1, embed_dim)
         """
 
-        tau_idx = tau * (self.num_tau_bins - 1).long()
-        d_idx = (-d.log2()).long()
+        tau_idx = (tau * (self.num_tau_bins - 1)).long()
+        d_idx = (-torch.log2(d)).long()
 
         tau_emb = self.tau_embedding(tau_idx)
         d_emb = self.d_embedding(d_idx)
 
-        combined = torch.cat([tau_emb, d_emb], dim=-1)
+        combined = torch.cat([tau_emb, d_emb], dim=-1) #TODO Is this valid shape
 
         return combined.unsqueeze(1)
 

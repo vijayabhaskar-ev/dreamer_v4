@@ -1,4 +1,5 @@
-
+import torch
+import math
 
 
 def add_noise(z_clean, tau):
@@ -16,5 +17,6 @@ def sample_tau_and_d(batch_size, K_max=64, device='cuda'):
 
     tau_idx = torch.randint(0, K_max, (batch_size,), device=device) % k
     tau = tau_idx.float() * d #Shape: (batch_size,)
+    return tau, d
 
     
