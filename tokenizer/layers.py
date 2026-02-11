@@ -439,7 +439,7 @@ class SpatialAttention(nn.Module):
     
     def forward(self, x: torch.Tensor, num_frames: int) -> torch.Tensor:
         B, L, C = x.shape
-        patches_per_frame = L // num_frames
+        patches_per_frame = L // num_frames   #TODO rename the variables to be generic for both tokenizer and dynamic model
         
         x = x.view(B * num_frames, patches_per_frame, C)
         BT = B * num_frames
