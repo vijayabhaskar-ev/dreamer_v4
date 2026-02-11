@@ -26,7 +26,7 @@ class DynamicsModel(nn.Module):
         
         tokens_per_frame = 1 + 1 + config.num_latent_tokens + config.num_register_tokens  # a + τd + z̃ + reg
         self.rope_spatial = RotaryPositionEmbedding(config.embed_dim // config.num_heads, max_positions=tokens_per_frame)
-        self.rope_temporal = RotaryPositionEmbedding(config.embed_dim // config.num_heads, max_positions=tokens_per_frame)
+        self.rope_temporal = RotaryPositionEmbedding(config.embed_dim // config.num_heads, max_positions=config.seq_len)
         
         self.blocks = nn.ModuleList([
             DynamicsTransformerBlock(
@@ -50,21 +50,11 @@ class DynamicsModel(nn.Module):
             return z
         
     def forward(self, z_noised, actions, tau, d):
-        """
-        Main forward pass.
-        1. Project latents up (latent_input_dim → embed_dim)
-        2. Get τ/d embedding
-        3. Build per-frame token blocks: [action, τd, latents, registers]
-        4. Concatenate all frames
-        5. Run through transformer blocks
-        6. Extract latent positions, project down (embed_dim → latent_input_dim)
-        7. Return predicted clean latents
-        """
 
         B, T, S_z, D_latent = z_noised.shape
 
         z_up = self.proj_in(z_noised) #Shape: (B, T, S_z, D_latent) -> (B, T, S_z, D_embed)
-        tau_d = self.tau_d_embedding(tau, d) #Shape: (B, 1, D_embed)   TODO Check if this is valid shape
+        tau_d = self.tau_d_embedding(tau, d) #Shape: (B, T, D_embed) 
 
         total_tokens_per_frame = 1 + 1 + self.config.num_latent_tokens + self.config.num_register_tokens  # a + τd + z̃ + reg
 
@@ -78,7 +68,7 @@ class DynamicsModel(nn.Module):
                 a_token = self.action_embedding(actions[:, t-1 : t], batch_size=B)
             tokens_this_frame.append(a_token)
             
-            tokens_this_frame.append(tau_d)  # (B, 1, D)  TODO Need to confirm the shape as we are concatanating in tau_embedding
+            tokens_this_frame.append(tau_d[:,t:t+1])  # (B, 1, D)  
             
             
             tokens_this_frame.append(z_up[:, t])  # (B, S_z, D)

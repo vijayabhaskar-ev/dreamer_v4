@@ -29,7 +29,10 @@ class DynamicsConfig:
     drop_path: float = 0.1
 
     # From tokenizer (must match)
-    num_latent_tokens: int = 32   # S_z spatial tokens per frame
+    num_latent_tokens: int = 32   
+
+    #No of frames
+    seq_len: int = 4
 
     @classmethod
     def from_tokenizer(cls, tokenizer_cfg: TokenizerConfig, **overrides: Any) -> "DynamicsConfig":

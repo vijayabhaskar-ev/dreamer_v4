@@ -48,21 +48,21 @@ class TauDEmbedding(nn.Module):
     def forward(self, tau, d):
         """
         Args:
-            tau: (B,) continuous in [0, 1]
-            d: (B,) step sizes (1, 0.5, 0.25, ..., 1/64)
+            tau: (B,T) continuous in [0, 1]
+            d: (B,T) step sizes (1, 0.5, 0.25, ..., 1/64)
         Returns:
-            (B, 1, embed_dim)
+            (B, T, embed_dim)
         """
 
-        tau_idx = (tau * (self.num_tau_bins - 1)).long()
-        d_idx = (-torch.log2(d)).long()
+        tau_idx = (tau * (self.num_tau_bins - 1)).long().clamp(0, self.num_tau_bins - 1)
+        d_idx = (-torch.log2(d)).long().clamp(0, self.num_d_bins - 1)
 
         tau_emb = self.tau_embedding(tau_idx)
         d_emb = self.d_embedding(d_idx)
 
-        combined = torch.cat([tau_emb, d_emb], dim=-1) #TODO Is this valid shape
+        combined = torch.cat([tau_emb, d_emb], dim=-1) 
 
-        return combined.unsqueeze(1)
+        return combined
 
         
         

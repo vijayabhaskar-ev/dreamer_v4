@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
 from typing import Dict, Iterator, Optional
 
@@ -102,7 +103,10 @@ class TokenizerTrainer:
         print(f"Saved tokenizer checkpoint to {path}")
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
-        state = torch.load(path, map_location=self.device, weights_only=False) #TODO Need to check the weights_only
+        try:
+            state = torch.load(path, map_location=self.device, weights_only=True)
+        except pickle.UnpicklingError:
+            state = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(state["model"], strict=strict)
         if "optimizer" in state:
             self.optimizer.load_state_dict(state["optimizer"])
