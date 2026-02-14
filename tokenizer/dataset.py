@@ -81,9 +81,6 @@ class DMControlDataset(VideoDataset):
                     )
 
                     actions.append(torch.from_numpy(action.copy()).float())
-
-                    print(f"Generated action: {action}")
-
                     for _ in range(self.action_repeat):
                         time_step = env.step(action)
                         if time_step.last():

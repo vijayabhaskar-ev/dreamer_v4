@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
 from .config import DynamicsConfig
-from .losses import FlowMatchingLoss
 from .dynamic_model import DynamicsModel
 from .flow_matching import add_noise, sample_tau_and_d
 from tokenizer.config import TokenizerConfig
@@ -95,6 +94,17 @@ class DynamicsTrainer:
             val_metrics = None
             if val_loader is not None:
                 val_metrics = self._run_epoch(val_loader, epoch, training=False)
+
+            epoch_log = {
+                "epoch": epoch,
+                "epoch/train_loss": train_metrics["loss/dynamics_total"],
+                "epoch/train_mse": train_metrics["loss/dynamics_mse"],
+                "global_step": self.global_step,
+            }
+            if val_metrics is not None:
+                epoch_log["epoch/val_loss"] = val_metrics["loss/dynamics_total"]
+                epoch_log["epoch/val_mse"] = val_metrics["loss/dynamics_mse"]
+            wandb.log(epoch_log, step=self.global_step)
 
             print(
                 f"Epoch {epoch}: train_loss={train_metrics['loss/dynamics_total']:.4f}"
@@ -363,7 +373,10 @@ class DynamicsTrainer:
                 "Set `tokenizer_ckpt` in the config to load weights before training the agent."
             )
 
-        state = torch.load(ckpt_path, map_location=self.device)
+        try:
+            state = torch.load(ckpt_path, map_location=self.device, weights_only=True)
+        except pickle.UnpicklingError:
+            state = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         if "model" in state:
             state = state["model"]
         missing, unexpected = self.tokenizer.load_state_dict(state, strict=False)

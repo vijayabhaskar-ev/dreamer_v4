@@ -1,10 +1,9 @@
 import torch
 import torch.nn as nn
-from embedding import ActionEmbedding, TauDEmbedding
-from dynamic_block import DynamicsTransformerBlock
-from dynamics.config import DynamicsConfig
-from tokenizer.layers import RotaryPositionEmbedding
-from tokenizer import AttentionMask
+from .embedding import ActionEmbedding, TauDEmbedding
+from .dynamic_block import DynamicsTransformerBlock
+from .config import DynamicsConfig
+from tokenizer.layers import RotaryPositionEmbedding, AttentionMask
 
 class DynamicsModel(nn.Module):
     def __init__(self, config: DynamicsConfig, tokenizer):
