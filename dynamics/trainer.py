@@ -98,16 +98,20 @@ class DynamicsTrainer:
             epoch_log = {
                 "epoch": epoch,
                 "epoch/train_loss": train_metrics["loss/dynamics_total"],
-                "epoch/train_mse": train_metrics["loss/dynamics_mse"],
+                "epoch/train_flow": train_metrics["loss/dynamics_flow"],
+                "epoch/train_bootstrap": train_metrics["loss/dynamics_bootstrap"],
                 "global_step": self.global_step,
             }
             if val_metrics is not None:
                 epoch_log["epoch/val_loss"] = val_metrics["loss/dynamics_total"]
-                epoch_log["epoch/val_mse"] = val_metrics["loss/dynamics_mse"]
+                epoch_log["epoch/val_flow"] = val_metrics["loss/dynamics_flow"]
+                epoch_log["epoch/val_bootstrap"] = val_metrics["loss/dynamics_bootstrap"]
             wandb.log(epoch_log, step=self.global_step)
 
             print(
-                f"Epoch {epoch}: train_loss={train_metrics['loss/dynamics_total']:.4f}"
+                f"Epoch {epoch}: train_loss={train_metrics['loss/dynamics_total']:.4f} "
+                f"flow={train_metrics['loss/dynamics_flow']:.4f} "
+                f"bootstrap={train_metrics['loss/dynamics_bootstrap']:.4f}"
                 + (f" val_loss={val_metrics['loss/dynamics_total']:.4f}" if val_metrics else "")
             )
 
@@ -157,7 +161,8 @@ class DynamicsTrainer:
 
         self.model.train(training)
         total_loss = 0.0
-        total_mse = 0.0
+        total_flow = 0.0
+        total_bootstrap = 0.0
         total_steps = 0
 
         log_interval = self.training_cfg.log_interval
@@ -185,11 +190,15 @@ class DynamicsTrainer:
 
                 z_clean_f = self.model.encode_frames(frames_full)  # (n_full, T, S_z, latent_dim)
                 tau_f, d_f = sample_tau_and_d(n_full, T, K_max=self.dynamics_cfg.K_max, device=self.device)
+
+                if self.global_step < 2000:
+                    d_f = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
+
                 z_noised_f, _ = add_noise(z_clean_f, tau_f)        
                 tau_for_log, d_for_log = tau_f, d_f
 
                 with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
-                    loss_full = self._compute_loss(z_clean_f,z_noised_f, actions_full, tau_f, d_f, training = training )
+                    loss_full, metrics_full = self._compute_loss(z_clean_f,z_noised_f, actions_full, tau_f, d_f, training = training )
 
                  #=========30% Single-Frame Training==========
 
@@ -198,22 +207,31 @@ class DynamicsTrainer:
 
                 z_clean_s = self.model.encode_frames(frames_single)  # *(n_single, T, S_z, latent_dim)
                 tau_s, d_s = sample_tau_and_d(n_single, 1, K_max=self.dynamics_cfg.K_max, device=self.device)
+
+                if self.global_step < 2000:
+                    d_s = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
+
                 z_noised_s, _ = add_noise(z_clean_s, tau_s)        
-                tau_for_log, d_for_log = tau_f, d_f
+                tau_for_log, d_for_log = tau_f, d_s
 
                 with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
-                    loss_single = self._compute_loss(z_clean_s,z_noised_s, None, tau_s, d_s, training = training )
+                    loss_single, metrics_single = self._compute_loss(z_clean_s,z_noised_s, None, tau_s, d_s, training = training )
 
                 loss = (n_full * loss_full + n_single * loss_single) / B
+                metrics = { #TODO verify this metrc
+                    "loss_flow": (n_full * metrics_full["loss_flow"] + n_single * metrics_single["loss_flow"]) / B,
+                    "loss_bootstrap": (n_full * metrics_full["loss_bootstrap"] + n_single * metrics_single["loss_bootstrap"]) / B,
+                }
 
             else:
                 # Validation or T=1 already: standard path
                 z_clean = self.model.encode_frames(frames)
                 tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
                 z_noised, _ = add_noise(z_clean, tau)
+                tau_for_log, d_for_log = tau, d
                 with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
 
-                    loss = self._compute_loss(z_clean, z_noised, actions, tau, d, training=training)
+                    loss, metrics = self._compute_loss(z_clean, z_noised, actions, tau, d, training=training)
 
 
 
@@ -237,7 +255,8 @@ class DynamicsTrainer:
                 # Update smoothing buffer every step
                 self.metrics_buffer.update({
                     "train/loss": loss.item(),
-                    "train/mse": loss.item(),
+                    "train/flow": metrics["loss_flow"],
+                    "train/bootstrap": metrics["loss_bootstrap"],
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "train/tau_mean": tau_for_log.mean().item(),
                     "train/d_mean": d_for_log.mean().item(),
@@ -245,32 +264,34 @@ class DynamicsTrainer:
 
                 # Log smoothed metrics periodically
                 if self.global_step % log_interval == 0:
-                    metrics = self.metrics_buffer.get_averages()
-                    metrics.update({
+                    smoothed_metrics = self.metrics_buffer.get_averages()
+                    smoothed_metrics.update({
                         "train/lr": self.optimizer.param_groups[0]["lr"],
                         "train/scale": self.scaler.get_scale(),
                         "epoch": epoch,
                         "global_step": self.global_step,
                     })
 
-                    metrics.update(self.throughput_tracker.step(B))
+                    smoothed_metrics.update(self.throughput_tracker.step(B))
 
                     if self.training_cfg.log_memory:
-                        metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
+                        smoothed_metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
 
                     if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
-                        metrics.update(ModelStatistics.compute_weight_stats(self.model))
-                        metrics.update(ModelStatistics.compute_gradient_stats(self.model))
+                        smoothed_metrics.update(ModelStatistics.compute_weight_stats(self.model))
+                        smoothed_metrics.update(ModelStatistics.compute_gradient_stats(self.model))
 
-                    wandb.log(metrics, step=self.global_step)
+                    wandb.log(smoothed_metrics, step=self.global_step)
 
             total_loss += loss.item()
-            total_mse += loss.item()
+            total_flow += metrics["loss_flow"]
+            total_bootstrap += metrics["loss_bootstrap"]
             total_steps += 1
 
         return {
             "loss/dynamics_total": total_loss / max(total_steps, 1),
-            "loss/dynamics_mse": total_mse / max(total_steps, 1),
+            "loss/dynamics_flow": total_flow / max(total_steps, 1),
+            "loss/dynamics_bootstrap": total_bootstrap / max(total_steps, 1),
         }
 
 
@@ -361,7 +382,7 @@ class DynamicsTrainer:
             "n_bootstrap": is_bootstrap.sum().item(),
         }
     
-        return loss_total
+        return loss_total, metrics
 
 
 
@@ -395,14 +416,15 @@ class RMSNormalizer:
     def __init__(self, decay=0.99, epsilon=1e-8):
         self.decay = decay
         self.epsilon = epsilon
-        self.rms_sq = None  # running estimate of loss²
+       # self.rms_sq = None  
+        self.rms_sq = torch.tensor(1.0)  
     
     def normalize(self, loss: torch.Tensor, update: bool = True) -> torch.Tensor:
         loss_sq = loss.detach() ** 2
         
-        if self.rms_sq is None:
-            self.rms_sq = loss_sq  # initialize on first call
-        elif update:
+        # if self.rms_sq is None:
+        #     self.rms_sq = loss_sq  
+        if update:
             self.rms_sq = self.decay * self.rms_sq + (1 - self.decay) * loss_sq
         
         rms = torch.sqrt(self.rms_sq + self.epsilon)

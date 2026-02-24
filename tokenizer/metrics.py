@@ -127,13 +127,9 @@ class ModelStatistics:
     
     @staticmethod
     def compute_gradient_stats(model: nn.Module) -> Dict[str, float]:
-        """Compute gradient norm statistics grouped by layer type.
-        
-        Call this AFTER backward() but BEFORE optimizer.step().
-        
+        """Compute gradient norm statistics grouped by layer type.        
         Args:
             model: PyTorch model with computed gradients.
-            
         Returns:
             Dictionary with gradient norms for different layer groups.
         """
@@ -146,16 +142,14 @@ class ModelStatistics:
         for name, param in model.named_parameters():
             if param.grad is not None:
                 grad_norm = param.grad.norm(2).item()
-                
                 name_lower = name.lower()
-                # Encoder: params starting with "blocks." (model uses blocks.0, blocks.1, etc.)
-                if name_lower.startswith('blocks.'):
+                
+                if 'attn' in name_lower or 'attention' in name_lower:
+                    attention_grad += grad_norm ** 2
+                elif name_lower.startswith('blocks.'):
                     encoder_grad += grad_norm ** 2
-                # Decoder: params containing "decoder" (decoder_blocks, decoder_norm, etc.)
                 elif 'decoder' in name_lower:
                     decoder_grad += grad_norm ** 2
-                elif 'attn' in name_lower or 'attention' in name_lower:
-                    attention_grad += grad_norm ** 2
         
         stats["model/encoder_grad_norm"] = encoder_grad ** 0.5
         stats["model/decoder_grad_norm"] = decoder_grad ** 0.5
