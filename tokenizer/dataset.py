@@ -63,8 +63,15 @@ class DMControlDataset(VideoDataset):
                 video = []
                 actions = []
                 time_step = env.reset()
+
+                # Sinusoidal policy: coordinated rhythmic joint movements
+                # Randomize frequency and amplitude per episode for diversity
+                action_dim = env.action_spec().shape[0]
+                freq = np.random.uniform(0.5, 3.0)          # oscillation speed
+                amplitude = np.random.uniform(0.3, 1.0)     # movement magnitude
+                phase_offsets = np.array([i * np.pi / action_dim for i in range(action_dim)])
                 
-                for _ in range(self.seq_len):
+                for frame_idx in range(self.seq_len):
                     pixels = env.physics.render(
                         height=self.img_size[0], 
                         width=self.img_size[1], 
@@ -74,10 +81,16 @@ class DMControlDataset(VideoDataset):
                     frame = torch.from_numpy(pixels.copy()).permute(2, 0, 1).float() / 255.0
                     video.append(frame)
 
-                    action = np.random.uniform(   #TODO Right now they mutiple workers may genarate same actions  as they copy from the parent process. Need to check this issue.
+                    # Sinusoidal action: each joint follows a sine wave at different phase
+                    t_norm = frame_idx / max(self.seq_len - 1, 1)
+                    action = amplitude * np.sin(
+                        t_norm * 2 * np.pi * freq + phase_offsets
+                    )
+                    # Clip to valid action range
+                    action = np.clip(
+                        action,
                         env.action_spec().minimum,
                         env.action_spec().maximum,
-                        size=env.action_spec().shape
                     )
 
                     actions.append(torch.from_numpy(action.copy()).float())

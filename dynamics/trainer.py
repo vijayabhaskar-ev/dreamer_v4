@@ -191,9 +191,19 @@ class DynamicsTrainer:
                 z_clean_f = self.model.encode_frames(frames_full)  # (n_full, T, S_z, latent_dim)
                 tau_f, d_f = sample_tau_and_d(n_full, T, K_max=self.dynamics_cfg.K_max, device=self.device)
 
-                if self.global_step < 2000:
-                    d_f = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
+                # Warm-up: flow-only → gradual bootstrap ramp → full mix
+                warmup_end = 2000
+                ramp_end = 4000
+                if self.global_step < warmup_end:
+                    d_f = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max) #TODO 
+                elif self.global_step < ramp_end: #TODO Added this to support training from scratch fro smaller steps. This is not needed for training at scale.
+                    #  Linearly ramp bootstrap probability from 0% to 100%
+                    ramp_progress = (self.global_step - warmup_end) / (ramp_end - warmup_end)
+                    mask = torch.rand_like(d_f) < ramp_progress
+                    d_min_tensor = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
+                    d_f = torch.where(mask, d_f, d_min_tensor)
 
+                # (step 4000+): Normal sampling, no override
                 z_noised_f, _ = add_noise(z_clean_f, tau_f)        
                 tau_for_log, d_for_log = tau_f, d_f
 
@@ -208,8 +218,13 @@ class DynamicsTrainer:
                 z_clean_s = self.model.encode_frames(frames_single)  # *(n_single, T, S_z, latent_dim)
                 tau_s, d_s = sample_tau_and_d(n_single, 1, K_max=self.dynamics_cfg.K_max, device=self.device)
 
-                if self.global_step < 2000:
+                if self.global_step < warmup_end:
                     d_s = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
+                elif self.global_step < ramp_end:#TODO Added this to support training from scratch fro smaller steps. This is not needed for training at scale.
+                    ramp_progress = (self.global_step - warmup_end) / (ramp_end - warmup_end)
+                    mask = torch.rand_like(d_s) < ramp_progress
+                    d_min_tensor = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
+                    d_s = torch.where(mask, d_s, d_min_tensor)
 
                 z_noised_s, _ = add_noise(z_clean_s, tau_s)        
                 tau_for_log, d_for_log = tau_f, d_s
@@ -252,7 +267,6 @@ class DynamicsTrainer:
 
                 self.global_step += 1
 
-                # Update smoothing buffer every step
                 self.metrics_buffer.update({
                     "train/loss": loss.item(),
                     "train/flow": metrics["loss_flow"],
@@ -262,7 +276,6 @@ class DynamicsTrainer:
                     "train/d_mean": d_for_log.mean().item(),
                 })
 
-                # Log smoothed metrics periodically
                 if self.global_step % log_interval == 0:
                     smoothed_metrics = self.metrics_buffer.get_averages()
                     smoothed_metrics.update({
@@ -339,7 +352,13 @@ class DynamicsTrainer:
             v_pred = (z_hat - z_noised) / (1 - tau_4d)
 
             with torch.no_grad():
-
+                #TODO Need to test this code block as is userful to reduce the gpu memory usage spikes
+                
+                # z_noised_bs = z_noised[is_bootstrap]
+                # actions_bs = actions[is_bootstrap] if actions is not None else None
+                # tau_bs = tau[is_bootstrap]
+                # d_bs = d[is_bootstrap]
+                # z_hat_half1 = self.model(z_noised_bs, actions_bs, tau_bs, d_bs/2)
                 z_hat_half1 = self.model(z_noised, actions, tau, d/2)
                 v1 = (z_hat_half1 - z_noised) / (1-tau_4d)
 
@@ -421,7 +440,8 @@ class RMSNormalizer:
     
     def normalize(self, loss: torch.Tensor, update: bool = True) -> torch.Tensor:
         loss_sq = loss.detach() ** 2
-        
+        self.rms_sq = self.rms_sq.to(loss_sq.device)  
+
         # if self.rms_sq is None:
         #     self.rms_sq = loss_sq  
         if update:
