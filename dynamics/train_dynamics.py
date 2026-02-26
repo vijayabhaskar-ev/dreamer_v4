@@ -32,11 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     # Training
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--warmup-steps", type=int, default=500)   
+    parser.add_argument("--min-lr", type=float, default=1e-6) 
 
     # Paths
     parser.add_argument("--tokenizer-ckpt", type=str, required=True,
@@ -157,6 +159,8 @@ def main(args: Optional[list[str]] = None) -> None:
         checkpoint_interval=checkpoint_interval,
         log_interval=opts.log_interval,
         log_model_stats_interval=opts.log_model_stats_interval,
+        warmup_steps=opts.warmup_steps,        
+        min_lr=opts.min_lr,  
     )
 
     if opts.wandb_name is None:
