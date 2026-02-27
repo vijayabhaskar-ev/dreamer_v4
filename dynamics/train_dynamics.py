@@ -39,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--warmup-steps", type=int, default=500)   
     parser.add_argument("--min-lr", type=float, default=1e-6) 
+    parser.add_argument("--curriculum-warmup-steps", type=int, default=2000,
+                        help="Flow-only phase steps before bootstrap ramp")
+    parser.add_argument("--curriculum-ramp-steps", type=int, default=4000,
+                        help="End of gradual bootstrap introduction")
 
     # Paths
     parser.add_argument("--tokenizer-ckpt", type=str, required=True,
@@ -160,7 +164,10 @@ def main(args: Optional[list[str]] = None) -> None:
         log_interval=opts.log_interval,
         log_model_stats_interval=opts.log_model_stats_interval,
         warmup_steps=opts.warmup_steps,        
-        min_lr=opts.min_lr,  
+        min_lr=opts.min_lr,
+        curriculum_warmup_steps=opts.curriculum_warmup_steps,
+        curriculum_ramp_steps=opts.curriculum_ramp_steps,
+        steps_per_epoch=opts.steps_per_epoch,
     )
 
     if opts.wandb_name is None:

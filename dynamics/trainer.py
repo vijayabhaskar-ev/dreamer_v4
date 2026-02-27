@@ -37,7 +37,11 @@ class DynamicsTrainingConfig:
     amp: bool = False
     checkpoint_interval: int = 1
     device: str = "cuda"
+    # Curriculum: bootstrap ramp-up
+    curriculum_warmup_steps: int = 2000   
+    curriculum_ramp_steps: int = 4000    
     # Logging
+    steps_per_epoch: int = 100
     log_interval: int = 10
     log_smooth_window: int = 10
     log_model_stats: bool = True
@@ -118,7 +122,7 @@ class DynamicsTrainer:
         start_epoch: int = 1,
     ) -> None:
 
-        steps_per_epoch = len(train_loader)
+        steps_per_epoch = self.training_cfg.steps_per_epoch
         total_steps = steps_per_epoch * self.training_cfg.epochs
         self.scheduler = self._build_scheduler(total_steps)
 
@@ -237,8 +241,8 @@ class DynamicsTrainer:
                 tau_f, d_f = sample_tau_and_d(n_full, T, K_max=self.dynamics_cfg.K_max, device=self.device)
 
                 # Warm-up: flow-only → gradual bootstrap ramp → full mix
-                warmup_end = 2000
-                ramp_end = 4000
+                warmup_end = self.training_cfg.curriculum_warmup_steps
+                ramp_end = self.training_cfg.curriculum_ramp_steps
                 if self.global_step < warmup_end:
                     d_f = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max) #TODO 
                 elif self.global_step < ramp_end: #TODO Added this to support training from scratch fro smaller steps. This is not needed for training at scale.
@@ -248,9 +252,8 @@ class DynamicsTrainer:
                     d_min_tensor = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
                     d_f = torch.where(mask, d_f, d_min_tensor)
 
-                # (step 4000+): Normal sampling, no override
-                z_noised_f, _ = add_noise(z_clean_f, tau_f)        
-                tau_for_log, d_for_log = tau_f, d_f
+                # (step ramp_end+): Normal sampling, no override
+                z_noised_f, _ = add_noise(z_clean_f, tau_f)
 
                 with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
                     loss_full, metrics_full = self._compute_loss(z_clean_f,z_noised_f, actions_full, tau_f, d_f, training = training )
@@ -271,8 +274,11 @@ class DynamicsTrainer:
                     d_min_tensor = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
                     d_s = torch.where(mask, d_s, d_min_tensor)
 
-                z_noised_s, _ = add_noise(z_clean_s, tau_s)        
-                tau_for_log, d_for_log = tau_f, d_s
+                z_noised_s, _ = add_noise(z_clean_s, tau_s)
+
+                # Log tau & d from BOTH paths (proper weighted average)
+                tau_for_log = torch.cat([tau_f.flatten(), tau_s.flatten()])
+                d_for_log = torch.cat([d_f.flatten(), d_s.flatten()])
 
                 with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
                     loss_single, metrics_single = self._compute_loss(z_clean_s,z_noised_s, None, tau_s, d_s, training = training )
@@ -395,7 +401,7 @@ class DynamicsTrainer:
         if is_bootstrap.any():
             tau_4d = tau[:, :, None, None]      # (B, T, 1, 1)
             d_4d = d[:, :, None, None]   
-            v_pred = (z_hat - z_noised) / (1 - tau_4d)
+            v_pred = (z_hat - z_noised) / (1 - tau_4d).clamp(min=1e-4)
 
             with torch.no_grad():
                 #TODO Need to test this code block as is userful to reduce the gpu memory usage spikes
@@ -406,12 +412,12 @@ class DynamicsTrainer:
                 # d_bs = d[is_bootstrap]
                 # z_hat_half1 = self.model(z_noised_bs, actions_bs, tau_bs, d_bs/2)
                 z_hat_half1 = self.model(z_noised, actions, tau, d/2)
-                v1 = (z_hat_half1 - z_noised) / (1-tau_4d)
+                v1 = (z_hat_half1 - z_noised) / (1-tau_4d).clamp(min=1e-4)
 
                 z_mid = z_noised + v1 * (d_4d/2)
 
                 z_hat_half2 = self.model(z_mid, actions, tau + d/2, d/2)
-                v2 = (z_hat_half2 - z_mid) / (1 - (tau_4d + d_4d/2))
+                v2 = (z_hat_half2 - z_mid) / (1 - (tau_4d + d_4d/2)).clamp(min=1e-4)
 
                 v_target = (v1 + v2) / 2
 
