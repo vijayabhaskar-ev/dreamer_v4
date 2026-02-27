@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import torch
@@ -152,18 +152,20 @@ class AttentionMask:
     """
     is_causal: bool = False
     mask: Optional[torch.Tensor] = None  # Expected shape: (L, L) or (B, 1, L, L)
+    _float_mask_cache: Optional[torch.Tensor] = field(default=None, repr=False)
 
     def apply_to_sdpa(self, size: tuple) -> Optional[torch.Tensor]:
         """Returns the mask argument formatted for F.scaled_dot_product_attention."""
-        # If we have a custom mask (like block causal), we return it.
-        # SDPA expects a float mask (added to scores) or a bool mask (True positions are masked out).
         if self.mask is not None:
-            # Convert boolean mask to float mask (0.0 for FaIse/Attend, -inf for True/Masked)
-            # This avoids issues where SDPA behaves inconsistently with all-False boolean masks
             if self.mask.dtype == torch.bool:
-                return torch.zeros_like(self.mask, dtype=torch.float32).masked_fill_(self.mask, float("-inf"))
+                # Cache the float conversion — avoids re-allocation every attention call
+                if self._float_mask_cache is None:
+                    self._float_mask_cache = torch.zeros_like(
+                        self.mask, dtype=torch.float32
+                    ).masked_fill_(self.mask, float("-inf"))
+                return self._float_mask_cache
             return self.mask
-        return None 
+        return None
 
 
 class MultiheadSelfAttention(nn.Module): #TODO Remove it after final implementation

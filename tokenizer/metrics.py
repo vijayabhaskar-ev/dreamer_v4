@@ -97,118 +97,102 @@ class ModelStatistics:
     @staticmethod
     def compute_weight_stats(model: nn.Module) -> Dict[str, float]:
         """Compute weight norm statistics grouped by layer type.
-        
-        Supports both tokenizer models (encoder/decoder groups) and
-        dynamics models (proj/attention/embedding/ff groups).
-        
+
+        Accumulates squared norms on-device and calls .item() only once
+        per group at the end — avoids per-parameter XLA syncs.
+
         Args:
             model: PyTorch model to analyze.
-            
+
         Returns:
             Dictionary with weight norms for different layer groups.
         """
-        stats = {}
-        
-        # Tokenizer groups
-        encoder_norm = 0.0
-        decoder_norm = 0.0
-        attention_norm = 0.0
-        embed_norm = 0.0
-        other_norm = 0.0
-        
-        # Dynamics groups
-        dyn_norms = {g: 0.0 for g in ModelStatistics._DYNAMICS_GROUPS}
-        
-        max_weight = 0.0
+        # Build name→group mapping once
+        groups: Dict[str, list] = {
+            "encoder": [], "decoder": [], "attention": [],
+            "embed": [], "other": [],
+        }
+        for g in ModelStatistics._DYNAMICS_GROUPS:
+            groups[f"dyn_{g}"] = []
+
         total_params = 0
-        
+
         for name, param in model.named_parameters():
-            if param.requires_grad:
-                param_norm = param.data.norm(2).item()
-                max_weight = max(max_weight, param.data.abs().max().item())
-                total_params += param.numel()
-                
-                name_lower = name.lower()
+            if not param.requires_grad:
+                continue
+            total_params += param.numel()
+            name_lower = name.lower()
 
-                # Try dynamics groups first
-                dyn_group = ModelStatistics._classify_dynamics_param(name_lower)
-                if dyn_group:
-                    dyn_norms[dyn_group] += param_norm ** 2
-                # Then tokenizer groups
-                elif name_lower.startswith('blocks.'):
-                    encoder_norm += param_norm ** 2
-                elif 'decoder' in name_lower:
-                    decoder_norm += param_norm ** 2
-                elif 'attn' in name_lower or 'attention' in name_lower:
-                    attention_norm += param_norm ** 2
-                elif 'embed' in name_lower or 'patch' in name_lower:
-                    embed_norm += param_norm ** 2
-                else:
-                    other_norm += param_norm ** 2
-        
-        # Tokenizer stats
-        stats["model/encoder_weight_norm"] = encoder_norm ** 0.5
-        stats["model/decoder_weight_norm"] = decoder_norm ** 0.5
-        stats["model/attention_weight_norm"] = attention_norm ** 0.5
-        stats["model/embedding_weight_norm"] = embed_norm ** 0.5
+            dyn_group = ModelStatistics._classify_dynamics_param(name_lower)
+            if dyn_group:
+                groups[f"dyn_{dyn_group}"].append(param.data)
+            elif name_lower.startswith('blocks.'):
+                groups["encoder"].append(param.data)
+            elif 'decoder' in name_lower:
+                groups["decoder"].append(param.data)
+            elif 'attn' in name_lower or 'attention' in name_lower:
+                groups["attention"].append(param.data)
+            elif 'embed' in name_lower or 'patch' in name_lower:
+                groups["embed"].append(param.data)
+            else:
+                groups["other"].append(param.data)
 
-        # Dynamics stats
-        for group, val in dyn_norms.items():
-            stats[f"model/dyn_{group}_weight_norm"] = val ** 0.5
+        # Accumulate on-device, single .item() per group
+        stats: Dict[str, float] = {}
+        max_weight_t = None
+        for key, params in groups.items():
+            if not params:
+                continue
+            sq_sum = sum(p.norm(2) ** 2 for p in params)
+            stats[f"model/{key}_weight_norm"] = sq_sum.sqrt().item()
+            group_max = torch.stack([p.abs().max() for p in params]).max()
+            max_weight_t = group_max if max_weight_t is None else torch.maximum(max_weight_t, group_max)
 
-        stats["model/max_weight"] = max_weight
+        stats["model/max_weight"] = max_weight_t.item() if max_weight_t is not None else 0.0
         stats["model/total_params_millions"] = total_params / 1e6
-        
+
         return stats
-    
+
     @staticmethod
     def compute_gradient_stats(model: nn.Module) -> Dict[str, float]:
         """Compute gradient norm statistics grouped by layer type.
 
-        Supports both tokenizer models (encoder/decoder groups) and
-        dynamics models (proj/attention/embedding/ff groups).
+        Accumulates squared norms on-device and calls .item() only once
+        per group at the end — avoids per-parameter XLA syncs.
 
         Args:
             model: PyTorch model with computed gradients.
         Returns:
             Dictionary with gradient norms for different layer groups.
         """
-        stats = {}
-        
-        # Tokenizer groups
-        encoder_grad = 0.0
-        decoder_grad = 0.0
-        attention_grad = 0.0
+        groups: Dict[str, list] = {
+            "encoder": [], "decoder": [], "attention": [],
+        }
+        for g in ModelStatistics._DYNAMICS_GROUPS:
+            groups[f"dyn_{g}"] = []
 
-        # Dynamics groups
-        dyn_grads = {g: 0.0 for g in ModelStatistics._DYNAMICS_GROUPS}
-        
         for name, param in model.named_parameters():
-            if param.grad is not None:
-                grad_norm = param.grad.norm(2).item()
-                name_lower = name.lower()
+            if param.grad is None:
+                continue
+            name_lower = name.lower()
 
-                # Try dynamics groups first
-                dyn_group = ModelStatistics._classify_dynamics_param(name_lower)
-                if dyn_group:
-                    dyn_grads[dyn_group] += grad_norm ** 2
-                # Then tokenizer groups
-                elif 'attn' in name_lower or 'attention' in name_lower:
-                    attention_grad += grad_norm ** 2
-                elif name_lower.startswith('blocks.'):
-                    encoder_grad += grad_norm ** 2
-                elif 'decoder' in name_lower:
-                    decoder_grad += grad_norm ** 2
-        
-        # Tokenizer stats
-        stats["model/encoder_grad_norm"] = encoder_grad ** 0.5
-        stats["model/decoder_grad_norm"] = decoder_grad ** 0.5
-        stats["model/attention_grad_norm"] = attention_grad ** 0.5
+            dyn_group = ModelStatistics._classify_dynamics_param(name_lower)
+            if dyn_group:
+                groups[f"dyn_{dyn_group}"].append(param.grad)
+            elif 'attn' in name_lower or 'attention' in name_lower:
+                groups["attention"].append(param.grad)
+            elif name_lower.startswith('blocks.'):
+                groups["encoder"].append(param.grad)
+            elif 'decoder' in name_lower:
+                groups["decoder"].append(param.grad)
 
-        # Dynamics stats
-        for group, val in dyn_grads.items():
-            stats[f"model/dyn_{group}_grad_norm"] = val ** 0.5
-        
+        stats: Dict[str, float] = {}
+        for key, grads in groups.items():
+            if not grads:
+                continue
+            sq_sum = sum(g.norm(2) ** 2 for g in grads)
+            stats[f"model/{key}_grad_norm"] = sq_sum.sqrt().item()
+
         return stats
 
 

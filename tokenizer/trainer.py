@@ -197,12 +197,12 @@ class TokenizerTrainer:
                         "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
                         "train/mask_ratio": (_log_mask_ratio / n).item(),
                     })
-                    # Reset accumulators
-                    _log_loss = torch.tensor(0.0, device=self.device)
-                    _log_mse = torch.tensor(0.0, device=self.device)
-                    _log_lpips = torch.tensor(0.0, device=self.device)
-                    _log_grad_norm = torch.tensor(0.0, device=self.device)
-                    _log_mask_ratio = torch.tensor(0.0, device=self.device)
+                    # Reset accumulators in-place — avoids new XLA graph nodes
+                    _log_loss.zero_()
+                    _log_mse.zero_()
+                    _log_lpips.zero_() if isinstance(_log_lpips, torch.Tensor) else None
+                    _log_grad_norm.zero_()
+                    _log_mask_ratio.zero_()
                     _log_count = 0
 
                     metrics = self.metrics_buffer.get_averages()
