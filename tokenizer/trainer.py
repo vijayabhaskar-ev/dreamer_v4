@@ -127,14 +127,22 @@ class TokenizerTrainer:
         - Training throughput (samples/sec)
         """
         self.model.train(training)
-        total_loss = 0.0
-        total_mse = 0.0
-        total_lpips = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_mse = torch.tensor(0.0, device=self.device)
+        total_lpips = torch.tensor(0.0, device=self.device)
         total_steps = 0
         
         log_interval = self.training_cfg.log_interval
         model_stats_interval = self.training_cfg.log_model_stats_interval
-        
+
+        # On-device accumulators for smoothed logging (reset every log_interval)
+        _log_loss = torch.tensor(0.0, device=self.device)
+        _log_mse = torch.tensor(0.0, device=self.device)
+        _log_lpips = torch.tensor(0.0, device=self.device)
+        _log_grad_norm = torch.tensor(0.0, device=self.device)
+        _log_mask_ratio = torch.tensor(0.0, device=self.device)
+        _log_count = 0
+
         for batch in loader:
             #save_debug_gif(batch, "test_pipeline.gif")
             frames, actions = batch
@@ -170,18 +178,33 @@ class TokenizerTrainer:
                 mark_step()
 
                 self.global_step += 1
-                
-                # Always update smoothing buffer
-                self.metrics_buffer.update({
-                    "train/loss": loss.item(),
-                    "train/mse": loss_outputs.mse_loss.item(),
-                    "train/lpips": loss_outputs.lpips_loss.item() if loss_outputs.lpips_loss is not None else 0.0,
-                    "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    "train/mask_ratio": loss_outputs.mask_ratio.item(),
-                })
-                
-                # Log smoothed metrics every N steps
+
+                # Accumulate on-device — no .item() sync per step
+                _log_loss += loss.detach()
+                _log_mse += loss_outputs.mse_loss.detach()
+                _log_lpips += loss_outputs.lpips_loss.detach() if loss_outputs.lpips_loss is not None else 0.0
+                _log_grad_norm += grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm
+                _log_mask_ratio += loss_outputs.mask_ratio.detach()
+                _log_count += 1
+
                 if self.global_step % log_interval == 0:
+                    # Single .item() batch at log intervals — true average over interval
+                    n = max(_log_count, 1)
+                    self.metrics_buffer.update({
+                        "train/loss": (_log_loss / n).item(),
+                        "train/mse": (_log_mse / n).item(),
+                        "train/lpips": (_log_lpips / n).item() if isinstance(_log_lpips, torch.Tensor) else _log_lpips / n,
+                        "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
+                        "train/mask_ratio": (_log_mask_ratio / n).item(),
+                    })
+                    # Reset accumulators
+                    _log_loss = torch.tensor(0.0, device=self.device)
+                    _log_mse = torch.tensor(0.0, device=self.device)
+                    _log_lpips = torch.tensor(0.0, device=self.device)
+                    _log_grad_norm = torch.tensor(0.0, device=self.device)
+                    _log_mask_ratio = torch.tensor(0.0, device=self.device)
+                    _log_count = 0
+
                     metrics = self.metrics_buffer.get_averages()
                     
                     # Optimizer state
@@ -207,20 +230,20 @@ class TokenizerTrainer:
                     
                     wandb.log(metrics, step=self.global_step)
 
-            # Accumulate for epoch-level metrics
-            total_loss += loss_outputs.total_loss.item()
-            total_mse += loss_outputs.mse_loss.item()
+            # Accumulate on-device — no .item() sync per step
+            total_loss += loss_outputs.total_loss.detach()
+            total_mse += loss_outputs.mse_loss.detach()
             if loss_outputs.lpips_loss is not None:
-                total_lpips += loss_outputs.lpips_loss.item()
+                total_lpips += loss_outputs.lpips_loss.detach()
             total_steps += 1
 
-        # Epoch-level aggregated metrics
+        # Single .item() at epoch end — one sync instead of N
         epoch_metrics = {
-            "loss/tokenizer_total": total_loss / max(total_steps, 1),
-            "loss/tokenizer_mse": total_mse / max(total_steps, 1),
+            "loss/tokenizer_total": (total_loss / max(total_steps, 1)).item(),
+            "loss/tokenizer_mse": (total_mse / max(total_steps, 1)).item(),
         }
-        if total_lpips > 0:
-            epoch_metrics["loss/tokenizer_lpips"] = total_lpips / max(total_steps, 1)
+        if total_lpips.item() > 0:
+            epoch_metrics["loss/tokenizer_lpips"] = (total_lpips / max(total_steps, 1)).item()
         return epoch_metrics
 
     @torch.no_grad()

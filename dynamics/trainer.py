@@ -210,15 +210,22 @@ class DynamicsTrainer:
     ) -> Dict[str, float]:
 
         self.model.train(training)
-        total_loss = 0.0
-        total_flow = 0.0
-        total_bootstrap = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_flow = torch.tensor(0.0, device=self.device)
+        total_bootstrap = torch.tensor(0.0, device=self.device)
         total_steps = 0
 
         log_interval = self.training_cfg.log_interval
         model_stats_interval = self.training_cfg.log_model_stats_interval
 
-
+        # On-device accumulators for smoothed logging (reset every log_interval)
+        _log_loss = torch.tensor(0.0, device=self.device)
+        _log_flow = torch.tensor(0.0, device=self.device)
+        _log_bootstrap = torch.tensor(0.0, device=self.device)
+        _log_grad_norm = torch.tensor(0.0, device=self.device)
+        _log_tau = torch.tensor(0.0, device=self.device)
+        _log_d = torch.tensor(0.0, device=self.device)
+        _log_count = 0
 
         for batch in loader:
             frames, actions = batch
@@ -321,16 +328,35 @@ class DynamicsTrainer:
 
                 self.global_step += 1
 
-                self.metrics_buffer.update({
-                    "train/loss": loss.item(),
-                    "train/flow": metrics["loss_flow"],
-                    "train/bootstrap": metrics["loss_bootstrap"],
-                    "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    "train/tau_mean": tau_for_log.mean().item(),
-                    "train/d_mean": d_for_log.mean().item(),
-                })
+                # Accumulate on-device — no .item() sync per step
+                _log_loss += loss.detach()
+                _log_flow += metrics["loss_flow"]
+                _log_bootstrap += metrics["loss_bootstrap"]
+                _log_grad_norm += grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm
+                _log_tau += tau_for_log.mean().detach()
+                _log_d += d_for_log.mean().detach()
+                _log_count += 1
 
                 if self.global_step % log_interval == 0:
+                    # Single .item() batch at log intervals — true average over interval
+                    n = max(_log_count, 1)
+                    self.metrics_buffer.update({
+                        "train/loss": (_log_loss / n).item(),
+                        "train/flow": (_log_flow / n).item(),
+                        "train/bootstrap": (_log_bootstrap / n).item(),
+                        "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
+                        "train/tau_mean": (_log_tau / n).item(),
+                        "train/d_mean": (_log_d / n).item(),
+                    })
+                    # Reset accumulators
+                    _log_loss = torch.tensor(0.0, device=self.device)
+                    _log_flow = torch.tensor(0.0, device=self.device)
+                    _log_bootstrap = torch.tensor(0.0, device=self.device)
+                    _log_grad_norm = torch.tensor(0.0, device=self.device)
+                    _log_tau = torch.tensor(0.0, device=self.device)
+                    _log_d = torch.tensor(0.0, device=self.device)
+                    _log_count = 0
+
                     smoothed_metrics = self.metrics_buffer.get_averages()
                     smoothed_metrics.update({
                         "train/lr": self.optimizer.param_groups[0]["lr"],
@@ -350,111 +376,86 @@ class DynamicsTrainer:
 
                     wandb.log(smoothed_metrics, step=self.global_step)
 
-            total_loss += loss.item()
+            total_loss += loss.detach()
             total_flow += metrics["loss_flow"]
             total_bootstrap += metrics["loss_bootstrap"]
             total_steps += 1
 
+        # Single .item() at epoch end — one sync instead of N
         return {
-            "loss/dynamics_total": total_loss / max(total_steps, 1),
-            "loss/dynamics_flow": total_flow / max(total_steps, 1),
-            "loss/dynamics_bootstrap": total_bootstrap / max(total_steps, 1),
+            "loss/dynamics_total": (total_loss / max(total_steps, 1)).item(),
+            "loss/dynamics_flow": (total_flow / max(total_steps, 1)).item(),
+            "loss/dynamics_bootstrap": (total_bootstrap / max(total_steps, 1)).item(),
         }
 
 
-    def _compute_loss(self, z_clean, z_noised, actions, tau, d, training = True):
+    def _compute_loss(self, z_clean, z_noised, actions, tau, d, training=True):
         """Compute flow matching + bootstrap loss.
-        
+
+        Uses masked arithmetic instead of boolean indexing so all tensors
+        keep fixed (B, T, ...) shapes — critical for XLA/TPU which
+        recompiles the entire graph on shape changes.
+
         Args:
             z_clean:  (B, T, S_z, D)  — target clean latents
             z_noised: (B, T, S_z, D)  — corrupted input
             actions:  (B, T-1, action_dim)
             tau:      (B, T)  — per-frame signal levels
             d:        (B, T)  — per-frame step sizes
-        
+
         Returns:
-            loss, metrics_dict #TODO modify this based on the final change
+            loss, metrics_dict
         """
-        
-        d_min = 1/self.dynamics_cfg.K_max
+        d_min = 1 / self.dynamics_cfg.K_max
 
         z_hat = self.model(z_noised, actions, tau, d)  # (B, T, S_z, D)
 
-        is_flow = (d == d_min)  # (B, T)
-        is_bootstrap = ~ is_flow
+        # Float masks — no boolean indexing, no dynamic shapes
+        flow_mask = (d == d_min).float()   # (B, T)  1.0 for flow, 0.0 for bootstrap
+        boot_mask = 1.0 - flow_mask        # (B, T)
+        w = 0.9 * tau + 0.1               # (B, T)
 
-        # assert is_flow.any(), f"No flow samples in batch! is_flow.sum()={is_flow.sum()}"
-        # assert is_bootstrap.any(), f"No bootstrap samples! is_bootstrap.sum()={is_bootstrap.sum()}"
-        w = 0.9 * tau + 0.1  # (B, T)
+        # ── Flow loss (masked) ──────────────────────────────────────
+        per_sample_flow = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))  # (B, T)
+        n_flow = flow_mask.sum().clamp(min=1.0)
+        loss_flow = (flow_mask * w * per_sample_flow).sum() / n_flow
+        loss_flow_normed = self.rms_flow.normalize(loss_flow, update=training)
 
-        if is_flow.any():
-            z_hat_flow  = z_hat[is_flow]
-            z_clean_flow = z_clean[is_flow]
-            w_flow = w[is_flow]  # (N_flow,)
-            per_sample = ((z_hat_flow - z_clean_flow) ** 2).mean(dim=(-2, -1))  # (N_flow,)
-            loss_flow = (w_flow * per_sample).mean()
-            loss_flow_normed = self.rms_flow.normalize(loss_flow, update = training)
+        # ── Bootstrap loss (masked) ─────────────────────────────────
+        tau_4d = tau[:, :, None, None]   # (B, T, 1, 1)
+        d_4d = d[:, :, None, None]
+        v_pred = (z_hat - z_noised) / (1 - tau_4d).clamp(min=1e-4)
 
-        else:
-            loss_flow = torch.tensor(0.0, device=z_hat.device)  
-            loss_flow_normed = torch.tensor(0.0, device=z_hat.device)
+        with torch.no_grad():
+            z_hat_half1 = self.model(z_noised, actions, tau, d / 2)
+            v1 = (z_hat_half1 - z_noised) / (1 - tau_4d).clamp(min=1e-4)
 
+            z_mid = z_noised + v1 * (d_4d / 2)
 
-        if is_bootstrap.any():
-            tau_4d = tau[:, :, None, None]      # (B, T, 1, 1)
-            d_4d = d[:, :, None, None]   
-            v_pred = (z_hat - z_noised) / (1 - tau_4d).clamp(min=1e-4)
+            z_hat_half2 = self.model(z_mid, actions, tau + d / 2, d / 2)
+            v2 = (z_hat_half2 - z_mid) / (1 - (tau_4d + d_4d / 2)).clamp(min=1e-4)
 
-            with torch.no_grad():
-                #TODO Need to test this code block as is userful to reduce the gpu memory usage spikes
-                
-                # z_noised_bs = z_noised[is_bootstrap]
-                # actions_bs = actions[is_bootstrap] if actions is not None else None
-                # tau_bs = tau[is_bootstrap]
-                # d_bs = d[is_bootstrap]
-                # z_hat_half1 = self.model(z_noised_bs, actions_bs, tau_bs, d_bs/2)
-                z_hat_half1 = self.model(z_noised, actions, tau, d/2)
-                v1 = (z_hat_half1 - z_noised) / (1-tau_4d).clamp(min=1e-4)
+            v_target = (v1 + v2) / 2
 
-                z_mid = z_noised + v1 * (d_4d/2)
+        weight_tau_sq = (1 - tau[:, :, None, None]) ** 2  # (B, T, 1, 1)
+        per_sample_boot = (
+            weight_tau_sq * (v_pred - v_target) ** 2
+        ).mean(dim=(-2, -1))  # (B, T)
 
-                z_hat_half2 = self.model(z_mid, actions, tau + d/2, d/2)
-                v2 = (z_hat_half2 - z_mid) / (1 - (tau_4d + d_4d/2)).clamp(min=1e-4)
-
-                v_target = (v1 + v2) / 2
-
-
-            v_pred_boot = v_pred[is_bootstrap]      # (N_boot, S_z, D)
-            v_target_boot = v_target[is_bootstrap]  # (N_boot, S_z, D)
-            tau_boot = tau[is_bootstrap]   
-            w_boot = (0.9 * tau_boot + 0.1)  # (N_boot,)
-
-            weight_tau_sq = (1 - tau_boot[:, None, None]) ** 2   # (N_boot, 1, 1)
-
-            per_sample = (
-                weight_tau_sq 
-                * (v_pred_boot - v_target_boot) ** 2
-            ).mean(dim=(-2, -1))  # (N_boot,)
-
-            loss_bootstrap = (w_boot * per_sample).mean()
-            loss_bootstrap_normed = self.rms_bootstrap.normalize(loss_bootstrap, update = training)
-
-        else:
-            loss_bootstrap = torch.tensor(0.0, device=z_hat.device)
-            loss_bootstrap_normed = torch.tensor(0.0, device=z_hat.device)
-
-
-
+        n_boot = boot_mask.sum().clamp(min=1.0)
+        loss_bootstrap = (boot_mask * w * per_sample_boot).sum() / n_boot
+        loss_bootstrap_normed = self.rms_bootstrap.normalize(loss_bootstrap, update=training)
 
         loss_total = loss_flow_normed + loss_bootstrap_normed
-    
+
+        # Return detached tensors — .item() called only at log intervals
         metrics = {
-            "loss_flow": loss_flow.item(),
-            "loss_bootstrap": loss_bootstrap.item(),
-            "n_flow": is_flow.sum().item(),
-            "n_bootstrap": is_bootstrap.sum().item(),
+            "loss_flow": loss_flow.detach(),
+            "loss_bootstrap": loss_bootstrap.detach(),
+            "n_flow": n_flow.detach(),
+            "n_bootstrap": n_boot.detach(),
         }
-    
+
         return loss_total, metrics
 
 
