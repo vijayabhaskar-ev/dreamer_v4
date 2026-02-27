@@ -187,9 +187,9 @@ class DynamicsTrainer:
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
         try:
-            state = torch.load(path, map_location=self.device, weights_only=True)
+            state = torch.load(path, map_location='cpu', weights_only=True)
         except pickle.UnpicklingError:
-            state = torch.load(path, map_location=self.device, weights_only=False)
+            state = torch.load(path, map_location='cpu', weights_only=False)
         self.model.load_state_dict(state["model"], strict=strict)
         if "optimizer" in state:
             self.optimizer.load_state_dict(state["optimizer"])
@@ -468,9 +468,9 @@ class DynamicsTrainer:
             )
 
         try:
-            state = torch.load(ckpt_path, map_location=self.device, weights_only=True)
+            state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
         except pickle.UnpicklingError:
-            state = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+            state = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         if "model" in state:
             state = state["model"]
         missing, unexpected = self.tokenizer.load_state_dict(state, strict=False)

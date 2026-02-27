@@ -228,6 +228,7 @@ def main(args: Optional[list[str]] = None) -> None:
         batch_size=None,
         num_workers=opts.num_workers,
         pin_memory=use_pin_memory,
+        multiprocessing_context='spawn' if opts.num_workers > 0 else None,
     )
 
     val_loader = DataLoader(
