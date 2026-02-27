@@ -23,6 +23,7 @@ from .config import DynamicsConfig
 from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
+from device_utils import get_device
 import wandb
 
 
@@ -219,18 +220,21 @@ def main(args: Optional[list[str]] = None) -> None:
             steps_per_epoch=val_steps,
         )
 
+    device = get_device(opts.device)
+    use_pin_memory = device.type == "cuda"
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=None,
         num_workers=opts.num_workers,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=None,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
     ) if val_dataset is not None else None
 
     trainer = DynamicsTrainer(

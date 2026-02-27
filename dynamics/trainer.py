@@ -17,6 +17,7 @@ from .flow_matching import add_noise, sample_tau_and_d
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
 from tokenizer.metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
+from device_utils import get_device, get_device_type, make_grad_scaler, mark_step, save_checkpoint as save_ckpt
 import wandb
 
 
@@ -65,7 +66,7 @@ class DynamicsTrainer:
         self.tokenizer_cfg = tokenizer_cfg
         self.training_cfg = training_cfg
 
-        self.device = torch.device(training_cfg.device if torch.cuda.is_available() else "cpu")
+        self.device = get_device(training_cfg.device)
 
         self.rms_flow = RMSNormalizer(decay=0.99)
         self.rms_bootstrap = RMSNormalizer(decay=0.99)
@@ -83,7 +84,7 @@ class DynamicsTrainer:
             weight_decay=training_cfg.weight_decay,
         )
 
-        self.scaler = torch.cuda.amp.GradScaler(enabled=training_cfg.amp)
+        self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
         self.scheduler = None
         self.global_step = 0
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
@@ -181,7 +182,7 @@ class DynamicsTrainer:
                     "bootstrap": self.rms_bootstrap.state_dict(),
                 },
             }
-        torch.save(state, path)
+        save_ckpt(state, path, self.device)
         print(f"Saved dynamics checkpoint to {path}")
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
@@ -255,7 +256,7 @@ class DynamicsTrainer:
                 # (step ramp_end+): Normal sampling, no override
                 z_noised_f, _ = add_noise(z_clean_f, tau_f)
 
-                with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
+                with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
                     loss_full, metrics_full = self._compute_loss(z_clean_f,z_noised_f, actions_full, tau_f, d_f, training = training )
 
                  #=========30% Single-Frame Training==========
@@ -280,7 +281,7 @@ class DynamicsTrainer:
                 tau_for_log = torch.cat([tau_f.flatten(), tau_s.flatten()])
                 d_for_log = torch.cat([d_f.flatten(), d_s.flatten()])
 
-                with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
+                with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
                     loss_single, metrics_single = self._compute_loss(z_clean_s,z_noised_s, None, tau_s, d_s, training = training )
 
                 loss = (n_full * loss_full + n_single * loss_single) / B
@@ -295,7 +296,7 @@ class DynamicsTrainer:
                 tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
                 z_noised, _ = add_noise(z_clean, tau)
                 tau_for_log, d_for_log = tau, d
-                with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
+                with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
 
                     loss, metrics = self._compute_loss(z_clean, z_noised, actions, tau, d, training=training)
 
@@ -315,7 +316,8 @@ class DynamicsTrainer:
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                self.scheduler.step() 
+                self.scheduler.step()
+                mark_step()
 
                 self.global_step += 1
 

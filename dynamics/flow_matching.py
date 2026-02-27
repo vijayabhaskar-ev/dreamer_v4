@@ -9,7 +9,7 @@ def add_noise(z_clean, tau):
     return z_noised, z_noise
 
 
-def sample_tau_and_d(batch_size, T,  K_max=64, device='cuda'):
+def sample_tau_and_d(batch_size, T,  K_max=64, device=None):
     log2_K_max = int(math.log2(K_max))
     k_exp = torch.randint(0, log2_K_max + 1, (batch_size, T), device=device)
     k = 2**k_exp

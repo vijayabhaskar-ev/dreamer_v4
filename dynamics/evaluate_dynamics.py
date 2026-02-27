@@ -35,6 +35,7 @@ from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
 from tokenizer.layers import AttentionMask
+from device_utils import get_device
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,9 +69,7 @@ def safe_torch_load(path: str, device: torch.device):
 
 
 def resolve_device(requested: str) -> torch.device:
-    if requested.startswith("cuda") and torch.cuda.is_available():
-        return torch.device(requested)
-    return torch.device("cpu")
+    return get_device(requested)
 
 
 def load_tokenizer_config_from_ckpt(ckpt_path: str, device: torch.device) -> TokenizerConfig:

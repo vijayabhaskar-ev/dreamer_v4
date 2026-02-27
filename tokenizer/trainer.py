@@ -13,6 +13,7 @@ from .config import TokenizerConfig
 from .losses import MaskedAutoencoderLoss
 from .tokenizer import MaskedAutoencoderTokenizer
 from .metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
+from device_utils import get_device, get_device_type, make_grad_scaler, mark_step, save_checkpoint
 from PIL import Image
 import wandb
 
@@ -49,7 +50,7 @@ class TokenizerTrainer:
 
 
 
-        self.device = torch.device(training_cfg.device if torch.cuda.is_available() else "cpu")
+        self.device = get_device(training_cfg.device)
         self.model = MaskedAutoencoderTokenizer(tokenizer_cfg).to(self.device)
         self.loss_module = loss_module or MaskedAutoencoderLoss(lpips_module=None)
         self.optimizer = torch.optim.AdamW(
@@ -57,7 +58,7 @@ class TokenizerTrainer:
             lr=training_cfg.lr,
             weight_decay=training_cfg.weight_decay,
         )
-        self.scaler = torch.cuda.amp.GradScaler(enabled=training_cfg.amp)
+        self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
         
         self.global_step = 0
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
@@ -99,7 +100,7 @@ class TokenizerTrainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
         }
-        torch.save(state, path)
+        save_checkpoint(state, path, self.device)
         print(f"Saved tokenizer checkpoint to {path}")
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
@@ -142,7 +143,7 @@ class TokenizerTrainer:
             if frames.dim() == 4: #TODO change it after intial implementation
                 frames = frames.unsqueeze(1)
 
-            with torch.cuda.amp.autocast(enabled=self.training_cfg.amp): #TODO Replace the deprecated class
+            with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp): #TODO Replace the deprecated class
                 outputs = self.model(frames)
                 loss_outputs = self.loss_module(
                     recon=outputs.reconstructed,
@@ -166,7 +167,8 @@ class TokenizerTrainer:
                 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                
+                mark_step()
+
                 self.global_step += 1
                 
                 # Always update smoothing buffer
@@ -252,7 +254,7 @@ class TokenizerTrainer:
             from .masking import sample_random_mask
             mask = sample_random_mask(frames.size(0), seq_len, 0.75, 0.75, self.device, num_frames=t) #TODO need to check the mask ratio for evaluation
             
-            with torch.cuda.amp.autocast(enabled=self.training_cfg.amp):
+            with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
                 outputs = self.model(frames, mask=mask)
                 loss_outputs = self.loss_module(
                     recon=outputs.reconstructed,

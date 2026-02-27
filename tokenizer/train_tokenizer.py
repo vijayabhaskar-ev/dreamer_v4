@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from .config import TokenizerConfig
 from .trainer import TokenizerTrainer, TokenizerTrainingConfig, MaskedAutoencoderLoss
 from .dataset import DatasetFactory
+from device_utils import get_device
 import wandb
 
 try:
@@ -115,7 +116,7 @@ def main(args: Optional[list[str]] = None) -> None:
         try:
             import lpips
 
-            lpips_module = lpips.LPIPS(net=parsed.lpips).to(parsed.device) 
+            lpips_module = lpips.LPIPS(net=parsed.lpips).to(get_device(parsed.device))
         except ImportError:
             raise ImportError(
                 "LPIPS requested but library not installed. Install `lpips` package or rerun with --lpips none."
@@ -131,16 +132,19 @@ def main(args: Optional[list[str]] = None) -> None:
     
 
     #TODO Maybe need to modify the dataset factory to yield batches of size batch_size
+    device = get_device(parsed.device)
+    use_pin_memory = device.type == "cuda"
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=None,
         num_workers=parsed.num_workers, #TODO Need to check the implementation of num_workers. Right now num_workers  > 0 is getting stuck
-        pin_memory=True,
+        pin_memory=use_pin_memory,
     )
 
-    val_steps = max(1, steps_per_worker // 10)  
+    val_steps = max(1, steps_per_worker // 10)
     val_dataset = DatasetFactory.get_dataset(tokenizer_cfg, parsed.batch_size, val_steps)
-    val_loader = DataLoader(val_dataset, batch_size=None, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=None, num_workers=0, pin_memory=use_pin_memory)
 
     trainer = TokenizerTrainer(
         tokenizer_cfg=tokenizer_cfg,
