@@ -57,7 +57,10 @@ def build_parser() -> argparse.ArgumentParser: #TODO Need to check the defeault 
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--embed-dim", type=int, default=768)
     parser.add_argument("--lpips", type=str, choices=["none", "vgg", "alex", "squeeze"], default="vgg")
-    parser.add_argument("--dataset", type=str, default="dm_control", help="Dataset name (dm_control, moving_square)")
+    parser.add_argument("--dataset", type=str, default="dm_control",
+                        help="Dataset type: dm_control, offline, moving_square")
+    parser.add_argument("--dataset-path", type=str, default=None,
+                        help="Path to .npz file (required when --dataset=offline)")
     parser.add_argument("--task", type=str, default="cheetah_run", help="DMControl task name")
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--evaluate", action="store_true", help="Run evaluation only")
@@ -128,7 +131,9 @@ def main(args: Optional[list[str]] = None) -> None:
     if parsed.num_workers > 0:
         steps_per_worker = max(1, parsed.steps_per_epoch // parsed.num_workers)
 
-    train_dataset = DatasetFactory.get_dataset(tokenizer_cfg, parsed.batch_size, steps_per_worker)
+    train_dataset = DatasetFactory.get_dataset(
+        tokenizer_cfg, parsed.batch_size, steps_per_worker, dataset_path=parsed.dataset_path
+    )
     
 
     #TODO Maybe need to modify the dataset factory to yield batches of size batch_size
@@ -143,7 +148,9 @@ def main(args: Optional[list[str]] = None) -> None:
     )
 
     val_steps = max(1, steps_per_worker // 10)
-    val_dataset = DatasetFactory.get_dataset(tokenizer_cfg, parsed.batch_size, val_steps)
+    val_dataset = DatasetFactory.get_dataset(
+        tokenizer_cfg, parsed.batch_size, val_steps, dataset_path=parsed.dataset_path
+    )
     val_loader = DataLoader(val_dataset, batch_size=None, num_workers=0, pin_memory=use_pin_memory)
 
     trainer = TokenizerTrainer(

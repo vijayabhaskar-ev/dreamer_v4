@@ -113,31 +113,92 @@ class DMControlDataset(VideoDataset):
             yield (torch.stack(batch_videos), # (B, T, C, H, W)
                   torch.stack(batch_actions)) # (B, T-1, action_dim)
 
+class OfflineDataset(VideoDataset):
+    """Load pre-generated episodes from a .npz file.
+
+    Expected keys in the .npz:
+        frames:  (N, T_total, H, W, 3)  uint8 0-255
+        actions: (N, T_total, action_dim) float32
+
+    Each iteration randomly picks an episode and a contiguous window
+    of length ``seq_len``, returning (B, seq_len, C, H, W) frames
+    and (B, seq_len-1, action_dim) actions.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        seq_len: int = 50,
+        batch_size: int = 16,
+        steps_per_epoch: int = 1000,
+    ):
+        data = np.load(path)
+        self.frames = data["frames"]    # (N, T, H, W, 3)
+        self.actions = data["actions"]  # (N, T, action_dim)
+        self.seq_len = seq_len
+        self.batch_size = batch_size
+        self.steps_per_epoch = steps_per_epoch
+        self.num_episodes = self.frames.shape[0]
+        self.episode_len = self.frames.shape[1]
+
+    def __iter__(self) -> Iterator[torch.Tensor]:
+        for _ in range(self.steps_per_epoch):
+            idxs = np.random.randint(0, self.num_episodes, size=self.batch_size)
+            max_start = max(0, self.episode_len - self.seq_len)
+            starts = np.random.randint(0, max_start + 1, size=self.batch_size)
+
+            batch_frames = []
+            batch_actions = []
+            for idx, start in zip(idxs, starts):
+                end = start + self.seq_len
+                f = self.frames[idx, start:end]           # (seq_len, H, W, 3)
+                a = self.actions[idx, start:end - 1]      # (seq_len-1, action_dim)
+
+                f = torch.from_numpy(f.copy()).permute(0, 3, 1, 2).float() / 255.0
+                a = torch.from_numpy(a.copy()).float()
+                batch_frames.append(f)
+                batch_actions.append(a)
+
+            yield (
+                torch.stack(batch_frames),   # (B, seq_len, C, H, W)
+                torch.stack(batch_actions),  # (B, seq_len-1, action_dim)
+            )
+
+
 class DatasetFactory:
     @staticmethod
-    def get_dataset(config: TokenizerConfig, batch_size: int, steps_per_epoch: int = 1000) -> IterableDataset:
-        if config.dataset_name == "dm_control":
+    def get_dataset(
+        config: TokenizerConfig,
+        batch_size: int,
+        steps_per_epoch: int = 1000,
+        dataset_path: Optional[str] = None,
+    ) -> IterableDataset:
+        if config.dataset_name == "offline":
+            if dataset_path is None:
+                raise ValueError("--dataset-path is required when --dataset=offline")
+            return OfflineDataset(
+                path=dataset_path,
+                seq_len=config.seq_len,
+                batch_size=batch_size,
+                steps_per_epoch=steps_per_epoch,
+            )
+        elif config.dataset_name == "dm_control":
             return DMControlDataset(
                 task_name=config.task_name,
                 action_repeat=config.action_repeat,
                 img_size=config.image_size,
-                seq_len=config.seq_len, # Assuming seq_len is in config, else default
+                seq_len=config.seq_len,
                 batch_size=batch_size,
                 steps_per_epoch=steps_per_epoch
             )
         elif config.dataset_name == "moving_square":
             from .train_tokenizer import MovingSquareDataset, MovingSquareIterableDataset
-            # Re-use existing logic (wrapped)
             ds = MovingSquareDataset(
-                H=config.image_size[0], 
-                W=config.image_size[1], 
+                H=config.image_size[0],
+                W=config.image_size[1],
                 T=config.seq_len if hasattr(config, 'seq_len') else 4
             )
-            # We need to wrap it to match the IterableDataset interface that yields batches
-            # But MovingSquareIterableDataset logic is slightly different (yields one batch per step)
-            # Let's assume the caller handles the wrapping or we standardize here.
-            # For now, return the legacy wrapper if possible, or adapt.
-            return MovingSquareIterableDataset(ds, batch_size, steps_per_epoch=1000) 
-            
+            return MovingSquareIterableDataset(ds, batch_size, steps_per_epoch=1000)
+
         else:
             raise ValueError(f"Unknown dataset: {config.dataset_name}")

@@ -77,7 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-interval", type=int, default=None)
 
     # Dataset
-    parser.add_argument("--dataset", type=str, default="dm_control")
+    parser.add_argument("--dataset", type=str, default="dm_control",
+                        help="Dataset type: dm_control, offline, moving_square")
+    parser.add_argument("--dataset-path", type=str, default=None,
+                        help="Path to .npz file (required when --dataset=offline)")
     parser.add_argument("--task", type=str, default="cheetah_run")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--steps-per-epoch", type=int, default=100)
@@ -206,6 +209,7 @@ def main(args: Optional[list[str]] = None) -> None:
         dataset_cfg,
         batch_size=training_cfg.batch_size,
         steps_per_epoch=train_steps_per_worker,
+        dataset_path=opts.dataset_path,
     )
 
     val_steps = opts.val_steps_per_epoch
@@ -218,6 +222,7 @@ def main(args: Optional[list[str]] = None) -> None:
             dataset_cfg,
             batch_size=training_cfg.batch_size,
             steps_per_epoch=val_steps,
+            dataset_path=opts.dataset_path,
         )
 
     device = get_device(opts.device)
