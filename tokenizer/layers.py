@@ -242,55 +242,59 @@ class LatentCrossAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
-    
+
+        # Cached frame indices for RoPE — avoids per-call torch.arange + cat
+        self._cached_rope_key = None
+        self._cached_q_frame_idx = None
+        self._cached_k_frame_idx = None
+
     def forward(
-        self, 
-        latents: torch.Tensor, 
+        self,
+        latents: torch.Tensor,
         context: torch.Tensor,
         num_frames: int,
         attn_mask: Optional[AttentionMask] = None,
- 
+
     ) -> torch.Tensor:
         """
         Args:
             latents: Latent tokens (B, L, D) - these are the queries
             context: All tokens [latents + patches] (B, L+T*N, D) - these are K, V
             attn_mask: Block causal mask for latent-to-all attention
-        
+
         Returns:
             Updated latent tokens (B, L, D)
         """
         B, L_q, C = latents.shape
         _, L_kv, _ = context.shape
 
-
-        
         q = self.q_proj(latents)
         k = self.k_proj(context)
         v = self.v_proj(context)
-        
+
         q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_q, D)
         k = k.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         v = v.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
 
         if self.rope is not None and num_frames > 1:
-            num_patches = L_kv - L_q
-            latents_per_frame = L_q // num_frames
-            patches_per_frame = num_patches // num_frames
-
-            assert latents_per_frame * num_frames == L_q
-            assert patches_per_frame * num_frames == num_patches
-            
-            q_frame_idx = torch.arange(L_q, device=q.device) // latents_per_frame
-            k_latent_frames = torch.arange(L_q, device=k.device) // latents_per_frame
-            k_patches_frames = torch.arange(num_patches, device=k.device) // patches_per_frame
-            k_frame_idx = torch.cat([k_latent_frames, k_patches_frames])
-
+            cache_key = (L_q, L_kv, num_frames)
+            if self._cached_rope_key != cache_key:
+                num_patches = L_kv - L_q
+                latents_per_frame = L_q // num_frames
+                patches_per_frame = num_patches // num_frames
+                assert latents_per_frame * num_frames == L_q
+                assert patches_per_frame * num_frames == num_patches
+                q_frame_idx = torch.arange(L_q, device=q.device) // latents_per_frame
+                k_latent_frames = torch.arange(L_q, device=k.device) // latents_per_frame
+                k_patches_frames = torch.arange(num_patches, device=k.device) // patches_per_frame
+                self._cached_q_frame_idx = q_frame_idx
+                self._cached_k_frame_idx = torch.cat([k_latent_frames, k_patches_frames])
+                self._cached_rope_key = cache_key
 
             cos, sin = self.rope(num_frames, latents.device, latents.dtype)
 
-            q = apply_rotary_pos_emb_with_indices(q, cos, sin, q_frame_idx)
-            k = apply_rotary_pos_emb_with_indices(k, cos, sin, k_frame_idx)
+            q = apply_rotary_pos_emb_with_indices(q, cos, sin, self._cached_q_frame_idx)
+            k = apply_rotary_pos_emb_with_indices(k, cos, sin, self._cached_k_frame_idx)
 
 
         if self.num_kv_heads < self.num_heads:
@@ -351,10 +355,15 @@ class PatchToLatentCrossAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
-    
+
+        # Cached frame indices for RoPE — avoids per-call torch.arange
+        self._cached_rope_key = None
+        self._cached_q_frame_idx = None
+        self._cached_k_frame_idx = None
+
     def forward(
-        self, 
-        patches: torch.Tensor, 
+        self,
+        patches: torch.Tensor,
         latents: torch.Tensor,
         num_frames: int,
     ) -> torch.Tensor:
@@ -362,31 +371,34 @@ class PatchToLatentCrossAttention(nn.Module):
         Args:
             patches: Decoder query tokens (B, T*N, D) - these are the queries
             latents: Latent tokens (B, L, D) - these are K, V
-        
+
         Returns:
             Updated patch tokens (B, T*N, D)
         """
         B, L_q, C = patches.shape
         _, L_kv, _ = latents.shape
-        
+
         q = self.q_proj(patches)
         k = self.k_proj(latents)
         v = self.v_proj(latents)
-        
+
         q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_q, D)
-        
+
         k = k.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         v = v.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
-        
 
         if self.rope is not None and num_frames > 1:
-             cos, sin = self.rope(num_frames, q.device, q.dtype)      
-             latents_per_frame = L_kv // num_frames
-             patches_per_frame = L_q // num_frames
-             q_frame_idx = torch.arange(L_q, device=q.device) // patches_per_frame
-             k_frame_idx = torch.arange(L_kv, device=k.device) // latents_per_frame 
-             q = apply_rotary_pos_emb_with_indices(q, cos, sin, q_frame_idx)
-             k = apply_rotary_pos_emb_with_indices(k, cos, sin, k_frame_idx)
+            cache_key = (L_q, L_kv, num_frames)
+            if self._cached_rope_key != cache_key:
+                latents_per_frame = L_kv // num_frames
+                patches_per_frame = L_q // num_frames
+                self._cached_q_frame_idx = torch.arange(L_q, device=q.device) // patches_per_frame
+                self._cached_k_frame_idx = torch.arange(L_kv, device=k.device) // latents_per_frame
+                self._cached_rope_key = cache_key
+
+            cos, sin = self.rope(num_frames, q.device, q.dtype)
+            q = apply_rotary_pos_emb_with_indices(q, cos, sin, self._cached_q_frame_idx)
+            k = apply_rotary_pos_emb_with_indices(k, cos, sin, self._cached_k_frame_idx)
             
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)

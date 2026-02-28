@@ -139,9 +139,35 @@ class MaskedAutoencoderTokenizer(nn.Module):
         self.decoder_norm = nn.RMSNorm(config.embed_dim) 
         
         self.to_pixels = nn.Linear(
-            config.embed_dim, 
+            config.embed_dim,
             self.patch_embed.patch_size[0] * self.patch_embed.patch_size[1] * config.in_channels
-        )  
+        )
+
+        # Mask caches — avoids creating new AttentionMask objects every forward call.
+        # Keyed on t (num_frames); since t is constant during training, these are
+        # built once and reused, including pre-warmed float mask caches.
+        self._cached_temporal_attn_mask: Optional[AttentionMask] = None
+        self._cached_latent_cross_attn_mask: Optional[AttentionMask] = None
+        self._cached_t: int = -1
+
+    def _get_cached_masks(self, t: int, num_patches: int, device: torch.device):
+        """Return cached attention masks, rebuilding only when t changes."""
+        if self._cached_t != t:
+            temporal_mask = self._build_temporal_causal_mask(t, device)
+            self._cached_temporal_attn_mask = AttentionMask(is_causal=False, mask=temporal_mask)
+
+            latents_per_frame = self.config.num_latent_tokens
+            total_latents = t * latents_per_frame
+            cross_mask = self._build_latent_cross_mask(latents_per_frame, num_patches, t, device)
+            self._cached_latent_cross_attn_mask = AttentionMask(is_causal=False, mask=cross_mask)
+
+            # Pre-warm float cache so apply_to_sdpa() never re-allocates
+            self._cached_temporal_attn_mask.apply_to_sdpa((1, 1, t, t))
+            self._cached_latent_cross_attn_mask.apply_to_sdpa(
+                (1, 1, total_latents, total_latents + num_patches))
+            self._cached_t = t
+        return self._cached_temporal_attn_mask, self._cached_latent_cross_attn_mask
+
     def forward(
         self,
         frames: torch.Tensor,
@@ -174,14 +200,10 @@ class MaskedAutoencoderTokenizer(nn.Module):
         encoder_sequence = torch.cat([latent_tokens, masked_patches], dim=1) 
         
 
-        temporal_causal_mask = self._build_temporal_causal_mask(t, frames.device)
-        temporal_attn_mask = AttentionMask(is_causal=False, mask=temporal_causal_mask)
-        
-        num_latents = latent_tokens.size(1)
         num_patches = masked_patches.size(1)
-        latent_cross_mask = self._build_latent_cross_mask(latents_per_frame, num_patches, t, frames.device)
-        latent_cross_attn_mask = AttentionMask(is_causal=False, mask=latent_cross_mask)
-        
+        temporal_attn_mask, latent_cross_attn_mask = self._get_cached_masks(
+            t, num_patches, frames.device)
+
         for block in self.blocks:
             encoder_sequence = block(
                 encoder_sequence, 
@@ -312,15 +334,9 @@ class MaskedAutoencoderTokenizer(nn.Module):
         # No masking — we want complete encoding of all patches
         encoder_sequence = torch.cat([latent_tokens, patches], dim=1)
 
-        temporal_causal_mask = self._build_temporal_causal_mask(t, frames.device)
-        temporal_attn_mask = AttentionMask(is_causal=False, mask=temporal_causal_mask)
-
         num_patches = patches.size(1)
-        latents_per_frame = self.config.num_latent_tokens
-        latent_cross_mask = self._build_latent_cross_mask(
-            latents_per_frame, num_patches, t, frames.device
-        )
-        latent_cross_attn_mask = AttentionMask(is_causal=False, mask=latent_cross_mask)
+        temporal_attn_mask, latent_cross_attn_mask = self._get_cached_masks(
+            t, num_patches, frames.device)
 
         for block in self.blocks:
             encoder_sequence = block(

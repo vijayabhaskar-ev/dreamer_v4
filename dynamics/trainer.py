@@ -89,6 +89,10 @@ class DynamicsTrainer:
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
 
+        # Cached device tensors — avoids creating new XLA graph nodes per step
+        self._zero = torch.tensor(0.0, device=self.device)
+        self._ramp_tensor = torch.tensor(0.0, device=self.device)
+
 
 
     def _build_scheduler(self, total_steps: int) -> None:
@@ -267,83 +271,43 @@ class DynamicsTrainer:
             # during flow-only warmup (no XLA sync, no dynamic shapes)
             need_bootstrap = self.global_step >= warmup_end
 
+            # Unified path: ALL samples at (B, T) shape — one XLA graph.
+            # 70/30 semantics preserved via loss_mask: 30% of samples only
+            # contribute loss from 1 random frame with zeroed actions.
+            z_clean = self.model.encode_frames(frames)
+            tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
+
+            # Build per-frame loss mask: (B, T) — 1.0 for frames contributing to loss
+            loss_mask = torch.ones(B, T, device=self.device)
             if training and T > 1:
                 n_single = max(1, int(B * 0.3))
-                n_full = B - n_single
-
-                frames_full = frames[n_single :]
-                actions_full = actions[n_single:]
-
-                z_clean_f = self.model.encode_frames(frames_full)  # (n_full, T, S_z, latent_dim)
-                tau_f, d_f = sample_tau_and_d(n_full, T, K_max=self.dynamics_cfg.K_max, device=self.device)
-
-                # Warm-up: flow-only → gradual bootstrap ramp → full mix
-                if self.global_step < warmup_end:
-                    d_f = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
-                elif self.global_step < ramp_end:
-                    # Quantize ramp to 10 levels to avoid XLA recompilation
-                    # (ramp_progress as a Python float is a compile-time constant)
-                    ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
-                    ramp_bucket = int(ramp_frac * 10) / 10.0  # 0.0, 0.1, ..., 1.0
-                    mask = torch.rand_like(d_f) < ramp_bucket
-                    d_min_tensor = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
-                    d_f = torch.where(mask, d_f, d_min_tensor)
-
-                # (step ramp_end+): Normal sampling, no override
-                z_noised_f, _ = add_noise(z_clean_f, tau_f)
-
-                with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
-                    loss_full, metrics_full = self._compute_loss(
-                        z_clean_f, z_noised_f, actions_full, tau_f, d_f,
-                        training=training, compute_bootstrap=need_bootstrap,
-                    )
-
-                 #=========30% Single-Frame Training==========
-
                 random_t = torch.randint(0, T, (n_single,), device=self.device)
-                frames_single = frames[:n_single][torch.arange(n_single, device=self.device), random_t].unsqueeze(1)
+                single_mask = torch.zeros(n_single, T, device=self.device)
+                single_mask[torch.arange(n_single, device=self.device), random_t] = 1.0
+                loss_mask[:n_single] = single_mask
+                # Zero actions for single-frame samples (no-action context)
+                actions = actions.clone()
+                actions[:n_single] = 0.0
 
-                z_clean_s = self.model.encode_frames(frames_single)  # *(n_single, T, S_z, latent_dim)
-                tau_s, d_s = sample_tau_and_d(n_single, 1, K_max=self.dynamics_cfg.K_max, device=self.device)
+            # Curriculum d-override
+            if self.global_step < warmup_end:
+                d = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
+            elif self.global_step < ramp_end:
+                ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
+                self._ramp_tensor.fill_(int(ramp_frac * 10) / 10.0)
+                mask = torch.rand_like(d) < self._ramp_tensor
+                d_min = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
+                d = torch.where(mask, d, d_min)
 
-                if self.global_step < warmup_end:
-                    d_s = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
-                elif self.global_step < ramp_end:
-                    ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
-                    ramp_bucket = int(ramp_frac * 10) / 10.0
-                    mask = torch.rand_like(d_s) < ramp_bucket
-                    d_min_tensor = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
-                    d_s = torch.where(mask, d_s, d_min_tensor)
+            z_noised, _ = add_noise(z_clean, tau)
+            tau_for_log, d_for_log = tau, d
 
-                z_noised_s, _ = add_noise(z_clean_s, tau_s)
-
-                # Log tau & d from BOTH paths (proper weighted average)
-                tau_for_log = torch.cat([tau_f.flatten(), tau_s.flatten()])
-                d_for_log = torch.cat([d_f.flatten(), d_s.flatten()])
-
-                with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
-                    loss_single, metrics_single = self._compute_loss(
-                        z_clean_s, z_noised_s, None, tau_s, d_s,
-                        training=training, compute_bootstrap=need_bootstrap,
-                    )
-
-                loss = (n_full * loss_full + n_single * loss_single) / B
-                metrics = {
-                    "loss_flow": (n_full * metrics_full["loss_flow"] + n_single * metrics_single["loss_flow"]) / B,
-                    "loss_bootstrap": (n_full * metrics_full["loss_bootstrap"] + n_single * metrics_single["loss_bootstrap"]) / B,
-                }
-
-            else:
-                # Validation or T=1 already: standard path
-                z_clean = self.model.encode_frames(frames)
-                tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
-                z_noised, _ = add_noise(z_clean, tau)
-                tau_for_log, d_for_log = tau, d
-                with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
-                    loss, metrics = self._compute_loss(
-                        z_clean, z_noised, actions, tau, d,
-                        training=training, compute_bootstrap=need_bootstrap,
-                    )
+            with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
+                loss, metrics = self._compute_loss(
+                    z_clean, z_noised, actions, tau, d,
+                    training=training, compute_bootstrap=need_bootstrap,
+                    loss_mask=loss_mask,
+                )
 
 
 
@@ -432,7 +396,7 @@ class DynamicsTrainer:
 
 
     def _compute_loss(self, z_clean, z_noised, actions, tau, d, training=True,
-                      compute_bootstrap=True):
+                      compute_bootstrap=True, loss_mask=None):
         """Compute flow matching + bootstrap loss.
 
         Uses masked arithmetic instead of boolean indexing so all tensors
@@ -452,6 +416,9 @@ class DynamicsTrainer:
             tau:      (B, T)  — per-frame signal levels
             d:        (B, T)  — per-frame step sizes
             compute_bootstrap: whether to run the bootstrap forward passes
+            loss_mask: (B, T)  — per-frame weight (1.0 = contribute, 0.0 = ignore).
+                       Used for 70/30 mixed training: 30% of samples only
+                       contribute loss from 1 random frame.
 
         Returns:
             loss, metrics_dict
@@ -464,6 +431,11 @@ class DynamicsTrainer:
         flow_mask = (d == d_min).float()   # (B, T)  1.0 for flow, 0.0 for bootstrap
         boot_mask = 1.0 - flow_mask        # (B, T)
         w = 0.9 * tau + 0.1               # (B, T)
+
+        # Apply loss_mask to restrict which (sample, frame) pairs contribute
+        if loss_mask is not None:
+            flow_mask = flow_mask * loss_mask
+            boot_mask = boot_mask * loss_mask
 
         # ── Flow loss (masked) ──────────────────────────────────────
         per_sample_flow = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))  # (B, T)
@@ -497,9 +469,9 @@ class DynamicsTrainer:
             loss_bootstrap = (boot_mask * w * per_sample_boot).sum() / n_boot
             loss_bootstrap_normed = self.rms_bootstrap.normalize(loss_bootstrap, update=training)
         else:
-            loss_bootstrap = torch.tensor(0.0, device=z_hat.device)
-            loss_bootstrap_normed = loss_bootstrap
-            n_boot = torch.tensor(0.0, device=z_hat.device)
+            loss_bootstrap = self._zero
+            loss_bootstrap_normed = self._zero
+            n_boot = self._zero
 
         loss_total = loss_flow_normed + loss_bootstrap_normed
 
@@ -555,7 +527,8 @@ class RMSNormalizer:
             self._on_device = True
 
         if update:
-            self.rms_sq = self.decay * self.rms_sq + (1 - self.decay) * loss_sq
+            # In-place update — avoids creating new XLA graph nodes per step
+            self.rms_sq.mul_(self.decay).add_(loss_sq, alpha=(1 - self.decay))
 
         rms = torch.sqrt(self.rms_sq + self.epsilon)
         return loss / rms
