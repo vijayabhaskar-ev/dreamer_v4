@@ -25,6 +25,40 @@ _XLA_AVAILABLE = _has_xla()
 
 
 # ---------------------------------------------------------------------------
+# Multi-device helpers
+# ---------------------------------------------------------------------------
+
+def is_master() -> bool:
+    """True on ordinal 0 (or non-XLA). Safe to call outside xmp.spawn."""
+    if _XLA_AVAILABLE:
+        import torch_xla.core.xla_model as xm
+        return xm.get_ordinal() == 0
+    return True
+
+
+def get_world_size() -> int:
+    if _XLA_AVAILABLE:
+        import torch_xla.core.xla_model as xm
+        return xm.xrt_world_size()
+    return 1
+
+
+def get_ordinal() -> int:
+    if _XLA_AVAILABLE:
+        import torch_xla.core.xla_model as xm
+        return xm.get_ordinal()
+    return 0
+
+
+def wrap_loader(loader, device):
+    """Wrap a DataLoader with MpDeviceLoader for async host→device transfer."""
+    if is_xla_device(device):
+        import torch_xla.distributed.parallel_loader as pl
+        return pl.MpDeviceLoader(loader, device)
+    return loader
+
+
+# ---------------------------------------------------------------------------
 # Device resolution
 # ---------------------------------------------------------------------------
 
@@ -105,7 +139,11 @@ class NoOpGradScaler:
         pass
 
     def step(self, optimizer: torch.optim.Optimizer) -> None:
-        optimizer.step()
+        if _XLA_AVAILABLE:
+            import torch_xla.core.xla_model as xm
+            xm.optimizer_step(optimizer)  # all-reduce + step + mark_step
+        else:
+            optimizer.step()
 
     def update(self) -> None:
         pass

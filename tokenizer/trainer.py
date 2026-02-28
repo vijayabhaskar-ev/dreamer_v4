@@ -13,7 +13,7 @@ from .config import TokenizerConfig
 from .losses import MaskedAutoencoderLoss
 from .tokenizer import MaskedAutoencoderTokenizer
 from .metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
-from device_utils import get_device, get_device_type, make_grad_scaler, mark_step, save_checkpoint
+from device_utils import get_device, get_device_type, make_grad_scaler, save_checkpoint, is_master
 from PIL import Image
 import wandb
 
@@ -77,10 +77,11 @@ class TokenizerTrainer:
             if val_loader is not None: #TODO Need to refactor this including _run_epoch
                 val_metrics = self._run_epoch(val_loader, epoch, training=False)
 
-            print(
-                f"Epoch {epoch}: train_loss={train_metrics['loss/tokenizer_total']:.4f}"
-                + (f" val_loss={val_metrics['loss/tokenizer_total']:.4f}" if val_metrics else "")
-            )
+            if is_master():
+                print(
+                    f"Epoch {epoch}: train_loss={train_metrics['loss/tokenizer_total']:.4f}"
+                    + (f" val_loss={val_metrics['loss/tokenizer_total']:.4f}" if val_metrics else "")
+                )
 
             if (
                 checkpoint_dir is not None
@@ -101,7 +102,8 @@ class TokenizerTrainer:
             "optimizer": self.optimizer.state_dict(),
         }
         save_checkpoint(state, path, self.device)
-        print(f"Saved tokenizer checkpoint to {path}")
+        if is_master():
+            print(f"Saved tokenizer checkpoint to {path}")
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
         try:
@@ -173,9 +175,8 @@ class TokenizerTrainer:
                     self.training_cfg.grad_clip,
                 )
                 
-                self.scaler.step(self.optimizer)
+                self.scaler.step(self.optimizer)  # xm.optimizer_step on TPU (includes mark_step)
                 self.scaler.update()
-                mark_step()
 
                 self.global_step += 1
 
@@ -187,7 +188,7 @@ class TokenizerTrainer:
                 _log_mask_ratio += loss_outputs.mask_ratio.detach()
                 _log_count += 1
 
-                if self.global_step % log_interval == 0:
+                if self.global_step % log_interval == 0 and is_master():
                     # Single .item() batch at log intervals — true average over interval
                     n = max(_log_count, 1)
                     self.metrics_buffer.update({
@@ -206,7 +207,7 @@ class TokenizerTrainer:
                     _log_count = 0
 
                     metrics = self.metrics_buffer.get_averages()
-                    
+
                     # Optimizer state
                     metrics.update({
                         "train/lr": self.optimizer.param_groups[0]['lr'],
@@ -215,19 +216,19 @@ class TokenizerTrainer:
                         "global_step": self.global_step,
                         "samples_seen": self.global_step * frames.size(0),
                     })
-                    
+
                     # Throughput metrics
                     metrics.update(self.throughput_tracker.step(frames.size(0)))
-                    
+
                     # GPU memory tracking
                     if self.training_cfg.log_memory:
                         metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
-                    
+
                     # Model statistics (less frequently to reduce overhead)
                     if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
                         metrics.update(ModelStatistics.compute_weight_stats(self.model))
                         metrics.update(ModelStatistics.compute_gradient_stats(self.model))
-                    
+
                     wandb.log(metrics, step=self.global_step)
 
             # Accumulate on-device — no .item() sync per step

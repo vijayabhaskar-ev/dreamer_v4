@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from .config import TokenizerConfig
 from .trainer import TokenizerTrainer, TokenizerTrainingConfig, MaskedAutoencoderLoss
 from .dataset import DatasetFactory
-from device_utils import get_device
+from device_utils import get_device, is_xla_device, is_master, wrap_loader
 import wandb
 
 try:
@@ -72,28 +72,32 @@ def build_parser() -> argparse.ArgumentParser: #TODO Need to check the defeault 
     return parser
 
 
-def main(args: Optional[list[str]] = None) -> None:
-    parser = build_parser()
-    parsed = parser.parse_args(args=args)
+def _train_fn(index=0, args=None):
+    """Per-device training function (called by xmp.spawn or directly)."""
+    parsed = args if args is not None else build_parser().parse_args()
 
-    # Generate unique run name if not provided
-    if parsed.wandb_name is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"{parsed.dataset}_{parsed.task}_{timestamp}"
+    # Only master initializes wandb; workers get disabled mode
+    if is_master():
+        if parsed.wandb_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"{parsed.dataset}_{parsed.task}_{timestamp}"
+        else:
+            run_name = parsed.wandb_name
+
+        wandb.init(
+            project=parsed.wandb_project,
+            entity=parsed.wandb_entity,
+            name=run_name,
+            mode="offline" if parsed.wandb_offline else "online",
+            config=vars(parsed),
+        )
     else:
-        run_name = parsed.wandb_name
+        wandb.init(mode="disabled")
 
-    wandb.init(
-        project=parsed.wandb_project,
-        entity=parsed.wandb_entity,
-        name=run_name,
-        mode="offline" if parsed.wandb_offline else "online",
-        config=vars(parsed),
-    )
-
-    Path(parsed.checkpoint_dir).mkdir(parents=True, exist_ok=True) #TODO makie sure reading checkpoint_dir is wroking properly
-    if parsed.save_final:
-        Path(parsed.save_final).parent.mkdir(parents=True, exist_ok=True) #TODO Need to check the implementation of save_final
+    if is_master():
+        Path(parsed.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        if parsed.save_final:
+            Path(parsed.save_final).parent.mkdir(parents=True, exist_ok=True)
 
     tokenizer_cfg = TokenizerConfig(
         image_size=(parsed.image_size, parsed.image_size),
@@ -125,8 +129,6 @@ def main(args: Optional[list[str]] = None) -> None:
                 "LPIPS requested but library not installed. Install `lpips` package or rerun with --lpips none."
             )
 
-    # When using multiple workers with an IterableDataset, each worker produces 'steps_per_epoch' batches.
-    # We divide by num_workers so the TOTAL batches per epoch roughly equals the requested steps_per_epoch.
     steps_per_worker = parsed.steps_per_epoch
     if parsed.num_workers > 0:
         steps_per_worker = max(1, parsed.steps_per_epoch // parsed.num_workers)
@@ -134,16 +136,14 @@ def main(args: Optional[list[str]] = None) -> None:
     train_dataset = DatasetFactory.get_dataset(
         tokenizer_cfg, parsed.batch_size, steps_per_worker, dataset_path=parsed.dataset_path
     )
-    
 
-    #TODO Maybe need to modify the dataset factory to yield batches of size batch_size
     device = get_device(parsed.device)
     use_pin_memory = device.type == "cuda"
 
-    train_loader = DataLoader(
+    train_loader_raw = DataLoader(
         train_dataset,
         batch_size=None,
-        num_workers=parsed.num_workers, #TODO Need to check the implementation of num_workers. Right now num_workers  > 0 is getting stuck
+        num_workers=parsed.num_workers,
         pin_memory=use_pin_memory,
     )
 
@@ -151,7 +151,11 @@ def main(args: Optional[list[str]] = None) -> None:
     val_dataset = DatasetFactory.get_dataset(
         tokenizer_cfg, parsed.batch_size, val_steps, dataset_path=parsed.dataset_path
     )
-    val_loader = DataLoader(val_dataset, batch_size=None, num_workers=0, pin_memory=use_pin_memory)
+    val_loader_raw = DataLoader(val_dataset, batch_size=None, num_workers=0, pin_memory=use_pin_memory)
+
+    # Wrap with MpDeviceLoader for async host→device transfer on TPU
+    train_loader = wrap_loader(train_loader_raw, device)
+    val_loader = wrap_loader(val_loader_raw, device)
 
     trainer = TokenizerTrainer(
         tokenizer_cfg=tokenizer_cfg,
@@ -162,10 +166,10 @@ def main(args: Optional[list[str]] = None) -> None:
     if parsed.evaluate:
         if not parsed.resume_from:
             raise ValueError("Must provide --resume-from when --evaluate is set.")
-        trainer.load_checkpoint(parsed.resume_from, strict=True) #TODO Refactor to properly evalute with validationdataset. Read more on this in the docs
+        trainer.load_checkpoint(parsed.resume_from, strict=True)
         trainer.evaluate(train_loader, output_dir="evaluation_results")
         return
-    
+
     start_epoch = 1
     if parsed.resume_from:
         start_epoch = trainer.load_checkpoint(parsed.resume_from, strict=False)
@@ -179,6 +183,19 @@ def main(args: Optional[list[str]] = None) -> None:
 
     if parsed.save_final:
         trainer.save_checkpoint(parsed.save_final, epoch=parsed.epochs)
+
+    wandb.finish()
+
+
+def main(args: Optional[list[str]] = None) -> None:
+    parsed = build_parser().parse_args(args=args)
+    device = get_device(parsed.device)
+
+    if is_xla_device(device):
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        xmp.spawn(_train_fn, args=(parsed,), nprocs=None)
+    else:
+        _train_fn(index=0, args=parsed)
 
 
 if __name__ == "__main__":

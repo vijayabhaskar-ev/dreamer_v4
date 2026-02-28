@@ -23,7 +23,7 @@ from .config import DynamicsConfig
 from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
-from device_utils import get_device
+from device_utils import get_device, is_xla_device, is_master, wrap_loader
 import wandb
 
 
@@ -109,20 +109,22 @@ def load_tokenizer_config_from_ckpt(ckpt_path: str, device: str = "cpu") -> Opti
 
 
 
-def main(args: Optional[list[str]] = None) -> None:
-    parser = build_parser()
-    opts = parser.parse_args(args)
+def _train_fn(index=0, args=None):
+    """Per-device training function (called by xmp.spawn or directly)."""
+    opts = args if args is not None else build_parser().parse_args()
 
     ckpt_dir = Path(opts.checkpoint_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if is_master():
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Try loading from checkpoint first (safest — guaranteed to match)
-    tokenizer_cfg = load_tokenizer_config_from_ckpt(opts.tokenizer_ckpt, device=opts.device)
+    tokenizer_cfg = load_tokenizer_config_from_ckpt(opts.tokenizer_ckpt, device="cpu")
 
     if tokenizer_cfg is None:
         # Fall back to CLI args — user must ensure these match the checkpoint
-        print("[WARN] Could not load TokenizerConfig from checkpoint. "
-              "Using CLI args — make sure they match the pretrained tokenizer!")
+        if is_master():
+            print("[WARN] Could not load TokenizerConfig from checkpoint. "
+                  "Using CLI args — make sure they match the pretrained tokenizer!")
         tokenizer_cfg = TokenizerConfig(
             image_size=(opts.image_size, opts.image_size),
             patch_size=(opts.patch_size, opts.patch_size),
@@ -134,9 +136,10 @@ def main(args: Optional[list[str]] = None) -> None:
             task_name=opts.task,
         )
     else:
-        print(f"[INFO] Loaded TokenizerConfig from checkpoint: "
-              f"latent_dim={tokenizer_cfg.latent_dim}, "
-              f"num_latent_tokens={tokenizer_cfg.num_latent_tokens}")
+        if is_master():
+            print(f"[INFO] Loaded TokenizerConfig from checkpoint: "
+                  f"latent_dim={tokenizer_cfg.latent_dim}, "
+                  f"num_latent_tokens={tokenizer_cfg.num_latent_tokens}")
 
     dynamics_cfg = DynamicsConfig.from_tokenizer(
         tokenizer_cfg,
@@ -167,32 +170,36 @@ def main(args: Optional[list[str]] = None) -> None:
         checkpoint_interval=checkpoint_interval,
         log_interval=opts.log_interval,
         log_model_stats_interval=opts.log_model_stats_interval,
-        warmup_steps=opts.warmup_steps,        
+        warmup_steps=opts.warmup_steps,
         min_lr=opts.min_lr,
         curriculum_warmup_steps=opts.curriculum_warmup_steps,
         curriculum_ramp_steps=opts.curriculum_ramp_steps,
         steps_per_epoch=opts.steps_per_epoch,
     )
 
-    if opts.wandb_name is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"{opts.dataset}_{opts.task}_{timestamp}"
+    # Only master initializes wandb; workers get disabled mode
+    if is_master():
+        if opts.wandb_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"{opts.dataset}_{opts.task}_{timestamp}"
+        else:
+            run_name = opts.wandb_name
+        wandb_mode = "disabled" if opts.wandb_disabled else ("offline" if opts.wandb_offline else "online")
+        wandb.init(
+            project=opts.wandb_project,
+            entity=opts.wandb_entity,
+            name=run_name,
+            config={
+                "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
+                "training": vars(training_cfg),
+                "tokenizer": vars(tokenizer_cfg) if hasattr(tokenizer_cfg, '__dict__') else str(tokenizer_cfg),
+                "task": opts.task,
+                "dataset": opts.dataset,
+            },
+            mode=wandb_mode,
+        )
     else:
-        run_name = opts.wandb_name
-    wandb_mode = "disabled" if opts.wandb_disabled else ("offline" if opts.wandb_offline else "online")
-    wandb.init(
-        project=opts.wandb_project,
-        entity=opts.wandb_entity,
-        name=run_name,
-        config={
-            "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
-            "training": vars(training_cfg),
-            "tokenizer": vars(tokenizer_cfg) if hasattr(tokenizer_cfg, '__dict__') else str(tokenizer_cfg),
-            "task": opts.task,
-            "dataset": opts.dataset,
-        },
-        mode=wandb_mode,
-    )
+        wandb.init(mode="disabled")
 
 
     dataset_cfg = replace(
@@ -228,7 +235,7 @@ def main(args: Optional[list[str]] = None) -> None:
     device = get_device(opts.device)
     use_pin_memory = device.type == "cuda"
 
-    train_loader = DataLoader(
+    train_loader_raw = DataLoader(
         train_dataset,
         batch_size=None,
         num_workers=opts.num_workers,
@@ -236,12 +243,16 @@ def main(args: Optional[list[str]] = None) -> None:
         multiprocessing_context='spawn' if opts.num_workers > 0 else None,
     )
 
-    val_loader = DataLoader(
+    val_loader_raw = DataLoader(
         val_dataset,
         batch_size=None,
         num_workers=0,
         pin_memory=use_pin_memory,
     ) if val_dataset is not None else None
+
+    # Wrap with MpDeviceLoader for async host→device transfer on TPU
+    train_loader = wrap_loader(train_loader_raw, device)
+    val_loader = wrap_loader(val_loader_raw, device) if val_loader_raw is not None else None
 
     trainer = DynamicsTrainer(
         dynamics_cfg=dynamics_cfg,
@@ -252,26 +263,29 @@ def main(args: Optional[list[str]] = None) -> None:
 
     start_epoch = 1
     if opts.resume_from is not None:
-        print(f"[INFO] Resuming from {opts.resume_from}")
+        if is_master():
+            print(f"[INFO] Resuming from {opts.resume_from}")
         start_epoch = trainer.load_checkpoint(opts.resume_from)
-        print(f"[INFO] Resuming from epoch {start_epoch}")
+        if is_master():
+            print(f"[INFO] Resuming from epoch {start_epoch}")
 
-    total_params = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
-    print(f"\n{'='*60}")
-    print(f"Dreamer V4 Dynamics Training")
-    print(f"{'='*60}")
-    print(f"  Task:           {opts.task}")
-    print(f"  Trainable params: {total_params:,}")
-    print(f"  Latent shape:   ({dynamics_cfg.num_latent_tokens}, {dynamics_cfg.latent_input_dim})")
-    print(f"  Embed dim:      {dynamics_cfg.embed_dim}")
-    print(f"  Depth:          {dynamics_cfg.depth}")
-    print(f"  Seq len (T):    {dynamics_cfg.seq_len}")
-    print(f"  K_max:          {dynamics_cfg.K_max}")
-    print(f"  Batch size:     {training_cfg.batch_size}")
-    print(f"  LR:             {training_cfg.lr}")
-    print(f"  Epochs:         {training_cfg.epochs}")
-    print(f"  Device:         {trainer.device}")
-    print(f"{'='*60}\n")
+    if is_master():
+        total_params = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+        print(f"\n{'='*60}")
+        print(f"Dreamer V4 Dynamics Training")
+        print(f"{'='*60}")
+        print(f"  Task:           {opts.task}")
+        print(f"  Trainable params: {total_params:,}")
+        print(f"  Latent shape:   ({dynamics_cfg.num_latent_tokens}, {dynamics_cfg.latent_input_dim})")
+        print(f"  Embed dim:      {dynamics_cfg.embed_dim}")
+        print(f"  Depth:          {dynamics_cfg.depth}")
+        print(f"  Seq len (T):    {dynamics_cfg.seq_len}")
+        print(f"  K_max:          {dynamics_cfg.K_max}")
+        print(f"  Batch size:     {training_cfg.batch_size}")
+        print(f"  LR:             {training_cfg.lr}")
+        print(f"  Epochs:         {training_cfg.epochs}")
+        print(f"  Device:         {trainer.device}")
+        print(f"{'='*60}\n")
 
     trainer.fit(
         train_loader=train_loader,
@@ -282,9 +296,21 @@ def main(args: Optional[list[str]] = None) -> None:
 
     final_path = opts.save_final or str(ckpt_dir / "final.pt")
     trainer.save_checkpoint(final_path, epoch=training_cfg.epochs)
-    print(f"\n[DONE] Final checkpoint saved to {final_path}")
+    if is_master():
+        print(f"\n[DONE] Final checkpoint saved to {final_path}")
 
     wandb.finish()
+
+
+def main(args: Optional[list[str]] = None) -> None:
+    opts = build_parser().parse_args(args)
+    device = get_device(opts.device)
+
+    if is_xla_device(device):
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        xmp.spawn(_train_fn, args=(opts,), nprocs=None)
+    else:
+        _train_fn(index=0, args=opts)
 
 
 if __name__ == "__main__":

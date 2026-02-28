@@ -17,7 +17,7 @@ from .flow_matching import add_noise, sample_tau_and_d
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
 from tokenizer.metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
-from device_utils import get_device, get_device_type, make_grad_scaler, mark_step, save_checkpoint as save_ckpt
+from device_utils import get_device, get_device_type, make_grad_scaler, save_checkpoint as save_ckpt, is_master
 import wandb
 
 
@@ -140,25 +140,26 @@ class DynamicsTrainer:
             if val_loader is not None:
                 val_metrics = self._run_epoch(val_loader, epoch, training=False)
 
-            epoch_log = {
-                "epoch": epoch,
-                "epoch/train_loss": train_metrics["loss/dynamics_total"],
-                "epoch/train_flow": train_metrics["loss/dynamics_flow"],
-                "epoch/train_bootstrap": train_metrics["loss/dynamics_bootstrap"],
-                "global_step": self.global_step,
-            }
-            if val_metrics is not None:
-                epoch_log["epoch/val_loss"] = val_metrics["loss/dynamics_total"]
-                epoch_log["epoch/val_flow"] = val_metrics["loss/dynamics_flow"]
-                epoch_log["epoch/val_bootstrap"] = val_metrics["loss/dynamics_bootstrap"]
-            wandb.log(epoch_log, step=self.global_step)
+            if is_master():
+                epoch_log = {
+                    "epoch": epoch,
+                    "epoch/train_loss": train_metrics["loss/dynamics_total"],
+                    "epoch/train_flow": train_metrics["loss/dynamics_flow"],
+                    "epoch/train_bootstrap": train_metrics["loss/dynamics_bootstrap"],
+                    "global_step": self.global_step,
+                }
+                if val_metrics is not None:
+                    epoch_log["epoch/val_loss"] = val_metrics["loss/dynamics_total"]
+                    epoch_log["epoch/val_flow"] = val_metrics["loss/dynamics_flow"]
+                    epoch_log["epoch/val_bootstrap"] = val_metrics["loss/dynamics_bootstrap"]
+                wandb.log(epoch_log, step=self.global_step)
 
-            print(
-                f"Epoch {epoch}: train_loss={train_metrics['loss/dynamics_total']:.4f} "
-                f"flow={train_metrics['loss/dynamics_flow']:.4f} "
-                f"bootstrap={train_metrics['loss/dynamics_bootstrap']:.4f}"
-                + (f" val_loss={val_metrics['loss/dynamics_total']:.4f}" if val_metrics else "")
-            )
+                print(
+                    f"Epoch {epoch}: train_loss={train_metrics['loss/dynamics_total']:.4f} "
+                    f"flow={train_metrics['loss/dynamics_flow']:.4f} "
+                    f"bootstrap={train_metrics['loss/dynamics_bootstrap']:.4f}"
+                    + (f" val_loss={val_metrics['loss/dynamics_total']:.4f}" if val_metrics else "")
+                )
 
             if (
                 checkpoint_dir is not None
@@ -183,7 +184,8 @@ class DynamicsTrainer:
                 },
             }
         save_ckpt(state, path, self.device)
-        print(f"Saved dynamics checkpoint to {path}")
+        if is_master():
+            print(f"Saved dynamics checkpoint to {path}")
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
         try:
@@ -335,10 +337,9 @@ class DynamicsTrainer:
                     self.training_cfg.grad_clip,
                 )
 
-                self.scaler.step(self.optimizer)
+                self.scaler.step(self.optimizer)  # xm.optimizer_step on TPU (includes mark_step)
                 self.scaler.update()
                 self.scheduler.step()
-                mark_step()
 
                 self.global_step += 1
 
@@ -351,7 +352,7 @@ class DynamicsTrainer:
                 _log_d += d_for_log.mean().detach()
                 _log_count += 1
 
-                if self.global_step % log_interval == 0:
+                if self.global_step % log_interval == 0 and is_master():
                     # Single .item() batch at log intervals — true average over interval
                     n = max(_log_count, 1)
                     self.metrics_buffer.update({

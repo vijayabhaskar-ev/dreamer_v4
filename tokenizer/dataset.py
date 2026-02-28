@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 from .config import TokenizerConfig
+from device_utils import get_ordinal
 
 class VideoDataset(IterableDataset, abc.ABC):
     """Abstract base class for video datasets."""
@@ -47,12 +48,12 @@ class DMControlDataset(VideoDataset):
     def __iter__(self) -> Iterator[torch.Tensor]:
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None:
-            # Single-process data loading, return the full iterator
             seed = np.random.randint(0, 2**32 - 1)
         else:
-            # Multi-process data loading, split workload
             seed = worker_info.seed % (2**32 - 1)
-        
+
+        # Offset seed per TPU device so each chip gets different data
+        seed = (seed + get_ordinal() * 17) % (2**32 - 1)
         np.random.seed(seed)
         env = self._get_env(seed=seed)
         
@@ -142,6 +143,9 @@ class OfflineDataset(VideoDataset):
         self.episode_len = self.frames.shape[1]
 
     def __iter__(self) -> Iterator[torch.Tensor]:
+        # Offset seed per TPU device so each chip gets different data
+        seed = (np.random.randint(0, 2**32 - 1) + get_ordinal() * 17) % (2**32 - 1)
+        np.random.seed(seed)
         for _ in range(self.steps_per_epoch):
             idxs = np.random.randint(0, self.num_episodes, size=self.batch_size)
             max_start = max(0, self.episode_len - self.seq_len)
