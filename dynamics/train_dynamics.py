@@ -23,7 +23,7 @@ from .config import DynamicsConfig
 from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
-from device_utils import get_device, is_xla_device, is_master, wrap_loader
+from device_utils import get_device, should_use_xla, is_master, wrap_loader
 import wandb
 
 
@@ -304,9 +304,8 @@ def _train_fn(index=0, args=None):
 
 def main(args: Optional[list[str]] = None) -> None:
     opts = build_parser().parse_args(args)
-    device = get_device(opts.device)
 
-    if is_xla_device(device):
+    if should_use_xla(opts.device):
         import torch_xla.distributed.xla_multiprocessing as xmp
         xmp.spawn(_train_fn, args=(opts,), nprocs=None)
     else:

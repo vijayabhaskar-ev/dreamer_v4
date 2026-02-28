@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from .config import TokenizerConfig
 from .trainer import TokenizerTrainer, TokenizerTrainingConfig, MaskedAutoencoderLoss
 from .dataset import DatasetFactory
-from device_utils import get_device, is_xla_device, is_master, wrap_loader
+from device_utils import get_device, should_use_xla, is_master, wrap_loader
 import wandb
 
 try:
@@ -189,9 +189,8 @@ def _train_fn(index=0, args=None):
 
 def main(args: Optional[list[str]] = None) -> None:
     parsed = build_parser().parse_args(args=args)
-    device = get_device(parsed.device)
 
-    if is_xla_device(device):
+    if should_use_xla(parsed.device):
         import torch_xla.distributed.xla_multiprocessing as xmp
         xmp.spawn(_train_fn, args=(parsed,), nprocs=None)
     else:

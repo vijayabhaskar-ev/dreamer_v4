@@ -82,6 +82,18 @@ def get_device(backend: str = "auto") -> torch.device:
     return torch.device("cpu")
 
 
+def should_use_xla(backend: str = "auto") -> bool:
+    """Check if we should use XLA *without* initializing the runtime.
+
+    Safe to call before ``xmp.spawn()``.
+    """
+    if backend == "tpu":
+        return _XLA_AVAILABLE
+    if backend == "auto":
+        return _XLA_AVAILABLE
+    return False
+
+
 def is_xla_device(device: torch.device) -> bool:
     """Check whether *device* is an XLA/TPU device."""
     return str(device).startswith("xla")
