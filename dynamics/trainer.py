@@ -6,7 +6,6 @@ import pickle
 from typing import Dict, Optional
 import math
 
-from torch.optim.lr_scheduler import LambdaLR
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -85,33 +84,58 @@ class DynamicsTrainer:
         )
 
         self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
-        self.scheduler = None
         self.global_step = 0
+        self._last_lr_bucket = -1
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
 
 
 
-    def _build_scheduler(self, total_steps: int) -> LambdaLR:
-            """Linear warmup for warmup_steps, then cosine decay to min_lr.
-            
-            lr_lambda returns a *multiplier* on base_lr:
-            - step 0 → 0.0 (lr = 0)
-            - step warmup_steps → 1.0 (lr = base_lr)  
-            - step total_steps → min_lr/base_lr (lr = min_lr)
-            """
-            warmup_steps = self.training_cfg.warmup_steps
-            min_lr = self.training_cfg.min_lr
-            base_lr = self.training_cfg.lr
+    def _build_scheduler(self, total_steps: int) -> None:
+        """Store schedule params. LR is set via _set_lr_from_schedule() each step.
 
-            def lr_lambda(step: int) -> float:
-                if step < warmup_steps:
-                    return step / max(warmup_steps, 1)
-                progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
-                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-                return max(min_lr / base_lr, cosine)
+        Using LambdaLR with XLA causes recompilation every step because the LR
+        value is embedded as a compile-time constant in the XLA graph. Instead,
+        we compute LR in Python and set it before optimizer.step() so the value
+        is baked into each step's graph. Since we change LR infrequently
+        (only at coarse intervals), this avoids most recompilations.
+        """
+        self._schedule_total_steps = total_steps
+        self._schedule_warmup = self.training_cfg.warmup_steps
+        self._schedule_min_lr = self.training_cfg.min_lr
+        self._schedule_base_lr = self.training_cfg.lr
+        self._last_lr_bucket = -1  # track when LR actually changes
 
-            return LambdaLR(self.optimizer, lr_lambda)
+    def _set_lr_from_schedule(self) -> None:
+        """Set optimizer LR from schedule, quantized to reduce XLA recompilations.
+
+        Each unique LR value creates a new XLA graph compilation (~50-100MB
+        cache entry). With 4 code path variants (full/single × boot/no-boot),
+        each LR bucket costs ~4 compilations. We use only 10 buckets → max
+        ~40 compiled graphs total, keeping XLA cache under ~2-4GB.
+        """
+        step = self.global_step
+        warmup = self._schedule_warmup
+        total = self._schedule_total_steps
+        base_lr = self._schedule_base_lr
+        min_lr = self._schedule_min_lr
+
+        if step < warmup:
+            frac = step / max(warmup, 1)
+        else:
+            progress = (step - warmup) / max(total - warmup, 1)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            frac = max(min_lr / base_lr, cosine)
+
+        # Quantize to 10 buckets → max ~40 XLA compilations (10 × 4 code paths)
+        bucket = int(frac * 10)
+        if bucket == self._last_lr_bucket:
+            return  # Same bucket, no LR change, no recompilation
+        self._last_lr_bucket = bucket
+
+        lr = base_lr * (bucket / 10.0)
+        for group in self.optimizer.param_groups:
+            group['lr'] = lr
 
 
 
@@ -125,13 +149,7 @@ class DynamicsTrainer:
 
         steps_per_epoch = self.training_cfg.steps_per_epoch
         total_steps = steps_per_epoch * self.training_cfg.epochs
-        self.scheduler = self._build_scheduler(total_steps)
-
-        # If resuming, restore scheduler state from checkpoint   
-        #TODO Need to refactor this. May be move this to common place where we are loading checkpoint
-        if hasattr(self, '_pending_scheduler_state') and self._pending_scheduler_state is not None:
-            self.scheduler.load_state_dict(self._pending_scheduler_state)
-            self._pending_scheduler_state = None
+        self._build_scheduler(total_steps)
 
 
         for epoch in range(start_epoch, self.training_cfg.epochs + 1):
@@ -177,7 +195,7 @@ class DynamicsTrainer:
                 "dynamic_cfg": self.dynamics_cfg,
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict() if self.scheduler else None,  
+                "scheduler_bucket": self._last_lr_bucket,
                 "rms_normalizers": {
                     "flow": self.rms_flow.state_dict(),
                     "bootstrap": self.rms_bootstrap.state_dict(),
@@ -201,10 +219,11 @@ class DynamicsTrainer:
                 self.rms_flow.load_state_dict(rms_state["flow"])
             if "bootstrap" in rms_state:
                 self.rms_bootstrap.load_state_dict(rms_state["bootstrap"])
-        if "global_step" in state:                                    
-            self.global_step = state["global_step"]                  
-        self._pending_scheduler_state = state.get("scheduler", None)  
-        
+        if "global_step" in state:
+            self.global_step = state["global_step"]
+        if "scheduler_bucket" in state:
+            self._last_lr_bucket = state["scheduler_bucket"]
+
         return state.get("epoch", 0) + 1
 
     def _run_epoch(
@@ -262,9 +281,11 @@ class DynamicsTrainer:
                 if self.global_step < warmup_end:
                     d_f = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
                 elif self.global_step < ramp_end:
-                    #  Linearly ramp bootstrap probability from 0% to 100%
-                    ramp_progress = (self.global_step - warmup_end) / (ramp_end - warmup_end)
-                    mask = torch.rand_like(d_f) < ramp_progress
+                    # Quantize ramp to 10 levels to avoid XLA recompilation
+                    # (ramp_progress as a Python float is a compile-time constant)
+                    ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
+                    ramp_bucket = int(ramp_frac * 10) / 10.0  # 0.0, 0.1, ..., 1.0
+                    mask = torch.rand_like(d_f) < ramp_bucket
                     d_min_tensor = torch.full_like(d_f, 1.0 / self.dynamics_cfg.K_max)
                     d_f = torch.where(mask, d_f, d_min_tensor)
 
@@ -279,8 +300,8 @@ class DynamicsTrainer:
 
                  #=========30% Single-Frame Training==========
 
-                random_t = torch.randint(0, T, (n_single,))
-                frames_single = frames[:n_single][torch.arange(n_single),random_t].unsqueeze(1)
+                random_t = torch.randint(0, T, (n_single,), device=self.device)
+                frames_single = frames[:n_single][torch.arange(n_single, device=self.device), random_t].unsqueeze(1)
 
                 z_clean_s = self.model.encode_frames(frames_single)  # *(n_single, T, S_z, latent_dim)
                 tau_s, d_s = sample_tau_and_d(n_single, 1, K_max=self.dynamics_cfg.K_max, device=self.device)
@@ -288,8 +309,9 @@ class DynamicsTrainer:
                 if self.global_step < warmup_end:
                     d_s = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
                 elif self.global_step < ramp_end:
-                    ramp_progress = (self.global_step - warmup_end) / (ramp_end - warmup_end)
-                    mask = torch.rand_like(d_s) < ramp_progress
+                    ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
+                    ramp_bucket = int(ramp_frac * 10) / 10.0
+                    mask = torch.rand_like(d_s) < ramp_bucket
                     d_min_tensor = torch.full_like(d_s, 1.0 / self.dynamics_cfg.K_max)
                     d_s = torch.where(mask, d_s, d_min_tensor)
 
@@ -337,9 +359,12 @@ class DynamicsTrainer:
                     self.training_cfg.grad_clip,
                 )
 
+                # Compute LR manually as a tensor so XLA doesn't recompile
+                # on every LR change (scheduler embeds LR as compile-time constant)
+                self._set_lr_from_schedule()
+
                 self.scaler.step(self.optimizer)  # xm.optimizer_step on TPU (includes mark_step)
                 self.scaler.update()
-                self.scheduler.step()
 
                 self.global_step += 1
 
