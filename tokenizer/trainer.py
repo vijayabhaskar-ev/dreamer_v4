@@ -188,48 +188,42 @@ class TokenizerTrainer:
                 _log_mask_ratio += loss_outputs.mask_ratio.detach()
                 _log_count += 1
 
-                if self.global_step % log_interval == 0 and is_master():
-                    # Single .item() batch at log intervals — true average over interval
-                    n = max(_log_count, 1)
-                    self.metrics_buffer.update({
-                        "train/loss": (_log_loss / n).item(),
-                        "train/mse": (_log_mse / n).item(),
-                        "train/lpips": (_log_lpips / n).item() if isinstance(_log_lpips, torch.Tensor) else _log_lpips / n,
-                        "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
-                        "train/mask_ratio": (_log_mask_ratio / n).item(),
-                    })
-                    # Reset accumulators in-place — avoids new XLA graph nodes
+                if self.global_step % log_interval == 0:
+                    if is_master():
+                        n = max(_log_count, 1)
+                        self.metrics_buffer.update({
+                            "train/loss": (_log_loss / n).item(),
+                            "train/mse": (_log_mse / n).item(),
+                            "train/lpips": (_log_lpips / n).item() if isinstance(_log_lpips, torch.Tensor) else _log_lpips / n,
+                            "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
+                            "train/mask_ratio": (_log_mask_ratio / n).item(),
+                        })
+
+                        metrics = self.metrics_buffer.get_averages()
+                        metrics.update({
+                            "train/lr": self.optimizer.param_groups[0]['lr'],
+                            "train/scale": self.scaler.get_scale(),
+                            "epoch": epoch,
+                            "global_step": self.global_step,
+                            "samples_seen": self.global_step * frames.size(0),
+                        })
+                        metrics.update(self.throughput_tracker.step(frames.size(0)))
+
+                        if self.training_cfg.log_memory:
+                            metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
+                        if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
+                            metrics.update(ModelStatistics.compute_weight_stats(self.model))
+                            metrics.update(ModelStatistics.compute_gradient_stats(self.model))
+
+                        wandb.log(metrics, step=self.global_step)
+
+                    # Reset on ALL processes — prevents unbounded accumulation
                     _log_loss.zero_()
                     _log_mse.zero_()
                     _log_lpips.zero_() if isinstance(_log_lpips, torch.Tensor) else None
                     _log_grad_norm.zero_()
                     _log_mask_ratio.zero_()
                     _log_count = 0
-
-                    metrics = self.metrics_buffer.get_averages()
-
-                    # Optimizer state
-                    metrics.update({
-                        "train/lr": self.optimizer.param_groups[0]['lr'],
-                        "train/scale": self.scaler.get_scale(),
-                        "epoch": epoch,
-                        "global_step": self.global_step,
-                        "samples_seen": self.global_step * frames.size(0),
-                    })
-
-                    # Throughput metrics
-                    metrics.update(self.throughput_tracker.step(frames.size(0)))
-
-                    # GPU memory tracking
-                    if self.training_cfg.log_memory:
-                        metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
-
-                    # Model statistics (less frequently to reduce overhead)
-                    if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
-                        metrics.update(ModelStatistics.compute_weight_stats(self.model))
-                        metrics.update(ModelStatistics.compute_gradient_stats(self.model))
-
-                    wandb.log(metrics, step=self.global_step)
 
             # Accumulate on-device — no .item() sync per step
             total_loss += loss_outputs.total_loss.detach()

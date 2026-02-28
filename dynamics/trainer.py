@@ -352,18 +352,39 @@ class DynamicsTrainer:
                 _log_d += d_for_log.mean().detach()
                 _log_count += 1
 
-                if self.global_step % log_interval == 0 and is_master():
-                    # Single .item() batch at log intervals — true average over interval
-                    n = max(_log_count, 1)
-                    self.metrics_buffer.update({
-                        "train/loss": (_log_loss / n).item(),
-                        "train/flow": (_log_flow / n).item(),
-                        "train/bootstrap": (_log_bootstrap / n).item(),
-                        "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
-                        "train/tau_mean": (_log_tau / n).item(),
-                        "train/d_mean": (_log_d / n).item(),
-                    })
-                    # Reset accumulators in-place — avoids new XLA graph nodes
+                if self.global_step % log_interval == 0:
+                    # Master logs; ALL processes reset accumulators
+                    if is_master():
+                        n = max(_log_count, 1)
+                        self.metrics_buffer.update({
+                            "train/loss": (_log_loss / n).item(),
+                            "train/flow": (_log_flow / n).item(),
+                            "train/bootstrap": (_log_bootstrap / n).item(),
+                            "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
+                            "train/tau_mean": (_log_tau / n).item(),
+                            "train/d_mean": (_log_d / n).item(),
+                        })
+
+                        smoothed_metrics = self.metrics_buffer.get_averages()
+                        smoothed_metrics.update({
+                            "train/lr": self.optimizer.param_groups[0]["lr"],
+                            "train/scale": self.scaler.get_scale(),
+                            "epoch": epoch,
+                            "global_step": self.global_step,
+                        })
+
+                        smoothed_metrics.update(self.throughput_tracker.step(B))
+
+                        if self.training_cfg.log_memory:
+                            smoothed_metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
+
+                        if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
+                            smoothed_metrics.update(ModelStatistics.compute_weight_stats(self.model))
+                            smoothed_metrics.update(ModelStatistics.compute_gradient_stats(self.model))
+
+                        wandb.log(smoothed_metrics, step=self.global_step)
+
+                    # Reset on ALL processes — prevents unbounded accumulation
                     _log_loss.zero_()
                     _log_flow.zero_()
                     _log_bootstrap.zero_()
@@ -371,25 +392,6 @@ class DynamicsTrainer:
                     _log_tau.zero_()
                     _log_d.zero_()
                     _log_count = 0
-
-                    smoothed_metrics = self.metrics_buffer.get_averages()
-                    smoothed_metrics.update({
-                        "train/lr": self.optimizer.param_groups[0]["lr"],
-                        "train/scale": self.scaler.get_scale(),
-                        "epoch": epoch,
-                        "global_step": self.global_step,
-                    })
-
-                    smoothed_metrics.update(self.throughput_tracker.step(B))
-
-                    if self.training_cfg.log_memory:
-                        smoothed_metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
-
-                    if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
-                        smoothed_metrics.update(ModelStatistics.compute_weight_stats(self.model))
-                        smoothed_metrics.update(ModelStatistics.compute_gradient_stats(self.model))
-
-                    wandb.log(smoothed_metrics, step=self.global_step)
 
             total_loss += loss.detach()
             total_flow += metrics["loss_flow"]
