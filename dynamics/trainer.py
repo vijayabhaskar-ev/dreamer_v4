@@ -516,22 +516,22 @@ class DynamicsTrainer:
 
 
 class RMSNormalizer:
-    
+
     def __init__(self, decay=0.99, epsilon=1e-8):
         self.decay = decay
         self.epsilon = epsilon
-       # self.rms_sq = None  
-        self.rms_sq = torch.tensor(1.0)  
-    
+        self.rms_sq = torch.tensor(1.0)
+        self._on_device = False
+
     def normalize(self, loss: torch.Tensor, update: bool = True) -> torch.Tensor:
         loss_sq = loss.detach() ** 2
-        self.rms_sq = self.rms_sq.to(loss_sq.device)  
+        if not self._on_device:
+            self.rms_sq = self.rms_sq.to(loss_sq.device)
+            self._on_device = True
 
-        # if self.rms_sq is None:
-        #     self.rms_sq = loss_sq  
         if update:
             self.rms_sq = self.decay * self.rms_sq + (1 - self.decay) * loss_sq
-        
+
         rms = torch.sqrt(self.rms_sq + self.epsilon)
         return loss / rms
     
@@ -541,3 +541,4 @@ class RMSNormalizer:
 
     def load_state_dict(self, state):
         self.rms_sq = state["rms_sq"]
+        self._on_device = False

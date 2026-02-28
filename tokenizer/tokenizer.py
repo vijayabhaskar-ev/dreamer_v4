@@ -295,6 +295,47 @@ class MaskedAutoencoderTokenizer(nn.Module):
         frames = frames.view(b, t, -1, h, w)
         return frames
 
+    def encode_only(self, frames: torch.Tensor) -> torch.Tensor:
+        """Encode frames to latent tokens WITHOUT running the decoder.
+
+        Skips masking, decoder blocks, and un-patchify — saves ~50% compute.
+        Used by the dynamics model which only needs latent representations.
+
+        Returns: (B, T*num_latent_tokens, latent_dim) latent tokens.
+        """
+        batch, t, c, h, w = frames.shape
+
+        patches = self.patch_embed(frames)  # (B, T*N, D)
+        latent_tokens = self.latent_tokens(batch, t)  # (B, L, D)
+        total_latents = latent_tokens.size(1)
+
+        # No masking — we want complete encoding of all patches
+        encoder_sequence = torch.cat([latent_tokens, patches], dim=1)
+
+        temporal_causal_mask = self._build_temporal_causal_mask(t, frames.device)
+        temporal_attn_mask = AttentionMask(is_causal=False, mask=temporal_causal_mask)
+
+        num_patches = patches.size(1)
+        latents_per_frame = self.config.num_latent_tokens
+        latent_cross_mask = self._build_latent_cross_mask(
+            latents_per_frame, num_patches, t, frames.device
+        )
+        latent_cross_attn_mask = AttentionMask(is_causal=False, mask=latent_cross_mask)
+
+        for block in self.blocks:
+            encoder_sequence = block(
+                encoder_sequence,
+                num_frames=t,
+                temporal_mask=temporal_attn_mask,
+                latent_cross_mask=latent_cross_attn_mask,
+                num_latents=total_latents,
+            )
+        encoder_sequence = self.norm(encoder_sequence)
+
+        z_latents = encoder_sequence[:, :total_latents, :]
+        z_latents = torch.tanh(self.latent_proj(z_latents))
+        return z_latents
+
     def encode(self, frames: torch.Tensor) -> torch.Tensor:
         outputs = self.forward(frames)
         return outputs.latent_tokens

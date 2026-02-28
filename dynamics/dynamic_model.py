@@ -38,14 +38,19 @@ class DynamicsModel(nn.Module):
         ])
         
         self.norm = nn.RMSNorm(config.embed_dim)
-        
+
+        # Cache — reused every forward() call, no need to recreate
+        self._temporal_attn_mask = AttentionMask(is_causal=True)
+
     def encode_frames(self, frames):
-        """Use frozen tokenizer to get bottleneck latents."""
+        """Use frozen tokenizer to get bottleneck latents.
+
+        Uses encode_only() which skips the decoder — ~50% less tokenizer compute.
+        """
         with torch.no_grad():
             B, T = frames.shape[:2]
-            output = self.tokenizer(frames)
-            z = output.latent_tokens   #Shape: (B, num_latent_tokens, latent_dim)
-            z = z.view(B, T, -1,z.shape[-1])
+            z = self.tokenizer.encode_only(frames)  # (B, T*S_z, latent_dim)
+            z = z.view(B, T, -1, z.shape[-1])
             return z
         
     def forward(self, z_noised, actions, tau, d):
@@ -85,10 +90,8 @@ class DynamicsModel(nn.Module):
         # Frame 3: [a₃, τd₃, z̃₃¹, z̃₃², ..., z̃₃³², reg₃¹, ..., reg₃⁴]  ← 38 tokens
 
         # Flatten → ONE sequence of 4 × 38 = 152 tokens: (B, 152, D)
-        temporal_attn_mask = AttentionMask(is_causal=True)
-
         for block in self.blocks:
-            x = block(x, num_frames=T, temporal_mask=temporal_attn_mask)
+            x = block(x, num_frames=T, temporal_mask=self._temporal_attn_mask)
         x = self.norm(x) # (B, T * (2 + S_z + S_r), D_embed)
 
         x = x.view(B , T, total_tokens_per_frame, -1)
