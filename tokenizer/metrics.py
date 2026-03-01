@@ -270,7 +270,7 @@ class ThroughputTracker:
             return {}
         
         # Compute metrics
-        avg_step_time = sum(self.step_times) / len(self.step_times)
+        avg_step_time = step_time
         samples_per_sec = batch_size / step_time if step_time > 0 else 0
         
         self.last_time = current_time

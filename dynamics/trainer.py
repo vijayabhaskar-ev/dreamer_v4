@@ -33,7 +33,8 @@ class DynamicsTrainingConfig:
     warmup_steps: int = 500       
     min_lr: float = 1e-6  
     weight_decay: float = 0.01
-    grad_clip: float = 1.0
+    weight_decay_heavy: float = 0.1   # attention + FF layers (drifted in charts)
+    grad_clip: float = 5.0
     amp: bool = False
     checkpoint_interval: int = 1
     device: str = "cuda"
@@ -77,11 +78,29 @@ class DynamicsTrainer:
             p.requires_grad_(False)
 
         self.model = DynamicsModel(dynamics_cfg, self.tokenizer).to(self.device)
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=training_cfg.lr,
-            weight_decay=training_cfg.weight_decay,
-        )
+
+        # Per-group weight decay: attention+FF get heavy decay (these grew
+        # unboundedly in prior runs), norms/biases get zero, rest gets default.
+        heavy_decay_params = []
+        no_decay_params = []
+        default_decay_params = []
+
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            name_lower = name.lower()
+            if param.dim() <= 1 or 'norm' in name_lower:
+                no_decay_params.append(param)
+            elif any(p in name_lower for p in ['spatial_attn', 'temporal_attn', '.ff.']):
+                heavy_decay_params.append(param)
+            else:
+                default_decay_params.append(param)
+
+        self.optimizer = torch.optim.AdamW([
+            {"params": heavy_decay_params, "weight_decay": training_cfg.weight_decay_heavy},
+            {"params": no_decay_params, "weight_decay": 0.0},
+            {"params": default_decay_params, "weight_decay": training_cfg.weight_decay},
+        ], lr=training_cfg.lr)
 
         self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
         self.global_step = 0
@@ -370,6 +389,7 @@ class DynamicsTrainer:
                         if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
                             smoothed_metrics.update(ModelStatistics.compute_weight_stats(self.model))
                             smoothed_metrics.update(ModelStatistics.compute_gradient_stats(self.model))
+                            smoothed_metrics.update(self._compute_wd_metrics())
 
                         wandb.log(smoothed_metrics, step=self.global_step)
 
@@ -394,6 +414,22 @@ class DynamicsTrainer:
             "loss/dynamics_bootstrap": (total_bootstrap / max(total_steps, 1)).item(),
         }
 
+
+    def _compute_wd_metrics(self) -> Dict[str, float]:
+        """Per-group effective weight decay: wd * sum(||p||^2).
+
+        Shows how much regularization each group contributes.
+        Only called at model_stats_interval so .item() syncs are acceptable.
+        """
+        names = ["attn_ff", "no_decay", "default"]
+        metrics = {}
+        for name, group in zip(names, self.optimizer.param_groups):
+            wd = group["weight_decay"]
+            if wd == 0.0:
+                continue
+            sq_sum = sum(p.data.norm(2) ** 2 for p in group["params"] if p.requires_grad)
+            metrics[f"model/wd_{name}"] = (wd * sq_sum).item()
+        return metrics
 
     def _compute_loss(self, z_clean, z_noised, actions, tau, d, training=True,
                       compute_bootstrap=True, loss_mask=None):

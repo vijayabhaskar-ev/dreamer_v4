@@ -35,7 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--weight-decay-heavy", type=float, default=0.1,
+                        help="Weight decay for attention+FF layers (higher to prevent drift)")
+    parser.add_argument("--grad-clip", type=float, default=5.0)
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--warmup-steps", type=int, default=500)   
@@ -164,6 +166,7 @@ def _train_fn(index=0, args=None):
         batch_size=opts.batch_size,
         lr=opts.lr,
         weight_decay=opts.weight_decay,
+        weight_decay_heavy=opts.weight_decay_heavy,
         grad_clip=opts.grad_clip,
         amp=opts.amp,
         device=opts.device,
