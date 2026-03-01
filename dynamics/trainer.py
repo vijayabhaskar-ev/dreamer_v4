@@ -235,7 +235,12 @@ class DynamicsTrainer:
             state = torch.load(path, map_location='cpu', weights_only=False)
         self.model.load_state_dict(state["model"], strict=strict)
         if "optimizer" in state:
-            self.optimizer.load_state_dict(state["optimizer"])
+            try:
+                self.optimizer.load_state_dict(state["optimizer"])
+            except (ValueError, KeyError) as e:
+                if is_master():
+                    print(f"[WARN] Could not load optimizer state ({e}). "
+                          "Using fresh optimizer (expected when changing param groups).")
         if "rms_normalizers" in state:
             rms_state = state["rms_normalizers"]
             if "flow" in rms_state:
