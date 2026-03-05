@@ -41,6 +41,8 @@ class DynamicsTrainingConfig:
     # Curriculum: bootstrap ramp-up
     curriculum_warmup_steps: int = 2000   
     curriculum_ramp_steps: int = 4000    
+    # Alternating batch lengths
+    long_batch_ratio: float = 0.15  # fraction of training steps using T₂ (long sequences)
     # Logging
     steps_per_epoch: int = 100
     log_interval: int = 10
@@ -164,7 +166,8 @@ class DynamicsTrainer:
 
     def fit(
         self,
-        train_loader: DataLoader,
+        train_loader_short: DataLoader,
+        train_loader_long: DataLoader,
         val_loader: Optional[DataLoader] = None,
         checkpoint_dir: Optional[str] = None,
         start_epoch: int = 1,
@@ -176,10 +179,14 @@ class DynamicsTrainer:
 
 
         for epoch in range(start_epoch, self.training_cfg.epochs + 1):
-            train_metrics = self._run_epoch(train_loader, epoch, training=True)
+            train_metrics = self._run_epoch(
+                train_loader_short, train_loader_long, epoch, training=True,
+            )
             val_metrics = None
             if val_loader is not None:
-                val_metrics = self._run_epoch(val_loader, epoch, training=False)
+                val_metrics = self._run_epoch(
+                    val_loader, None, epoch, training=False,
+                )
 
             if is_master():
                 epoch_log = {
@@ -255,7 +262,11 @@ class DynamicsTrainer:
         return state.get("epoch", 0) + 1
 
     def _run_epoch(
-        self, loader: DataLoader, epoch: int, training: bool
+        self,
+        loader_short: DataLoader,
+        loader_long: Optional[DataLoader],
+        epoch: int,
+        training: bool,
     ) -> Dict[str, float]:
 
         self.model.train(training)
@@ -280,7 +291,25 @@ class DynamicsTrainer:
         warmup_end = self.training_cfg.curriculum_warmup_steps
         ramp_end = self.training_cfg.curriculum_ramp_steps
 
-        for batch in loader:
+        # Alternating batch lengths: iterate short loader, draw from long loader
+        # with probability long_batch_ratio. During validation (loader_long=None),
+        # only the short loader is used.
+        long_ratio = self.training_cfg.long_batch_ratio if (training and loader_long is not None) else 0.0
+        long_iter = iter(loader_long) if loader_long is not None else None
+
+        for batch_short in loader_short:
+            # Decide whether to use short or long batch this step
+            # Python-level branch — both T values compile once, no per-step recompilation
+            use_long = training and long_iter is not None and (torch.rand(1).item() < long_ratio)
+            if use_long:
+                try:
+                    batch = next(long_iter)
+                except StopIteration:
+                    long_iter = iter(loader_long)
+                    batch = next(long_iter)
+            else:
+                batch = batch_short
+
             frames, actions = batch
             frames = frames.to(self.device)
             actions = actions.to(self.device)
@@ -289,29 +318,13 @@ class DynamicsTrainer:
                 frames = frames.unsqueeze(1)
 
             B, T = frames.shape[0:2]
-            assert B >= 4, "Batch size too small for mixed training"
 
             # Python-level gate: skip expensive bootstrap forward passes
             # during flow-only warmup (no XLA sync, no dynamic shapes)
             need_bootstrap = self.global_step >= warmup_end
 
-            # Unified path: ALL samples at (B, T) shape — one XLA graph.
-            # 70/30 semantics preserved via loss_mask: 30% of samples only
-            # contribute loss from 1 random frame with zeroed actions.
             z_clean = self.model.encode_frames(frames)
             tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
-
-            # Build per-frame loss mask: (B, T) — 1.0 for frames contributing to loss
-            loss_mask = torch.ones(B, T, device=self.device)
-            if training and T > 1:
-                n_single = max(1, int(B * 0.3))
-                random_t = torch.randint(0, T, (n_single,), device=self.device)
-                single_mask = torch.zeros(n_single, T, device=self.device)
-                single_mask[torch.arange(n_single, device=self.device), random_t] = 1.0
-                loss_mask[:n_single] = single_mask
-                # Zero actions for single-frame samples (no-action context)
-                actions = actions.clone()
-                actions[:n_single] = 0.0
 
             # Curriculum d-override
             if self.global_step < warmup_end:
@@ -330,13 +343,8 @@ class DynamicsTrainer:
                 loss, metrics = self._compute_loss(
                     z_clean, z_noised, actions, tau, d,
                     training=training, compute_bootstrap=need_bootstrap,
-                    loss_mask=loss_mask,
                 )
 
-
-
-
-                
             if training:
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
@@ -376,6 +384,7 @@ class DynamicsTrainer:
                             "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
                             "train/tau_mean": (_log_tau / n).item(),
                             "train/d_mean": (_log_d / n).item(),
+                            "train/seq_len": float(T),
                         })
 
                         smoothed_metrics = self.metrics_buffer.get_averages()
@@ -437,18 +446,13 @@ class DynamicsTrainer:
         return metrics
 
     def _compute_loss(self, z_clean, z_noised, actions, tau, d, training=True,
-                      compute_bootstrap=True, loss_mask=None):
+                      compute_bootstrap=True):
         """Compute flow matching + bootstrap loss.
 
         Uses masked arithmetic instead of boolean indexing so all tensors
         keep fixed (B, T, ...) shapes — critical for XLA/TPU which
-        recompiles the entire graph on shape changes.
-
-        The ``compute_bootstrap`` flag is a **Python-level gate** controlled
-        by the caller based on curriculum stage (pure int comparison, no XLA
-        sync).  When False the two extra model forward passes for the
-        bootstrap target are skipped entirely, avoiding ~2x wasted compute
-        during the flow-only warmup phase.
+        recompiles the entire graph on shape changes. T can be T₁ or T₂
+        (two fixed values from alternating batch lengths).
 
         Args:
             z_clean:  (B, T, S_z, D)  — target clean latents
@@ -456,10 +460,7 @@ class DynamicsTrainer:
             actions:  (B, T-1, action_dim)
             tau:      (B, T)  — per-frame signal levels
             d:        (B, T)  — per-frame step sizes
-            compute_bootstrap: whether to run the bootstrap forward passes
-            loss_mask: (B, T)  — per-frame weight (1.0 = contribute, 0.0 = ignore).
-                       Used for 70/30 mixed training: 30% of samples only
-                       contribute loss from 1 random frame.
+            compute_bootstrap: Python-level gate to skip bootstrap forward passes
 
         Returns:
             loss, metrics_dict
@@ -472,11 +473,6 @@ class DynamicsTrainer:
         flow_mask = (d == d_min).float()   # (B, T)  1.0 for flow, 0.0 for bootstrap
         boot_mask = 1.0 - flow_mask        # (B, T)
         w = 0.9 * tau + 0.1               # (B, T)
-
-        # Apply loss_mask to restrict which (sample, frame) pairs contribute
-        if loss_mask is not None:
-            flow_mask = flow_mask * loss_mask
-            boot_mask = boot_mask * loss_mask
 
         # ── Flow loss (masked) ──────────────────────────────────────
         per_sample_flow = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))  # (B, T)

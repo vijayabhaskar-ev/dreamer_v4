@@ -29,10 +29,15 @@ class DynamicsConfig:
     drop_path: float = 0.1
 
     # From tokenizer (must match)
-    num_latent_tokens: int = 32   
+    num_latent_tokens: int = 32
 
-    #No of frames
-    seq_len: int = 4
+    # Sequence lengths and context window
+    seq_len_short: int = 8       
+    seq_len_long: int = 32      
+    context_length: int = 16      
+
+    # Keep seq_len as an alias for backward compatibility (defaults to seq_len_short)
+    seq_len: int = 8
 
     @classmethod
     def from_tokenizer(cls, tokenizer_cfg: TokenizerConfig, **overrides: Any) -> "DynamicsConfig":

@@ -209,9 +209,7 @@ class LatentCrossAttention(nn.Module):
     
     Latent tokens attend to ALL tokens (latents + patches) with block causal masking.
     This allows latents to compress information from patches across frames.
-    
-    GQA: When num_kv_heads < num_heads, multiple query heads share the same K/V heads.
-    
+        
     Q: from latents only
     K, V: from all tokens (latents + patches)
     """
@@ -237,9 +235,9 @@ class LatentCrossAttention(nn.Module):
         self.num_queries_per_kv = num_heads // self.num_kv_heads
         
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
-
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
+
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
 
@@ -443,11 +441,10 @@ class SpatialAttention(nn.Module):
         
         self.num_queries_per_kv = num_heads // self.num_kv_heads
         
-        # Q projection: full num_heads
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
-        # K, V projections: reduced to num_kv_heads for GQA
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
+
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
     
@@ -521,11 +518,10 @@ class TemporalAttention(nn.Module):
         
         self.num_queries_per_kv = num_heads // self.num_kv_heads
         
-        # Q projection: full num_heads
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
-        # K, V projections: reduced to num_kv_heads for GQA
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
+        
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
     

@@ -68,7 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-kv-heads", type=int, default=2)
     parser.add_argument("--K-max", type=int, default=64)
     parser.add_argument("--K-inference", type=int, default=4)
-    parser.add_argument("--seq-len", type=int, default=4)
+    parser.add_argument("--seq-len-short", type=int, default=8,
+                        help="T₁: short batch sequence length (used most of the time)")
+    parser.add_argument("--seq-len-long", type=int, default=32,
+                        help="T₂: long batch sequence length (occasional, must be > context-length)")
+    parser.add_argument("--context-length", type=int, default=16,
+                        help="C: sliding window size for temporal attention")
+    parser.add_argument("--long-batch-ratio", type=float, default=0.15,
+                        help="Fraction of training steps using long sequences")
     parser.add_argument("--num-register-tokens", type=int, default=4)
     parser.add_argument("--temporal-interval", type=int, default=4)
     parser.add_argument("--action-dim", type=int, default=6)
@@ -133,7 +140,7 @@ def _train_fn(index=0, args=None):
             latent_dim=opts.latent_dim,
             num_latent_tokens=opts.num_latent_tokens,
             embed_dim=opts.tokenizer_embed_dim,
-            seq_len=opts.seq_len,
+            seq_len=opts.seq_len_short,
             dataset_name=opts.dataset,
             task_name=opts.task,
         )
@@ -151,7 +158,10 @@ def _train_fn(index=0, args=None):
         num_kv_heads=opts.num_kv_heads,
         K_max=opts.K_max,
         K_inference=opts.K_inference,
-        seq_len=opts.seq_len,
+        seq_len_short=opts.seq_len_short,
+        seq_len_long=opts.seq_len_long,
+        seq_len=opts.seq_len_short,
+        context_length=opts.context_length,
         num_register_tokens=opts.num_register_tokens,
         temporal_interval=opts.temporal_interval,
         action_dim=opts.action_dim,
@@ -178,6 +188,7 @@ def _train_fn(index=0, args=None):
         curriculum_warmup_steps=opts.curriculum_warmup_steps,
         curriculum_ramp_steps=opts.curriculum_ramp_steps,
         steps_per_epoch=opts.steps_per_epoch,
+        long_batch_ratio=opts.long_batch_ratio,
     )
 
     # Only master initializes wandb; workers get disabled mode
@@ -205,23 +216,40 @@ def _train_fn(index=0, args=None):
         wandb.init(mode="disabled")
 
 
-    dataset_cfg = replace(
+    # Short-sequence dataset (T₁) — used for most training steps
+    dataset_cfg_short = replace(
         tokenizer_cfg,
         dataset_name=opts.dataset,
         task_name=opts.task,
-        seq_len=dynamics_cfg.seq_len,
+        seq_len=dynamics_cfg.seq_len_short,
     )
+    # Long-sequence dataset (T₂) — used occasionally for length generalization
+    dataset_cfg_long = replace(
+        tokenizer_cfg,
+        dataset_name=opts.dataset,
+        task_name=opts.task,
+        seq_len=dynamics_cfg.seq_len_long,
+    )
+
     train_steps_per_worker = opts.steps_per_epoch
     if opts.num_workers > 0:
         train_steps_per_worker = max(1, opts.steps_per_epoch // opts.num_workers)
 
-    train_dataset = DatasetFactory.get_dataset(
-        dataset_cfg,
+    # Short and long training datasets
+    train_dataset_short = DatasetFactory.get_dataset(
+        dataset_cfg_short,
+        batch_size=training_cfg.batch_size,
+        steps_per_epoch=train_steps_per_worker,
+        dataset_path=opts.dataset_path,
+    )
+    train_dataset_long = DatasetFactory.get_dataset(
+        dataset_cfg_long,
         batch_size=training_cfg.batch_size,
         steps_per_epoch=train_steps_per_worker,
         dataset_path=opts.dataset_path,
     )
 
+    # Validation uses short sequences only
     val_steps = opts.val_steps_per_epoch
     if val_steps is None:
         val_steps = max(1, train_steps_per_worker // 10)
@@ -229,7 +257,7 @@ def _train_fn(index=0, args=None):
     val_dataset = None
     if val_steps > 0:
         val_dataset = DatasetFactory.get_dataset(
-            dataset_cfg,
+            dataset_cfg_short,
             batch_size=training_cfg.batch_size,
             steps_per_epoch=val_steps,
             dataset_path=opts.dataset_path,
@@ -238,8 +266,15 @@ def _train_fn(index=0, args=None):
     device = get_device(opts.device)
     use_pin_memory = device.type == "cuda"
 
-    train_loader_raw = DataLoader(
-        train_dataset,
+    train_loader_short_raw = DataLoader(
+        train_dataset_short,
+        batch_size=None,
+        num_workers=opts.num_workers,
+        pin_memory=use_pin_memory,
+        multiprocessing_context='spawn' if opts.num_workers > 0 else None,
+    )
+    train_loader_long_raw = DataLoader(
+        train_dataset_long,
         batch_size=None,
         num_workers=opts.num_workers,
         pin_memory=use_pin_memory,
@@ -254,7 +289,8 @@ def _train_fn(index=0, args=None):
     ) if val_dataset is not None else None
 
     # Wrap with MpDeviceLoader for async host→device transfer on TPU
-    train_loader = wrap_loader(train_loader_raw, device)
+    train_loader_short = wrap_loader(train_loader_short_raw, device)
+    train_loader_long = wrap_loader(train_loader_long_raw, device)
     val_loader = wrap_loader(val_loader_raw, device) if val_loader_raw is not None else None
 
     trainer = DynamicsTrainer(
@@ -282,7 +318,10 @@ def _train_fn(index=0, args=None):
         print(f"  Latent shape:   ({dynamics_cfg.num_latent_tokens}, {dynamics_cfg.latent_input_dim})")
         print(f"  Embed dim:      {dynamics_cfg.embed_dim}")
         print(f"  Depth:          {dynamics_cfg.depth}")
-        print(f"  Seq len (T):    {dynamics_cfg.seq_len}")
+        print(f"  T_short (T₁):   {dynamics_cfg.seq_len_short}")
+        print(f"  T_long  (T₂):   {dynamics_cfg.seq_len_long}")
+        print(f"  Context (C):    {dynamics_cfg.context_length}")
+        print(f"  Long ratio:     {training_cfg.long_batch_ratio}")
         print(f"  K_max:          {dynamics_cfg.K_max}")
         print(f"  Batch size:     {training_cfg.batch_size}")
         print(f"  LR:             {training_cfg.lr}")
@@ -291,7 +330,8 @@ def _train_fn(index=0, args=None):
         print(f"{'='*60}\n")
 
     trainer.fit(
-        train_loader=train_loader,
+        train_loader_short=train_loader_short,
+        train_loader_long=train_loader_long,
         val_loader=val_loader,
         checkpoint_dir=str(ckpt_dir),
         start_epoch=start_epoch,
@@ -312,6 +352,7 @@ def main(args: Optional[list[str]] = None) -> None:
         import torch_xla.distributed.xla_multiprocessing as xmp
         xmp.spawn(_train_fn, args=(opts,), nprocs=None)
     else:
+        #TODO Implement multi-GPU training
         _train_fn(index=0, args=opts)
 
 

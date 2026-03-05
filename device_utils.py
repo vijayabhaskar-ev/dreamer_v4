@@ -15,7 +15,7 @@ import torch
 
 def _has_xla() -> bool:
     try:
-        import torch_xla  # noqa: F401
+        import torch_xla  
         return True
     except ImportError:
         return False
@@ -147,7 +147,7 @@ class NoOpGradScaler:
     def scale(self, loss: torch.Tensor) -> torch.Tensor:
         return loss
 
-    def unscale_(self, optimizer: torch.optim.Optimizer) -> None:  # noqa: ARG002
+    def unscale_(self, optimizer: torch.optim.Optimizer) -> None: 
         pass
 
     def step(self, optimizer: torch.optim.Optimizer) -> None:

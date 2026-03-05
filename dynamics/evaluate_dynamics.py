@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tokenizer-ckpt", type=str, required=True, help="Path to tokenizer checkpoint")
     parser.add_argument("--dataset", type=str, default="dm_control")
     parser.add_argument("--task", type=str, default="cheetah_run")
+    parser.add_argument("--dataset-path", type=str, default=None,
+                        help="Path to .npz file (required when --dataset=offline)")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--steps", type=int, default=20, help="Evaluation batches to process")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -288,6 +290,7 @@ def main(args: Optional[list[str]] = None) -> None:
         dataset_cfg,
         batch_size=opts.batch_size,
         steps_per_epoch=steps_per_worker,
+        dataset_path=opts.dataset_path,
     )
     loader = DataLoader(
         dataset,

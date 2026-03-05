@@ -76,7 +76,6 @@ class MaskedAutoencoderTokenizer(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
         self.latent_tokens = LatentTokenEmbedding(config)
 
-        # RoPE for relative position encoding in attention
         head_dim = config.embed_dim // config.num_heads
         self.rope_spatial = RotaryPositionEmbedding(
             dim=head_dim,
