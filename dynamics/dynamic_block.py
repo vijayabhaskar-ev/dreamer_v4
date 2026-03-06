@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Optional
-from tokenizer.layers import SpatialAttention, TemporalAttention, FeedForward, RotaryPositionEmbedding, AttentionMask
+from tokenizer.layers import SpatialAttention, TemporalAttention, FeedForward, RotaryPositionEmbedding, AttentionMask, DropPath
 
 class DynamicsTransformerBlock(nn.Module):
     """
@@ -40,7 +40,7 @@ class DynamicsTransformerBlock(nn.Module):
             
         self.ff = FeedForward(embed_dim, mlp_ratio, dropout)
         
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
         
     def forward(self, x, num_frames, temporal_mask: Optional[AttentionMask] = None):
         """

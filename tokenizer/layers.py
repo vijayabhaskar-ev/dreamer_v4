@@ -9,10 +9,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample"""
+    def __init__(self, p=0.0):
+        super().__init__()
+        self.p = p
+
+    def forward(self, x):
+        if not self.training or self.p == 0:
+            return x
+        keep_prob = 1 - self.p
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # (B, 1, 1, ...)
+        random_tensor = torch.rand(shape, device=x.device, dtype=x.dtype) < keep_prob
+        return x / keep_prob * random_tensor
+
 
 class RotaryPositionEmbedding(nn.Module):
 
-    
     def __init__(self, dim: int, max_positions: int = 512, base: float = 10000.0):
         """
         Args:
@@ -680,7 +693,7 @@ class TransformerBlock(nn.Module):
         # Shared feed-forward
         self.norm2 = nn.RMSNorm(embed_dim)
         self.ff = FeedForward(embed_dim, mlp_ratio, dropout)
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0 else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
 
     def forward(
         self, 

@@ -325,6 +325,9 @@ class DynamicsTrainer:
 
             z_clean = self.model.encode_frames(frames)
             tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
+            
+            # Context frame: First frame always gets near-clean noise level
+            tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
 
             # Curriculum d-override
             if self.global_step < warmup_end:

@@ -13,7 +13,7 @@ class ActionEmbedding(nn.Module):
         self.action_dim = action_dim
         self.embed_dim = embed_dim
         self.proj = nn.Linear(action_dim, embed_dim)
-        self.no_action_emb = nn.Parameter(torch.randn(1, 1, embed_dim))
+        self.no_action_emb = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
     
     def forward(self, actions, batch_size):
         """

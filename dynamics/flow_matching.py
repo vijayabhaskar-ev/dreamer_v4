@@ -16,7 +16,8 @@ def sample_tau_and_d(batch_size, T,  K_max=64, device=None):
     d = 1.0 / k.float() 
 
     tau_idx = torch.randint(0, K_max, (batch_size, T), device=device) % k
-    tau = tau_idx.float() * d 
+    tau = tau_idx.float() * d
+
     return tau, d
 
     
