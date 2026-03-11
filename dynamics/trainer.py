@@ -294,7 +294,7 @@ class DynamicsTrainer:
         # Alternating batch lengths: iterate short loader, draw from long loader
         # with probability long_batch_ratio. During validation (loader_long=None),
         # only the short loader is used.
-        long_ratio = self.training_cfg.long_batch_ratio if (training and loader_long is not None) else 0.0
+        long_ratio = self.training_cfg.long_batch_ratio if (training and loader_long is not None) else 0.0 #TODO Need to check the if we need to use loader_long in validation
         long_iter = iter(loader_long) if loader_long is not None else None
 
         for batch_short in loader_short:

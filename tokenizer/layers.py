@@ -9,6 +9,51 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from device_utils import _XLA_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# flex_attention (PyTorch 2.5+) — fused kernels with custom score transforms
+# Used on CUDA to get Flash-Attention-level efficiency with soft capping.
+# On XLA/TPU we keep the manual path since the XLA compiler fuses it natively.
+# ---------------------------------------------------------------------------
+_USE_FLEX_ATTN = False
+if not _XLA_AVAILABLE:
+    try:
+        from torch.nn.attention.flex_attention import (
+            flex_attention as _flex_attention,
+        )
+        _flex_attention = torch.compile(_flex_attention)
+        _USE_FLEX_ATTN = True
+    except ImportError:
+        pass
+
+_SOFT_CAP = 30.0 #TODO Add to config
+
+
+def _soft_cap_mod(score, b, h, q_idx, kv_idx):
+    """Score mod: soft cap only (no mask, no causal)."""
+    return _SOFT_CAP * torch.tanh(score / _SOFT_CAP)
+
+
+def _soft_cap_causal_mod(score, b, h, q_idx, kv_idx):
+    """Score mod: soft cap + standard causal (L_q == L_k)."""
+    score = _SOFT_CAP * torch.tanh(score / _SOFT_CAP)
+    return torch.where(q_idx >= kv_idx, score, float("-inf"))
+
+
+def _make_soft_cap_mask_mod(mask: torch.Tensor):
+    """Build a score_mod that applies soft capping + an additive float mask."""
+    if mask.ndim == 2:
+        def score_mod(score, b, h, q_idx, kv_idx):
+            score = _SOFT_CAP * torch.tanh(score / _SOFT_CAP)
+            return score + mask[q_idx, kv_idx]
+        return score_mod
+    # (B, 1, L_q, L_k) — broadcast over heads
+    def score_mod(score, b, h, q_idx, kv_idx):
+        score = _SOFT_CAP * torch.tanh(score / _SOFT_CAP)
+        return score + mask[b, 0, q_idx, kv_idx]
+    return score_mod
+
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample"""
     def __init__(self, p=0.0):
@@ -181,6 +226,73 @@ class AttentionMask:
         return None
 
 
+class QKNorm(nn.Module):
+    """Per-head RMS normalization for Q and K (Dehghani et al., 2023).
+
+    Applied after projection + reshape but before RoPE, so positional
+    information is not normalized away.  Shapes: q (B, H, L, D), k (B, Hkv, L, D).
+    """
+
+    def __init__(self, head_dim: int):
+        super().__init__()
+        self.q_norm = nn.RMSNorm(head_dim)
+        self.k_norm = nn.RMSNorm(head_dim)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor):
+        return self.q_norm(q), self.k_norm(k)
+
+
+def _attention_with_soft_cap(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    cap: float = 30.0,
+    training: bool = True,
+) -> torch.Tensor:
+    """Scaled dot-product attention with logit soft capping (Gemma 2).
+
+    Backend dispatch:
+      - **CUDA** (flex_attention): Fused Triton kernels via ``torch.compile``.
+        Memory-efficient tiled computation — never materialises the full
+        (L_q × L_k) attention matrix.  Requires PyTorch ≥ 2.5.
+      - **XLA / fallback**: Manual matmul → tanh → softmax → matmul.
+        The XLA compiler fuses this into an efficient graph natively.
+
+    Falls back to the manual path when dropout is requested, since
+    ``flex_attention`` does not support dropout natively.
+    """
+    # ── CUDA fast path: flex_attention with score_mod ──────────────────
+    if _USE_FLEX_ATTN and dropout_p == 0.0:
+        if attn_mask is not None:
+            score_mod = _make_soft_cap_mask_mod(attn_mask)
+        elif is_causal:
+            score_mod = _soft_cap_causal_mod
+        else:
+            score_mod = _soft_cap_mod
+        return _flex_attention(q, k, v, score_mod=score_mod)
+
+    # ── XLA / dropout fallback: manual attention ──────────────────────
+    scale = q.shape[-1] ** -0.5
+    scores = torch.matmul(q * scale, k.transpose(-2, -1))  # (B, H, Lq, Lk)
+    scores = cap * torch.tanh(scores / cap)
+    if attn_mask is not None:
+        scores = scores + attn_mask
+    if is_causal:
+        L_q, L_k = scores.shape[-2], scores.shape[-1]
+        causal = torch.triu(
+            torch.full((L_q, L_k), float("-inf"), device=scores.device, dtype=scores.dtype),
+            diagonal=L_k - L_q + 1,
+        )
+        scores = scores + causal
+    weights = F.softmax(scores, dim=-1)
+    if dropout_p > 0.0 and training:
+        weights = F.dropout(weights, p=dropout_p)
+    return torch.matmul(weights, v)
+
+
 class MultiheadSelfAttention(nn.Module): #TODO Remove it after final implementation
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
@@ -250,6 +362,7 @@ class LatentCrossAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
+        self.qk_norm = QKNorm(self.head_dim)
 
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
@@ -287,6 +400,8 @@ class LatentCrossAttention(nn.Module):
         k = k.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         v = v.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
 
+        q, k = self.qk_norm(q, k)
+
         if self.rope is not None and num_frames > 1:
             cache_key = (L_q, L_kv, num_frames)
             if self._cached_rope_key != cache_key:
@@ -315,13 +430,14 @@ class LatentCrossAttention(nn.Module):
         sdpa_mask = None
         if attn_mask is not None:
             sdpa_mask = attn_mask.apply_to_sdpa((B, self.num_heads, L_q, L_kv))
-        
-        out = F.scaled_dot_product_attention(
+
+        out = _attention_with_soft_cap(
             q, k, v,
             attn_mask=sdpa_mask,
             dropout_p=self.dropout.p if self.training else 0.0,
+            training=self.training,
         )
-        
+
         out = out.transpose(1, 2).reshape(B, L_q, C)
         out = self.out_proj(out)
         return out
@@ -364,6 +480,7 @@ class PatchToLatentCrossAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
+        self.qk_norm = QKNorm(self.head_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
 
@@ -394,9 +511,10 @@ class PatchToLatentCrossAttention(nn.Module):
         v = self.v_proj(latents)
 
         q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, L_q, D)
-
         k = k.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
         v = v.view(B, L_kv, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, L_kv, D)
+
+        q, k = self.qk_norm(q, k)
 
         if self.rope is not None and num_frames > 1:
             cache_key = (L_q, L_kv, num_frames)
@@ -416,11 +534,12 @@ class PatchToLatentCrossAttention(nn.Module):
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
         
         # No mask needed - all patches can attend to all latents freely
-        out = F.scaled_dot_product_attention(
+        out = _attention_with_soft_cap(
             q, k, v,
             dropout_p=self.dropout.p if self.training else 0.0,
+            training=self.training,
         )
-        
+
         out = out.transpose(1, 2).reshape(B, L_q, C)
         out = self.out_proj(out)
         return out
@@ -457,38 +576,41 @@ class SpatialAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
+        self.qk_norm = QKNorm(self.head_dim)
 
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
-    
+
     def forward(self, x: torch.Tensor, num_frames: int) -> torch.Tensor:
         B, L, C = x.shape
         patches_per_frame = L // num_frames   #TODO rename the variables to be generic for both tokenizer and dynamic model
-        
+
         x = x.view(B * num_frames, patches_per_frame, C)
         BT = B * num_frames
         N = patches_per_frame
-        
+
         q = self.q_proj(x)  # (BT, N, num_heads * head_dim)
         k = self.k_proj(x)  # (BT, N, num_kv_heads * head_dim)
         v = self.v_proj(x)  # (BT, N, num_kv_heads * head_dim)
-        
+
         q = q.view(BT, N, self.num_heads, self.head_dim).transpose(1, 2)  # (BT, H, N, D)
-        
         k = k.view(BT, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BT, Hkv, N, D)
         v = v.view(BT, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BT, Hkv, N, D)
-        
+
+        q, k = self.qk_norm(q, k)
+
         if self.rope is not None:
             cos, sin = self.rope(N, q.device, q.dtype)
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        
+
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
-        
-        out = F.scaled_dot_product_attention(
+
+        out = _attention_with_soft_cap(
             q, k, v,
             dropout_p=self.dropout.p if self.training else 0.0,
+            training=self.training,
         )
         
         out = out.transpose(1, 2).reshape(BT, N, C)
@@ -534,13 +656,14 @@ class TemporalAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, num_heads * self.head_dim, bias=True)
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=True)
-        
+        self.qk_norm = QKNorm(self.head_dim)
+
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
-    
+
     def forward(
-        self, 
-        x: torch.Tensor, 
+        self,
+        x: torch.Tensor,
         num_frames: int,
         attn_mask: Optional[AttentionMask] = None
     ) -> torch.Tensor:
@@ -549,7 +672,7 @@ class TemporalAttention(nn.Module):
             x: Input tensor of shape (B, T*N, D)
             num_frames: Number of frames T
             attn_mask: Optional attention mask (e.g., causal masking across time)
-        
+
         Returns:
             Output tensor of shape (B, T*N, D)
         """
@@ -557,46 +680,48 @@ class TemporalAttention(nn.Module):
         T = num_frames
         patches_per_frame = L // T
         N = patches_per_frame
-        
+
         # Reshape to (B, T, N, D) then transpose to (B, N, T, D)
         # This groups same spatial positions across frames
         x = x.view(B, T, N, C).transpose(1, 2).contiguous()  # (B, N, T, D)
         x = x.view(B * N, T, C)  # (B*N, T, D) - each spatial position is a sequence
         BN = B * N
-        
+
         # Project Q, K, V separately
         q = self.q_proj(x)  # (BN, T, num_heads * head_dim)
         k = self.k_proj(x)  # (BN, T, num_kv_heads * head_dim)
         v = self.v_proj(x)  # (BN, T, num_kv_heads * head_dim)
-        
+
         # Reshape Q for multi-head attention
         q = q.view(BN, T, self.num_heads, self.head_dim).transpose(1, 2)  # (BN, H, T, D)
-        
+
         # Reshape K, V with num_kv_heads
         k = k.view(BN, T, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BN, Hkv, T, D)
         v = v.view(BN, T, self.num_kv_heads, self.head_dim).transpose(1, 2)  # (BN, Hkv, T, D)
-        
+
+        q, k = self.qk_norm(q, k)
+
         # Apply RoPE to Q and K (before GQA head repetition for K)
         if self.rope is not None:
             cos, sin = self.rope(T, q.device, q.dtype)
-            # RoPE applied to full Q heads and KV heads separately
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        
+
         # GQA: Repeat K, V heads to match Q heads if num_kv_heads < num_heads
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
-        
+
         # Apply scaled dot product attention across frames for each spatial position
         sdpa_mask = None
         if attn_mask is not None:
             sdpa_mask = attn_mask.apply_to_sdpa((BN, self.num_heads, T, T))
-        
-        out = F.scaled_dot_product_attention(
+
+        out = _attention_with_soft_cap(
             q, k, v,
             attn_mask=sdpa_mask,
             dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=attn_mask.is_causal if (attn_mask is not None and sdpa_mask is None) else False
+            is_causal=attn_mask.is_causal if (attn_mask is not None and sdpa_mask is None) else False,
+            training=self.training,
         )
         
         # Reshape back: (BN, H, T, D) -> (BN, T, C) -> (B, N, T, D) -> (B, T, N, D) -> (B, T*N, D)

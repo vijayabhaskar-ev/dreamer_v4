@@ -329,11 +329,10 @@ class MaskedAutoencoderTokenizer(nn.Module):
         patches = self.patch_embed(frames)  # (B, T*N, D)
         latent_tokens = self.latent_tokens(batch, t)  # (B, L, D)
         total_latents = latent_tokens.size(1)
+        num_patches = patches.size(1)
 
-        # No masking — we want complete encoding of all patches
         encoder_sequence = torch.cat([latent_tokens, patches], dim=1)
 
-        num_patches = patches.size(1)
         temporal_attn_mask, latent_cross_attn_mask = self._get_cached_masks(
             t, num_patches, frames.device)
 
