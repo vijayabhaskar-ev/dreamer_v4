@@ -2,3 +2,5 @@ __pycache__/
 src/tokenizer/__pycache__/
 wandb/
 checkpoints/
+eval/dynamics/
+evaluation/

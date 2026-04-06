@@ -318,9 +318,13 @@ def _train_fn(index=0, args=None):
 
     start_epoch = 1
     if opts.resume_from is not None:
-        # Resume Phase 2 training (loads everything including heads + agent embedding)
+        # Resume Phase 2: enable agent tokens FIRST so load_checkpoint
+        # can restore the saved agent_embedding weights.
         if is_master():
             print(f"[INFO] Resuming Phase 2 from {opts.resume_from}")
+        trainer.model.enable_agent_tokens(num_tasks=opts.num_tasks)
+        trainer.model.agent_embedding.to(trainer.device)
+        trainer._build_optimizer()
         start_epoch = trainer.load_checkpoint(opts.resume_from)
         if is_master():
             print(f"[INFO] Resuming from epoch {start_epoch}")

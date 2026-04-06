@@ -263,7 +263,12 @@ class DynamicsTrainer:
         except pickle.UnpicklingError:
             state = torch.load(dynamics_ckpt, map_location='cpu', weights_only=False)
 
-        self.model.load_state_dict(state["model"], strict=True)
+        # Filter out agent_embedding keys — they may be present if the
+        # checkpoint came from a prior Phase 2 run.  We re-initialize
+        # agent_embedding fresh via enable_agent_tokens() below.
+        model_state = {k: v for k, v in state["model"].items()
+                       if not k.startswith("agent_embedding.")}
+        self.model.load_state_dict(model_state, strict=True)
 
         # Optionally restore flow/bootstrap RMS normalizers for continuity
         if "rms_normalizers" in state:
@@ -412,6 +417,7 @@ class DynamicsTrainer:
         state = {
                 "epoch": epoch,
                 "global_step": self.global_step,
+                "dynamics_cfg": self.dynamics_cfg,
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler_bucket": self._last_lr_bucket,
@@ -438,13 +444,26 @@ class DynamicsTrainer:
             state = torch.load(path, map_location='cpu', weights_only=True)
         except pickle.UnpicklingError:
             state = torch.load(path, map_location='cpu', weights_only=False)
-        self.model.load_state_dict(state["model"], strict=strict)
-        if "reward_head" in state:
-            self.reward_head.load_state_dict(state["reward_head"], strict=strict)
-        if "continue_head" in state:
-            self.continue_head.load_state_dict(state["continue_head"], strict=strict)
-        if "policy_head" in state:
-            self.policy_head.load_state_dict(state["policy_head"], strict=strict)
+        # Filter agent_embedding keys when the model doesn't have agent tokens
+        # enabled (e.g. evaluating a Phase 2 checkpoint without agent tokens).
+        model_state = state["model"]
+        if self.model.agent_embedding is None:
+            model_state = {k: v for k, v in model_state.items()
+                           if not k.startswith("agent_embedding.")}
+        self.model.load_state_dict(model_state, strict=strict)
+        # Load heads non-strictly: MTP length may differ between checkpoint
+        # and current config (e.g. Phase 2 checkpoint loaded for evaluation
+        # with mtp_length=0).  Missing/extra output_heads are harmless.
+        for name, head in [("reward_head", self.reward_head),
+                           ("continue_head", self.continue_head),
+                           ("policy_head", self.policy_head)]:
+            if name in state:
+                try:
+                    head.load_state_dict(state[name], strict=strict)
+                except RuntimeError:
+                    head.load_state_dict(state[name], strict=False)
+                    if is_master():
+                        print(f"[WARN] Loaded {name} non-strictly (MTP length mismatch)")
         if "optimizer" in state:
             try:
                 self.optimizer.load_state_dict(state["optimizer"])

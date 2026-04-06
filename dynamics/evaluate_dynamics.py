@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb-name", type=str, default=None)
     parser.add_argument("--wandb-offline", action="store_true")
     parser.add_argument("--wandb-disabled", action="store_true")
+    # Autoregressive rollout evaluation
+    parser.add_argument("--num-context-frames", type=int, default=1,
+                        help="Number of GT frames provided as context before rollout")
+    parser.add_argument("--rollout-horizon", type=int, default=0,
+                        help="Frames to generate autoregressively (0 = seq_len - context)")
+    parser.add_argument("--rollout-batches", type=int, default=10,
+                        help="Batches for rollout eval (expensive: K*H forward passes each)")
     return parser
 
 
@@ -219,6 +226,153 @@ def save_line_plot(
     img.save(path)
 
 
+@torch.no_grad()
+def denoise_one_frame(
+    model,
+    z_context: torch.Tensor,
+    tau_context: torch.Tensor,
+    d_context: torch.Tensor,
+    actions_context: torch.Tensor,
+    K: int,
+) -> torch.Tensor:
+    """Generate one new frame via K-step Euler denoising.
+
+    Builds a sequence [context..., z_current] and iteratively refines
+    z_current from pure noise (tau=0) to clean (tau=1) in K steps,
+    using the velocity formulation: v = (z_hat - z) / (1 - tau).
+
+    Args:
+        model:           DynamicsModel
+        z_context:       (B, T_ctx, S_z, D) context latents (noised at tau_ctx)
+        tau_context:     (B, T_ctx) tau values for context frames
+        d_context:       (B, T_ctx) d values for context frames
+        actions_context: (B, T_ctx, action_dim) actions (T_ctx actions for T_ctx+1 frames)
+        K:               number of denoising steps
+
+    Returns:
+        (B, 1, S_z, D) generated clean latent for the new frame
+    """
+    B = z_context.shape[0]
+    device = z_context.device
+    d_step = 1.0 / K
+
+    # Start from pure noise
+    z_current = torch.randn(B, 1, z_context.shape[2], z_context.shape[3], device=device)
+
+    for k in range(K):
+        tau_k = k / K
+
+        # Build full sequence: [context..., current prediction]
+        z_seq = torch.cat([z_context, z_current], dim=1)
+        tau_new = torch.full((B, 1), tau_k, device=device)
+        d_new = torch.full((B, 1), d_step, device=device)
+        tau_seq = torch.cat([tau_context, tau_new], dim=1)
+        d_seq = torch.cat([d_context, d_new], dim=1)
+
+        output = model(z_seq, actions_context, tau_seq, d_seq)
+        z_hat_new = output.z_hat[:, -1:]  # (B, 1, S_z, D)
+
+        # Euler step: v = (z_hat - z) / (1 - tau), z_next = z + v * d
+        v = (z_hat_new - z_current) / max(1.0 - tau_k, 1e-4)
+        z_current = z_current + v * d_step
+
+    return z_current
+
+
+@torch.no_grad()
+def autoregressive_rollout(
+    model,
+    tokenizer,
+    z_clean_full: torch.Tensor,
+    actions_full: torch.Tensor,
+    num_context: int,
+    rollout_horizon: int,
+    K: int,
+    tau_ctx: float,
+    context_length: int,
+    K_max: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Autoregressively generate future frames and measure MSE vs ground truth.
+
+    Provides num_context ground-truth frames, then generates rollout_horizon
+    frames one at a time, feeding each prediction back as context.
+
+    Args:
+        model:           DynamicsModel
+        tokenizer:       MaskedAutoencoderTokenizer (for decoding GIFs)
+        z_clean_full:    (B, T, S_z, D) all ground-truth latents
+        actions_full:    (B, T-1, action_dim) all ground-truth actions
+        num_context:     C — number of GT context frames
+        rollout_horizon: H — number of frames to generate
+        K:               denoising steps per frame
+        tau_ctx:         context corruption level (e.g. 0.1)
+        context_length:  sliding window size
+        K_max:           max K from training (for context d values)
+
+    Returns:
+        z_rollout:    (B, H, S_z, D) generated latent frames
+        mse_per_step: (H,) MSE at each rollout step vs ground truth
+    """
+    device = z_clean_full.device
+    B, T_total, S_z, D_lat = z_clean_full.shape
+    tau_ctx_val = 1.0 - tau_ctx  # e.g. 0.9
+    d_ctx_val = 1.0 / K_max     # smallest d — "already denoised"
+
+    # Noise context frames to match training distribution
+    z_ctx_clean = z_clean_full[:, :num_context]
+    tau_ctx_vec = torch.full((B, num_context), tau_ctx_val, device=device)
+    z_ctx_noised, _ = add_noise(z_ctx_clean, tau_ctx_vec)
+
+    # Buffer of all frames so far (noised at tau_ctx level)
+    z_buffer = z_ctx_noised.clone()
+    tau_buffer = tau_ctx_vec.clone()
+    d_buffer = torch.full((B, num_context), d_ctx_val, device=device)
+
+    generated = []
+    mse_list = []
+
+    for h in range(rollout_horizon):
+        t_target = num_context + h
+        if t_target >= T_total:
+            break
+
+        # Sliding window: keep last context_length frames
+        win_start = max(0, z_buffer.shape[1] - context_length)
+        z_win = z_buffer[:, win_start:]
+        tau_win = tau_buffer[:, win_start:]
+        d_win = d_buffer[:, win_start:]
+
+        # Actions for the window: we need T_win actions for T_win+1 frames
+        # Action index i connects absolute frame (win_start+i) to (win_start+i+1)
+        abs_start = win_start
+        abs_end = t_target  # action at t_target-1 connects frame t_target-1 to t_target
+        actions_win = actions_full[:, abs_start:abs_end]
+
+        z_gen = denoise_one_frame(
+            model, z_win, tau_win, d_win, actions_win, K,
+        )  # (B, 1, S_z, D)
+
+        # MSE vs ground truth
+        z_gt = z_clean_full[:, t_target:t_target + 1]
+        mse = ((z_gen - z_gt) ** 2).mean().item()
+        mse_list.append(mse)
+        generated.append(z_gen)
+
+        # Add generated frame to buffer (noised at tau_ctx to match training)
+        tau_gen = torch.full((B, 1), tau_ctx_val, device=device)
+        z_gen_noised, _ = add_noise(z_gen, tau_gen)
+        z_buffer = torch.cat([z_buffer, z_gen_noised], dim=1)
+        tau_buffer = torch.cat([tau_buffer, tau_gen], dim=1)
+        d_buffer = torch.cat([d_buffer, torch.full((B, 1), d_ctx_val, device=device)], dim=1)
+
+        if (h + 1) % 5 == 0:
+            print(f"  [rollout] generated frame {h + 1}/{rollout_horizon}, mse={mse:.6f}")
+
+    z_rollout = torch.cat(generated, dim=1) if generated else z_clean_full[:, :0]
+    mse_per_step = torch.tensor(mse_list, device=device)
+    return z_rollout, mse_per_step
+
+
 def write_csv(path: Path, header: list[str], rows: list[list[object]]) -> None:
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -313,7 +467,7 @@ def main(args: Optional[list[str]] = None) -> None:
 
     overall_sum = 0.0
     overall_count = 0
-
+    
     action_delta_sum = None
     action_true_mse_sum = None
     action_shuf_mse_sum = None
@@ -328,7 +482,7 @@ def main(args: Optional[list[str]] = None) -> None:
             if processed_steps >= opts.steps:
                 break
 
-            frames, actions = batch
+            frames, actions = batch[0], batch[1]
             frames = frames.to(device)
             actions = actions.to(device)
 
@@ -339,8 +493,9 @@ def main(args: Optional[list[str]] = None) -> None:
 
             z_clean = trainer.model.encode_frames(frames)
             tau, d = sample_tau_and_d(B, T, K_max=dynamics_cfg.K_max, device=device)
+            tau[:, 0] = 1.0 - dynamics_cfg.tau_ctx  # match training: context frame is near-clean
             z_noised, _ = add_noise(z_clean, tau)
-            z_hat = trainer.model(z_noised, actions, tau, d)
+            z_hat = trainer.model(z_noised, actions, tau, d).z_hat
 
             mse_bt = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))
             overall_sum += mse_bt.sum().item()
@@ -381,7 +536,7 @@ def main(args: Optional[list[str]] = None) -> None:
             if B > 1:
                 perm = torch.randperm(B, device=device)
                 shuffled_actions = actions[perm]
-                z_hat_shuf = trainer.model(z_noised, shuffled_actions, tau, d)
+                z_hat_shuf = trainer.model(z_noised, shuffled_actions, tau, d).z_hat
 
                 delta_t = (z_hat - z_hat_shuf).abs().mean(dim=(0, 2, 3))
                 mse_true_t = ((z_hat - z_clean) ** 2).mean(dim=(0, 2, 3))
@@ -419,6 +574,117 @@ def main(args: Optional[list[str]] = None) -> None:
         raise RuntimeError("No evaluation samples were processed.")
 
     overall_mse = overall_sum / overall_count
+
+    # ── Autoregressive Rollout Evaluation ──────────────────────────────
+    K_inf = dynamics_cfg.K_inference
+    num_context = opts.num_context_frames
+    rollout_horizon = opts.rollout_horizon
+    if rollout_horizon == 0:
+        rollout_horizon = dynamics_cfg.seq_len - num_context
+
+    rollout_mse_accum = torch.zeros(rollout_horizon, dtype=torch.float64, device=device)
+    rollout_count = 0
+    rollout_gif_count = 0
+    rollout_gif_paths: list[Path] = []
+
+    print(f"\n[INFO] Autoregressive rollout: {num_context} context frames, "
+          f"{rollout_horizon} rollout steps, K={K_inf}")
+
+    # Re-iterate the dataset for rollout (separate from single-step eval)
+    rollout_dataset = DatasetFactory.get_dataset(
+        dataset_cfg,
+        batch_size=opts.batch_size,
+        steps_per_epoch=opts.rollout_batches,
+        dataset_path=opts.dataset_path,
+    )
+    rollout_loader = DataLoader(
+        rollout_dataset,
+        batch_size=None,
+        num_workers=0,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    with torch.no_grad():
+        for step_idx, batch in enumerate(rollout_loader):
+            if step_idx >= opts.rollout_batches:
+                break
+
+            frames, actions = batch[0].to(device), batch[1].to(device)
+            if frames.dim() == 4:
+                frames = frames.unsqueeze(1)
+            B, T = frames.shape[:2]
+
+            actual_horizon = min(rollout_horizon, T - num_context)
+            if actual_horizon <= 0:
+                print(f"[WARN] Sequence too short for rollout (T={T}, context={num_context})")
+                continue
+
+            z_clean = trainer.model.encode_frames(frames)
+
+            z_rollout, mse_per_step = autoregressive_rollout(
+                model=trainer.model,
+                tokenizer=trainer.tokenizer,
+                z_clean_full=z_clean,
+                actions_full=actions,
+                num_context=num_context,
+                rollout_horizon=actual_horizon,
+                K=K_inf,
+                tau_ctx=dynamics_cfg.tau_ctx,
+                context_length=dynamics_cfg.context_length,
+                K_max=dynamics_cfg.K_max,
+            )
+
+            rollout_mse_accum[:actual_horizon] += mse_per_step.double()
+            rollout_count += 1
+
+            # Rollout GIFs: [GT sequence | Context + Generated sequence]
+            if rollout_gif_count < opts.max_gifs and z_rollout.shape[1] > 0:
+                n_vis = num_context + actual_horizon
+                # Ground truth frames
+                vis_gt = z_clean[:1, :n_vis]
+                # Rollout: real context + generated
+                vis_rollout = torch.cat([z_clean[:1, :num_context], z_rollout[:1]], dim=1)
+
+                frames_gt = decode_latents_to_frames(trainer.tokenizer, vis_gt)[0]
+                frames_pred = decode_latents_to_frames(trainer.tokenizer, vis_rollout)[0]
+
+                # Side-by-side: [GT | Rollout]
+                combined = torch.cat([frames_gt, frames_pred], dim=3)
+                gif_path = output_dir / f"rollout_{step_idx:03d}_gt_vs_pred.gif"
+                save_video_gif(combined, gif_path, fps=opts.gif_fps)
+                rollout_gif_paths.append(gif_path)
+                rollout_gif_count += 1
+
+            print(f"[INFO] Rollout batch {step_idx + 1}/{opts.rollout_batches} done")
+
+    # ── Rollout Reporting ──────────────────────────────────────────────
+    rollout_rows = []
+    rollout_overall_mse = 0.0
+    rollout_final_mse = 0.0
+
+    if rollout_count > 0:
+        avg_mse = rollout_mse_accum / rollout_count
+        for h in range(rollout_horizon):
+            rollout_rows.append([h + 1, float(avg_mse[h].item())])
+        rollout_overall_mse = float(avg_mse.mean().item())
+        rollout_final_mse = float(avg_mse[-1].item())
+
+        write_csv(
+            output_dir / "rollout_mse_per_step.csv",
+            ["rollout_step", "latent_mse"],
+            rollout_rows,
+        )
+
+        save_line_plot(
+            path=output_dir / "rollout_mse_curve.png",
+            title=f"Autoregressive Rollout MSE (K={K_inf}, ctx={num_context})",
+            x_values=[h + 1 for h in range(rollout_horizon)],
+            series=[("latent_mse", [r[1] for r in rollout_rows], (220, 20, 60))],
+            y_label="Latent MSE",
+        )
+
+        print(f"[INFO] Rollout MSE: overall={rollout_overall_mse:.6f}, "
+              f"final_step={rollout_final_mse:.6f}")
 
     tau_rows = []
     for i in range(opts.tau_bins):
@@ -461,6 +727,12 @@ def main(args: Optional[list[str]] = None) -> None:
         "batch_size": opts.batch_size,
         "seq_len": dynamics_cfg.seq_len,
         "gifs_written": gif_count,
+        "rollout_horizon": rollout_horizon,
+        "rollout_K_inference": K_inf,
+        "rollout_num_context": num_context,
+        "rollout_overall_mse": rollout_overall_mse,
+        "rollout_final_step_mse": rollout_final_mse,
+        "rollout_batches_processed": rollout_count,
     }
 
     if action_batches > 0 and action_delta_sum is not None:
@@ -542,10 +814,35 @@ def main(args: Optional[list[str]] = None) -> None:
             }
         )
 
+    if rollout_count > 0:
+        rollout_wandb = {
+            "eval/rollout_overall_mse": rollout_overall_mse,
+            "eval/rollout_final_step_mse": rollout_final_mse,
+            "eval/rollout_mse_per_step": wandb.Table(
+                columns=["rollout_step", "latent_mse"],
+                data=rollout_rows,
+            ),
+            "eval/rollout_mse_curve": wandb.Image(
+                str(output_dir / "rollout_mse_curve.png")
+            ),
+        }
+        wandb.log(rollout_wandb)
+        for idx, gif_path in enumerate(rollout_gif_paths):
+            wandb.log(
+                {
+                    f"eval/autoregressive_gif_{idx}": wandb.Video(
+                        str(gif_path),
+                        caption=f"Rollout {idx}: [GT | Context+Generated] (K={K_inf})",
+                        fps=opts.gif_fps,
+                        format="gif",
+                    )
+                }
+            )
+
     for idx, gif_path in enumerate(gif_paths):
         wandb.log(
             {
-                f"eval/rollout_gif_{idx}": wandb.Video(
+                f"eval/denoise_gif_{idx}": wandb.Video(
                     str(gif_path),
                     caption=f"Step {idx}: [GT | CleanDecode | PredDecode]",
                     fps=opts.gif_fps,
@@ -556,7 +853,10 @@ def main(args: Optional[list[str]] = None) -> None:
     wandb.finish()
 
     print("[DONE] Evaluation complete")
-    print(f"  overall_latent_mse: {overall_mse:.6f}")
+    print(f"  single-step latent_mse: {overall_mse:.6f}")
+    if rollout_count > 0:
+        print(f"  rollout latent_mse:     {rollout_overall_mse:.6f} (avg), "
+              f"{rollout_final_mse:.6f} (final step)")
     print(f"  outputs: {output_dir}")
 
 
