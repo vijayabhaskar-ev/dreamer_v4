@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import pickle
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import math
 
 import torch
@@ -11,13 +11,67 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
 from .config import DynamicsConfig
-from .dynamic_model import DynamicsModel
+from .dynamic_model import DynamicsModel, DynamicsOutput
 from .flow_matching import add_noise, sample_tau_and_d
+from heads import RewardHead, ContinueHead, PolicyHead
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
 from tokenizer.metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
 from device_utils import get_device, get_device_type, make_grad_scaler, save_checkpoint as save_ckpt, is_master
 import wandb
+
+
+# ── MTP target preparation ──────────────────────────────────────────────
+
+#TODO need to mask the padded values in the rewards and dones in the loss calculation for future minecraft and other envs
+def build_mtp_targets(
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    mtp_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build future target tensors for multi-token prediction (MTP).
+
+    For each timestep t, gathers targets at offsets 0..L so the heads
+    can predict rewards/dones L steps into the future.
+
+    Args:
+        rewards: (B, T) per-timestep rewards
+        dones:   (B, T) per-timestep done flags
+        mtp_length: L (predict offsets 0..L → L+1 targets per position)
+
+    Returns:
+        rewards_future: (B, T, L+1) — rewards[b, t, n] = reward at t+n
+        dones_future:   (B, T, L+1) — dones[b, t, n] = done at t+n
+    """
+    num_offsets = mtp_length + 1
+    # Pad: rewards with 0 (no reward beyond sequence), dones with 1.0 (terminal)
+    rewards_padded = F.pad(rewards, (0, mtp_length), value=0.0)
+    dones_padded = F.pad(dones, (0, mtp_length), value=1.0)
+    # unfold: fixed output shape for fixed (B, T, L) — no XLA recompilation
+    rewards_future = rewards_padded.unfold(1, num_offsets, 1)  # (B, T, L+1)
+    dones_future = dones_padded.unfold(1, num_offsets, 1)      # (B, T, L+1)
+    return rewards_future, dones_future
+
+
+def build_mtp_action_targets(
+    actions: torch.Tensor,
+    mtp_length: int,
+) -> torch.Tensor:
+    """Build future action targets for multi-token prediction (MTP).
+
+    Args:
+        actions: (B, T-1, action_dim) per-timestep actions
+        mtp_length: L (predict offsets 0..L → L+1 targets per position)
+
+    Returns:
+        actions_future: (B, T-1, L+1, action_dim)
+    """
+    num_offsets = mtp_length + 1
+    B, T_minus_1, A = actions.shape
+    # Pad time dim with zeros (no action beyond sequence)
+    actions_padded = F.pad(actions, (0, 0, 0, mtp_length), value=0.0)  # (B, T-1+L, A)
+    # unfold on time dim → (B, T-1, L+1, A)
+    return actions_padded.unfold(1, num_offsets, 1).transpose(-1, -2)
 
 
 @dataclass
@@ -30,8 +84,8 @@ class DynamicsTrainingConfig:
     epochs: int = 10
     batch_size: int = 32
     lr: float = 1e-4
-    warmup_steps: int = 500       
-    min_lr: float = 1e-6  
+    warmup_steps: int = 500
+    min_lr: float = 1e-6
     weight_decay: float = 0.01
     weight_decay_heavy: float = 0.1   # attention + FF layers (drifted in charts)
     grad_clip: float = 5.0
@@ -39,8 +93,8 @@ class DynamicsTrainingConfig:
     checkpoint_interval: int = 1
     device: str = "cuda"
     # Curriculum: bootstrap ramp-up
-    curriculum_warmup_steps: int = 2000   
-    curriculum_ramp_steps: int = 4000    
+    curriculum_warmup_steps: int = 2000
+    curriculum_ramp_steps: int = 4000
     # Alternating batch lengths
     long_batch_ratio: float = 0.15  # fraction of training steps using T₂ (long sequences)
     # Logging
@@ -50,11 +104,20 @@ class DynamicsTrainingConfig:
     log_model_stats: bool = True
     log_model_stats_interval: int = 50
     log_memory: bool = True
+    # Phase 2: agent finetuning
+    train_heads: bool = False           # False for Phase 1, True for Phase 2
+    head_lr_multiplier: float = 3.0     # New heads + agent embedding get higher LR
+    dynamics_lr_multiplier: float = 0.3 # Pretrained dynamics gets lower LR during finetuning
 
 
 class DynamicsTrainer:
     """
     Training loop for the dynamics model using flow matching.
+
+    Supports two training phases:
+      Phase 1 (train_heads=False): World model pretraining — only dynamics loss.
+      Phase 2 (train_heads=True):  Agent finetuning — dynamics loss + reward/continue
+                                   heads reading from agent token transformer output.
     """
 
     def __init__(
@@ -81,28 +144,36 @@ class DynamicsTrainer:
 
         self.model = DynamicsModel(dynamics_cfg, self.tokenizer).to(self.device)
 
-        # Per-group weight decay: attention+FF get heavy decay (these grew
-        # unboundedly in prior runs), norms/biases get zero, rest gets default.
-        heavy_decay_params = []
-        no_decay_params = []
-        default_decay_params = []
+        # ── Prediction heads ────────────────────────────────────────
+        # Phase 1: heads exist but are NOT in the optimizer (no gradients).
+        # Phase 2: heads read from agent token output (embed_dim=512).
+        head_input_dim = dynamics_cfg.embed_dim
+        self.reward_head = RewardHead(
+            latent_dim=head_input_dim,
+            hidden_dim=dynamics_cfg.head_hidden_dim,
+            num_bins=dynamics_cfg.num_reward_bins,
+            num_layers=dynamics_cfg.head_num_layers,
+            mtp_length=dynamics_cfg.mtp_length,
+        ).to(self.device)
+        self.continue_head = ContinueHead(
+            latent_dim=head_input_dim,
+            hidden_dim=dynamics_cfg.head_hidden_dim,
+            num_layers=dynamics_cfg.head_num_layers,
+            mtp_length=dynamics_cfg.mtp_length,
+        ).to(self.device)
+        self.policy_head = PolicyHead(
+            latent_dim=head_input_dim,
+            action_dim=dynamics_cfg.action_dim,
+            hidden_dim=dynamics_cfg.head_hidden_dim,
+            num_layers=dynamics_cfg.head_num_layers,
+            mtp_length=dynamics_cfg.mtp_length,
+        ).to(self.device)
+        self.rms_reward = RMSNormalizer(decay=0.99)
+        self.rms_continue = RMSNormalizer(decay=0.99)
+        self.rms_bc = RMSNormalizer(decay=0.99)
 
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            name_lower = name.lower()
-            if param.dim() <= 1 or 'norm' in name_lower:
-                no_decay_params.append(param)
-            elif any(p in name_lower for p in ['spatial_attn', 'temporal_attn', '.ff.']):
-                heavy_decay_params.append(param)
-            else:
-                default_decay_params.append(param)
-
-        self.optimizer = torch.optim.AdamW([
-            {"params": heavy_decay_params, "weight_decay": training_cfg.weight_decay_heavy},
-            {"params": no_decay_params, "weight_decay": 0.0},
-            {"params": default_decay_params, "weight_decay": training_cfg.weight_decay},
-        ], lr=training_cfg.lr)
+        # ── Optimizer ───────────────────────────────────────────────
+        self._build_optimizer()
 
         self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
         self.global_step = 0
@@ -114,7 +185,112 @@ class DynamicsTrainer:
         self._zero = torch.tensor(0.0, device=self.device)
         self._ramp_tensor = torch.tensor(0.0, device=self.device)
 
+    # ── Optimizer construction ──────────────────────────────────────────
 
+    def _build_optimizer(self) -> None:
+        """Build AdamW optimizer with per-group weight decay.
+
+        Phase 1 (train_heads=False): only dynamics model params.
+        Phase 2 (train_heads=True):  dynamics (lower LR) + heads + agent embedding (higher LR).
+        """
+        cfg = self.training_cfg
+        heavy_decay_params = []
+        no_decay_params = []
+        default_decay_params = []
+
+        # Dynamics model params (skip agent_embedding — added to head group in Phase 2)
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith('agent_embedding.'):
+                continue
+            name_lower = name.lower()
+            if param.dim() <= 1 or 'norm' in name_lower:
+                no_decay_params.append(param)
+            elif any(p in name_lower for p in ['spatial_attn', 'temporal_attn', '.ff.']):
+                heavy_decay_params.append(param)
+            else:
+                default_decay_params.append(param)
+
+        param_groups = [
+            {"params": heavy_decay_params, "weight_decay": cfg.weight_decay_heavy},
+            {"params": no_decay_params, "weight_decay": 0.0},
+            {"params": default_decay_params, "weight_decay": cfg.weight_decay},
+        ]
+
+        if cfg.train_heads:
+            # Phase 2: add heads with separate LR group
+            head_no_decay = []
+            head_decay = []
+            for head in (self.reward_head, self.continue_head, self.policy_head):
+                for name, param in head.named_parameters():
+                    if not param.requires_grad:
+                        continue
+                    if param.dim() <= 1 or 'norm' in name.lower():
+                        head_no_decay.append(param)
+                    else:
+                        head_decay.append(param)
+
+            # Agent embedding params (if enabled)
+            if self.model.agent_embedding is not None:
+                for param in self.model.agent_embedding.parameters():
+                    if param.requires_grad:
+                        head_decay.append(param)
+
+            param_groups.extend([
+                {"params": head_decay, "weight_decay": cfg.weight_decay, "lr_multiplier": "head"},
+                {"params": head_no_decay, "weight_decay": 0.0, "lr_multiplier": "head"},
+            ])
+
+        self.optimizer = torch.optim.AdamW(param_groups, lr=cfg.lr)
+
+    # ── Phase 2 setup ───────────────────────────────────────────────────
+
+    def setup_phase2(self, dynamics_ckpt: str, num_tasks: int = 1) -> None:
+        """Transition from Phase 1 to Phase 2.
+
+        1. Load Phase 1 dynamics checkpoint (model weights only).
+        2. Enable agent tokens in the dynamics model.
+        3. Rebuild optimizer with Phase 2 param groups.
+
+        Args:
+            dynamics_ckpt: Path to Phase 1 checkpoint.
+            num_tasks: Number of tasks for agent token embedding.
+        """
+        # Load dynamics model weights (strict — all Phase 1 params must match)
+        try:
+            state = torch.load(dynamics_ckpt, map_location='cpu', weights_only=True)
+        except pickle.UnpicklingError:
+            state = torch.load(dynamics_ckpt, map_location='cpu', weights_only=False)
+
+        self.model.load_state_dict(state["model"], strict=True)
+
+        # Optionally restore flow/bootstrap RMS normalizers for continuity
+        if "rms_normalizers" in state:
+            rms_state = state["rms_normalizers"]
+            if "flow" in rms_state:
+                self.rms_flow.load_state_dict(rms_state["flow"])
+            if "bootstrap" in rms_state:
+                self.rms_bootstrap.load_state_dict(rms_state["bootstrap"])
+
+        if "global_step" in state:
+            self.global_step = state["global_step"]
+        if "scheduler_bucket" in state:
+            self._last_lr_bucket = state["scheduler_bucket"]
+
+        # Enable agent tokens — adds new parameters
+        self.model.enable_agent_tokens(num_tasks=num_tasks)
+        self.model.agent_embedding.to(self.device)
+
+        # Rebuild optimizer with Phase 2 groups (heads + agent embedding included)
+        self._build_optimizer()
+
+        if is_master():
+            print(f"Phase 2 setup complete. Loaded dynamics from {dynamics_ckpt}")
+            print(f"  Agent tokens enabled (num_tasks={num_tasks})")
+            print(f"  Global step: {self.global_step}")
+
+    # ── LR scheduling ───────────────────────────────────────────────────
 
     def _build_scheduler(self, total_steps: int) -> None:
         """Store schedule params. LR is set via _set_lr_from_schedule() each step.
@@ -138,6 +314,9 @@ class DynamicsTrainer:
         cache entry). With 4 code path variants (full/single × boot/no-boot),
         each LR bucket costs ~4 compilations. We use only 10 buckets → max
         ~40 compiled graphs total, keeping XLA cache under ~2-4GB.
+
+        Phase 2: dynamics groups get lr * dynamics_lr_multiplier,
+                 head groups get lr * head_lr_multiplier.
         """
         step = self.global_step
         warmup = self._schedule_warmup
@@ -159,10 +338,16 @@ class DynamicsTrainer:
         self._last_lr_bucket = bucket
 
         lr = base_lr * (bucket / 10.0)
+        cfg = self.training_cfg
         for group in self.optimizer.param_groups:
-            group['lr'] = lr
+            if cfg.train_heads and group.get("lr_multiplier") == "head":
+                group['lr'] = lr * cfg.head_lr_multiplier
+            elif cfg.train_heads:
+                group['lr'] = lr * cfg.dynamics_lr_multiplier
+            else:
+                group['lr'] = lr
 
-
+    # ── Training loop ───────────────────────────────────────────────────
 
     def fit(
         self,
@@ -194,12 +379,16 @@ class DynamicsTrainer:
                     "epoch/train_loss": train_metrics["loss/dynamics_total"],
                     "epoch/train_flow": train_metrics["loss/dynamics_flow"],
                     "epoch/train_bootstrap": train_metrics["loss/dynamics_bootstrap"],
+                    "epoch/train_reward": train_metrics["loss/dynamics_reward"],
+                    "epoch/train_continue": train_metrics["loss/dynamics_continue"],
                     "global_step": self.global_step,
                 }
                 if val_metrics is not None:
                     epoch_log["epoch/val_loss"] = val_metrics["loss/dynamics_total"]
                     epoch_log["epoch/val_flow"] = val_metrics["loss/dynamics_flow"]
                     epoch_log["epoch/val_bootstrap"] = val_metrics["loss/dynamics_bootstrap"]
+                    epoch_log["epoch/val_reward"] = val_metrics["loss/dynamics_reward"]
+                    epoch_log["epoch/val_continue"] = val_metrics["loss/dynamics_continue"]
                 wandb.log(epoch_log, step=self.global_step)
 
                 print(
@@ -217,20 +406,29 @@ class DynamicsTrainer:
                 ckpt_path = f"{checkpoint_dir}/dynamics_epoch_{epoch:03d}.pt"
                 self.save_checkpoint(ckpt_path, epoch)
 
+    # ── Checkpointing ───────────────────────────────────────────────────
 
     def save_checkpoint(self, path: str, epoch: int) -> None:
         state = {
                 "epoch": epoch,
-                "global_step": self.global_step,                          
-                "dynamic_cfg": self.dynamics_cfg,
+                "global_step": self.global_step,
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler_bucket": self._last_lr_bucket,
+                "train_heads": self.training_cfg.train_heads,
                 "rms_normalizers": {
                     "flow": self.rms_flow.state_dict(),
                     "bootstrap": self.rms_bootstrap.state_dict(),
+                    "reward": self.rms_reward.state_dict(),
+                    "continue": self.rms_continue.state_dict(),
+                    "bc": self.rms_bc.state_dict(),
                 },
             }
+        # Only save head state when heads are being trained
+        if self.training_cfg.train_heads:
+            state["reward_head"] = self.reward_head.state_dict()
+            state["continue_head"] = self.continue_head.state_dict()
+            state["policy_head"] = self.policy_head.state_dict()
         save_ckpt(state, path, self.device)
         if is_master():
             print(f"Saved dynamics checkpoint to {path}")
@@ -241,6 +439,12 @@ class DynamicsTrainer:
         except pickle.UnpicklingError:
             state = torch.load(path, map_location='cpu', weights_only=False)
         self.model.load_state_dict(state["model"], strict=strict)
+        if "reward_head" in state:
+            self.reward_head.load_state_dict(state["reward_head"], strict=strict)
+        if "continue_head" in state:
+            self.continue_head.load_state_dict(state["continue_head"], strict=strict)
+        if "policy_head" in state:
+            self.policy_head.load_state_dict(state["policy_head"], strict=strict)
         if "optimizer" in state:
             try:
                 self.optimizer.load_state_dict(state["optimizer"])
@@ -254,12 +458,20 @@ class DynamicsTrainer:
                 self.rms_flow.load_state_dict(rms_state["flow"])
             if "bootstrap" in rms_state:
                 self.rms_bootstrap.load_state_dict(rms_state["bootstrap"])
+            if "reward" in rms_state:
+                self.rms_reward.load_state_dict(rms_state["reward"])
+            if "continue" in rms_state:
+                self.rms_continue.load_state_dict(rms_state["continue"])
+            if "bc" in rms_state:
+                self.rms_bc.load_state_dict(rms_state["bc"])
         if "global_step" in state:
             self.global_step = state["global_step"]
         if "scheduler_bucket" in state:
             self._last_lr_bucket = state["scheduler_bucket"]
 
         return state.get("epoch", 0) + 1
+
+    # ── Epoch runner ────────────────────────────────────────────────────
 
     def _run_epoch(
         self,
@@ -270,24 +482,36 @@ class DynamicsTrainer:
     ) -> Dict[str, float]:
 
         self.model.train(training)
+        if self.training_cfg.train_heads:
+            self.reward_head.train(training)
+            self.continue_head.train(training)
+            self.policy_head.train(training)
+
         total_loss = torch.tensor(0.0, device=self.device)
         total_flow = torch.tensor(0.0, device=self.device)
         total_bootstrap = torch.tensor(0.0, device=self.device)
+        total_reward = torch.tensor(0.0, device=self.device)
+        total_continue = torch.tensor(0.0, device=self.device)
+        total_bc = torch.tensor(0.0, device=self.device)
         total_steps = 0
 
         log_interval = self.training_cfg.log_interval
         model_stats_interval = self.training_cfg.log_model_stats_interval
+        use_agent = self.training_cfg.train_heads and self.model.agent_embedding is not None
 
         # On-device accumulators for smoothed logging (reset every log_interval)
         _log_loss = torch.tensor(0.0, device=self.device)
         _log_flow = torch.tensor(0.0, device=self.device)
         _log_bootstrap = torch.tensor(0.0, device=self.device)
+        _log_reward = torch.tensor(0.0, device=self.device)
+        _log_continue = torch.tensor(0.0, device=self.device)
+        _log_bc = torch.tensor(0.0, device=self.device)
         _log_grad_norm = torch.tensor(0.0, device=self.device)
         _log_tau = torch.tensor(0.0, device=self.device)
         _log_d = torch.tensor(0.0, device=self.device)
         _log_count = 0
 
-        # Curriculum boundaries (Python ints — no XLA sync)
+        # Curriculum boundaries (Python ints — no XLA sync)   
         warmup_end = self.training_cfg.curriculum_warmup_steps
         ramp_end = self.training_cfg.curriculum_ramp_steps
 
@@ -310,9 +534,11 @@ class DynamicsTrainer:
             else:
                 batch = batch_short
 
-            frames, actions = batch
+            frames, actions, rewards, dones = batch
             frames = frames.to(self.device)
             actions = actions.to(self.device)
+            rewards = rewards.to(self.device)
+            dones = dones.to(self.device)
 
             if frames.dim() == 4:
                 frames = frames.unsqueeze(1)
@@ -325,7 +551,7 @@ class DynamicsTrainer:
 
             z_clean = self.model.encode_frames(frames)
             tau, d = sample_tau_and_d(B, T, K_max=self.dynamics_cfg.K_max, device=self.device)
-            
+
             # Context frame: First frame always gets near-clean noise level
             tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
 
@@ -342,10 +568,24 @@ class DynamicsTrainer:
             z_noised, _ = add_noise(z_clean, tau)
             tau_for_log, d_for_log = tau, d
 
+            # Build MTP targets if needed
+            rewards_future, dones_future, actions_future = None, None, None
+            if use_agent and self.dynamics_cfg.mtp_length > 0:
+                rewards_future, dones_future = build_mtp_targets(
+                    rewards, dones, self.dynamics_cfg.mtp_length,
+                )
+                actions_future = build_mtp_action_targets(
+                    actions, self.dynamics_cfg.mtp_length,
+                )
+
             with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
                 loss, metrics = self._compute_loss(
                     z_clean, z_noised, actions, tau, d,
                     training=training, compute_bootstrap=need_bootstrap,
+                    rewards=rewards, dones=dones,
+                    use_agent_tokens=use_agent,
+                    rewards_future=rewards_future, dones_future=dones_future,
+                    actions_future=actions_future,
                 )
 
             if training:
@@ -353,8 +593,13 @@ class DynamicsTrainer:
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
 
+                all_params = list(self.model.parameters())
+                if self.training_cfg.train_heads:
+                    all_params += list(self.reward_head.parameters()) + \
+                        list(self.continue_head.parameters()) + \
+                        list(self.policy_head.parameters())
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
+                    all_params,
                     self.training_cfg.grad_clip,
                 )
 
@@ -371,6 +616,9 @@ class DynamicsTrainer:
                 _log_loss += loss.detach()
                 _log_flow += metrics["loss_flow"]
                 _log_bootstrap += metrics["loss_bootstrap"]
+                _log_reward += metrics["loss_reward"]
+                _log_continue += metrics["loss_continue"]
+                _log_bc += metrics["loss_bc"]
                 _log_grad_norm += grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm
                 _log_tau += tau_for_log.mean().detach()
                 _log_d += d_for_log.mean().detach()
@@ -384,6 +632,9 @@ class DynamicsTrainer:
                             "train/loss": (_log_loss / n).item(),
                             "train/flow": (_log_flow / n).item(),
                             "train/bootstrap": (_log_bootstrap / n).item(),
+                            "train/reward": (_log_reward / n).item(),
+                            "train/continue": (_log_continue / n).item(),
+                            "train/bc": (_log_bc / n).item(),
                             "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
                             "train/tau_mean": (_log_tau / n).item(),
                             "train/d_mean": (_log_d / n).item(),
@@ -414,6 +665,9 @@ class DynamicsTrainer:
                     _log_loss.zero_()
                     _log_flow.zero_()
                     _log_bootstrap.zero_()
+                    _log_reward.zero_()
+                    _log_continue.zero_()
+                    _log_bc.zero_()
                     _log_grad_norm.zero_()
                     _log_tau.zero_()
                     _log_d.zero_()
@@ -422,15 +676,23 @@ class DynamicsTrainer:
             total_loss += loss.detach()
             total_flow += metrics["loss_flow"]
             total_bootstrap += metrics["loss_bootstrap"]
+            total_reward += metrics["loss_reward"]
+            total_continue += metrics["loss_continue"]
+            total_bc += metrics["loss_bc"]
             total_steps += 1
 
         # Single .item() at epoch end — one sync instead of N
+        n = max(total_steps, 1)
         return {
-            "loss/dynamics_total": (total_loss / max(total_steps, 1)).item(),
-            "loss/dynamics_flow": (total_flow / max(total_steps, 1)).item(),
-            "loss/dynamics_bootstrap": (total_bootstrap / max(total_steps, 1)).item(),
+            "loss/dynamics_total": (total_loss / n).item(),
+            "loss/dynamics_flow": (total_flow / n).item(),
+            "loss/dynamics_bootstrap": (total_bootstrap / n).item(),
+            "loss/dynamics_reward": (total_reward / n).item(),
+            "loss/dynamics_continue": (total_continue / n).item(),
+            "loss/dynamics_bc": (total_bc / n).item(),
         }
 
+    # ── Loss computation ────────────────────────────────────────────────
 
     def _compute_wd_metrics(self) -> Dict[str, float]:
         """Per-group effective weight decay: wd * sum(||p||^2).
@@ -439,6 +701,8 @@ class DynamicsTrainer:
         Only called at model_stats_interval so .item() syncs are acceptable.
         """
         names = ["attn_ff", "no_decay", "default"]
+        if self.training_cfg.train_heads:
+            names.extend(["head_decay", "head_no_decay"])
         metrics = {}
         for name, group in zip(names, self.optimizer.param_groups):
             wd = group["weight_decay"]
@@ -449,8 +713,12 @@ class DynamicsTrainer:
         return metrics
 
     def _compute_loss(self, z_clean, z_noised, actions, tau, d, training=True,
-                      compute_bootstrap=True):
-        """Compute flow matching + bootstrap loss.
+                      compute_bootstrap=True,
+                      rewards=None, dones=None,
+                      use_agent_tokens=False,
+                      rewards_future=None, dones_future=None,
+                      actions_future=None):
+        """Compute flow matching + bootstrap + prediction head losses.
 
         Uses masked arithmetic instead of boolean indexing so all tensors
         keep fixed (B, T, ...) shapes — critical for XLA/TPU which
@@ -464,13 +732,22 @@ class DynamicsTrainer:
             tau:      (B, T)  — per-frame signal levels
             d:        (B, T)  — per-frame step sizes
             compute_bootstrap: Python-level gate to skip bootstrap forward passes
+            rewards:  (B, T) or None — real-valued reward targets
+            dones:    (B, T) or None — terminal flags (1.0 = done)
+            use_agent_tokens: whether to use agent tokens (Phase 2)
+            rewards_future: (B, T, L+1) or None — MTP reward targets
+            dones_future:   (B, T, L+1) or None — MTP done targets
+            actions_future: (B, T-1, L+1, action_dim) or None — MTP action targets
 
         Returns:
             loss, metrics_dict
         """
         d_min = 1 / self.dynamics_cfg.K_max
 
-        z_hat = self.model(z_noised, actions, tau, d)  # (B, T, S_z, D)
+        output: DynamicsOutput = self.model(z_noised, actions, tau, d,
+                                            use_agent_tokens=use_agent_tokens)
+        z_hat = output.z_hat      # (B, T, S_z, D)
+        agent_out = output.agent_out  # (B, T, D_embed) or None
 
         # Float masks — no boolean indexing, no dynamic shapes
         flow_mask = (d == d_min).float()   # (B, T)  1.0 for flow, 0.0 for bootstrap
@@ -490,12 +767,16 @@ class DynamicsTrainer:
             v_pred = (z_hat - z_noised) / (1 - tau_4d).clamp(min=1e-4)
 
             with torch.no_grad():
-                z_hat_half1 = self.model(z_noised, actions, tau, d / 2)
+                out_half1 = self.model(z_noised, actions, tau, d / 2,
+                                       use_agent_tokens=use_agent_tokens)
+                z_hat_half1 = out_half1.z_hat
                 v1 = (z_hat_half1 - z_noised) / (1 - tau_4d).clamp(min=1e-4)
 
                 z_mid = z_noised + v1 * (d_4d / 2)
 
-                z_hat_half2 = self.model(z_mid, actions, tau + d / 2, d / 2)
+                out_half2 = self.model(z_mid, actions, tau + d / 2, d / 2,
+                                       use_agent_tokens=use_agent_tokens)
+                z_hat_half2 = out_half2.z_hat
                 v2 = (z_hat_half2 - z_mid) / (1 - (tau_4d + d_4d / 2)).clamp(min=1e-4)
 
                 v_target = (v1 + v2) / 2
@@ -515,10 +796,50 @@ class DynamicsTrainer:
 
         loss_total = loss_flow_normed + loss_bootstrap_normed
 
+        # ── Prediction head losses ──────────────────────────────────
+        loss_reward = self._zero
+        loss_continue = self._zero
+        loss_bc = self._zero
+
+        if self.training_cfg.train_heads and agent_out is not None:
+            # Phase 2: heads read from agent token transformer output
+            h = agent_out.detach()  # (B, T, D_embed)
+
+            if rewards is not None:
+                if self.dynamics_cfg.mtp_length > 0 and rewards_future is not None:
+                    loss_reward = self.reward_head.loss_mtp(h, rewards_future)
+                else:
+                    loss_reward = self.reward_head.loss(h, rewards)
+                loss_reward_normed = self.rms_reward.normalize(loss_reward, update=training)
+                loss_total = loss_total + self.dynamics_cfg.reward_loss_scale * loss_reward_normed #TODO Need to adjust the reward loss scale based on training result
+
+            if dones is not None:
+                if self.dynamics_cfg.mtp_length > 0 and dones_future is not None:
+                    loss_continue = self.continue_head.loss_mtp(h, dones_future)
+                else:
+                    loss_continue = self.continue_head.loss(h, dones)
+                loss_continue_normed = self.rms_continue.normalize(loss_continue, update=training)
+                loss_total = loss_total + self.dynamics_cfg.continue_loss_scale * loss_continue_normed
+
+            # ── Behavior cloning loss ─────────────────────────────
+            # actions: (B, T-1, action_dim), agent_out: (B, T, D)
+            # Agent at position t predicts the action taken after frame t
+            if actions is not None:
+                h_for_actions = h[:, :-1]  # (B, T-1, D_embed)
+                if self.dynamics_cfg.mtp_length > 0 and actions_future is not None:
+                    loss_bc = self.policy_head.loss_mtp(h_for_actions, actions_future)
+                else:
+                    loss_bc = self.policy_head.loss(h_for_actions, actions)
+                loss_bc_normed = self.rms_bc.normalize(loss_bc, update=training)
+                loss_total = loss_total + self.dynamics_cfg.bc_loss_scale * loss_bc_normed
+
         # Return detached tensors — .item() called only at log intervals
         metrics = {
             "loss_flow": loss_flow.detach(),
             "loss_bootstrap": loss_bootstrap.detach(),
+            "loss_reward": loss_reward.detach() if isinstance(loss_reward, torch.Tensor) else loss_reward,
+            "loss_continue": loss_continue.detach() if isinstance(loss_continue, torch.Tensor) else loss_continue,
+            "loss_bc": loss_bc.detach() if isinstance(loss_bc, torch.Tensor) else loss_bc,
             "n_flow": n_flow.detach(),
             "n_bootstrap": n_boot.detach(),
         }
@@ -526,7 +847,7 @@ class DynamicsTrainer:
         return loss_total, metrics
 
 
-
+    # ── Tokenizer loading ───────────────────────────────────────────────
 
     def _load_tokenizer_checkpoint(self, ckpt_path) -> None:
         if ckpt_path is None:
@@ -542,8 +863,12 @@ class DynamicsTrainer:
         if "model" in state:
             state = state["model"]
         missing, unexpected = self.tokenizer.load_state_dict(state, strict=False)
-        if missing:
-            raise RuntimeError(f"Tokenizer checkpoint missing parameters: {missing}")
+        # QKNorm params (qk_norm.q_norm.weight, qk_norm.k_norm.weight) are
+        # nn.RMSNorm weights that default-initialize to ones — safe to skip
+        # when loading checkpoints trained before QKNorm was added.
+        missing_real = [k for k in missing if "qk_norm" not in k]   #TODO Remove it after training new tokenizer
+        if missing_real:
+            raise RuntimeError(f"Tokenizer checkpoint missing parameters: {missing_real}")
         if unexpected:
             raise RuntimeError(f"Tokenizer checkpoint has unexpected parameters: {unexpected}")
 
@@ -572,7 +897,7 @@ class RMSNormalizer:
 
         rms = torch.sqrt(self.rms_sq + self.epsilon)
         return loss / rms
-    
+
 
     def state_dict(self):
         return {"rms_sq": self.rms_sq}

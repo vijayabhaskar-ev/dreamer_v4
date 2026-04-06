@@ -42,14 +42,17 @@ class DynamicsTransformerBlock(nn.Module):
         
         self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
         
-    def forward(self, x, num_frames, temporal_mask: Optional[AttentionMask] = None):
+    def forward(self, x, num_frames, temporal_mask: Optional[AttentionMask] = None,
+                spatial_mask: Optional[torch.Tensor] = None):
         """
         Args:
             x: (B, T * tokens_per_frame, D)
             num_frames: T
             temporal_mask: Causal mask for temporal attention
+            spatial_mask: Optional (N, N) float mask for asymmetric spatial attention
+                          (e.g. agent tokens invisible to other tokens)
         """
-        x = x + self.drop_path(self.spatial_attn(self.norm_spatial(x), num_frames)) # shape  (B, T*tokens_per_frame, D)
+        x = x + self.drop_path(self.spatial_attn(self.norm_spatial(x), num_frames, attn_mask=spatial_mask))
         
         if self.use_temporal:
             x = x + self.drop_path(

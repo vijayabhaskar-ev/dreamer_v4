@@ -59,10 +59,14 @@ class DMControlDataset(VideoDataset):
         
         for _ in range(self.steps_per_epoch): #TODO Need to refactor this after debugging the initial training pipleline.
             batch_videos = []
-            batch_actions= []
+            batch_actions = []
+            batch_rewards = []
+            batch_dones = []
             for _ in range(self.batch_size):
                 video = []
                 actions = []
+                raw_rewards = []
+                raw_dones = []
                 time_step = env.reset()
 
                 # Sinusoidal policy: coordinated rhythmic joint movements
@@ -71,11 +75,11 @@ class DMControlDataset(VideoDataset):
                 freq = np.random.uniform(0.5, 3.0)          # oscillation speed
                 amplitude = np.random.uniform(0.3, 1.0)     # movement magnitude
                 phase_offsets = np.array([i * np.pi / action_dim for i in range(action_dim)])
-                
+
                 for frame_idx in range(self.seq_len):
                     pixels = env.physics.render(
-                        height=self.img_size[0], 
-                        width=self.img_size[1], 
+                        height=self.img_size[0],
+                        width=self.img_size[1],
                         camera_id=self.camera_id
                     )
 
@@ -95,24 +99,37 @@ class DMControlDataset(VideoDataset):
                     )
 
                     actions.append(torch.from_numpy(action.copy()).float())
+
+                    step_reward = 0.0
+                    step_done = False
                     for _ in range(self.action_repeat):
                         time_step = env.step(action)
+                        step_reward += time_step.reward
                         if time_step.last():
+                            step_done = True
                             break
-                    
+
+                    raw_rewards.append(step_reward)
+                    raw_dones.append(float(step_done))
+
                     if time_step.last():
-                         # If episode ends early, we could pad or just restart. 
-                         # For simplicity, let's just reset and continue filling this sequence
-                         # Note: This creates a cut in the video, but for tokenizer training it's acceptable
+                         # If episode ends early, just reset and continue filling this sequence.
+                         # This creates a cut in the video, but for training it's acceptable.
                          time_step = env.reset()
 
                 video_tensor = torch.stack(video)
                 action_tensor = torch.stack(actions[:-1])
+                reward_tensor = torch.tensor(raw_rewards, dtype=torch.float32)
+                done_tensor = torch.tensor(raw_dones, dtype=torch.float32)
                 batch_videos.append(video_tensor)
                 batch_actions.append(action_tensor)
-            
-            yield (torch.stack(batch_videos), # (B, T, C, H, W)
-                  torch.stack(batch_actions)) # (B, T-1, action_dim)
+                batch_rewards.append(reward_tensor)
+                batch_dones.append(done_tensor)
+
+            yield (torch.stack(batch_videos),   # (B, T, C, H, W)
+                   torch.stack(batch_actions),  # (B, T-1, action_dim)
+                   torch.stack(batch_rewards),  # (B, T)
+                   torch.stack(batch_dones))    # (B, T)
 
 class OfflineDataset(VideoDataset):
     """Load pre-generated episodes from a .npz file.
@@ -120,10 +137,13 @@ class OfflineDataset(VideoDataset):
     Expected keys in the .npz:
         frames:  (N, T_total, H, W, 3)  uint8 0-255
         actions: (N, T_total, action_dim) float32
+        rewards: (N, T_total)            float32  (optional, defaults to zeros)
+        dones:   (N, T_total)            float32  (optional, defaults to zeros)
 
     Each iteration randomly picks an episode and a contiguous window
-    of length ``seq_len``, returning (B, seq_len, C, H, W) frames
-    and (B, seq_len-1, action_dim) actions.
+    of length ``seq_len``, returning (B, seq_len, C, H, W) frames,
+    (B, seq_len-1, action_dim) actions, (B, seq_len) rewards,
+    and (B, seq_len) dones.
     """
 
     def __init__(
@@ -136,11 +156,15 @@ class OfflineDataset(VideoDataset):
         data = np.load(path)
         self.frames = data["frames"]    # (N, T, H, W, 3)
         self.actions = data["actions"]  # (N, T, action_dim)
+        T_total = self.frames.shape[1]
+        N = self.frames.shape[0]
+        self.rewards = data["rewards"] if "rewards" in data else np.zeros((N, T_total), dtype=np.float32)
+        self.dones = data["dones"] if "dones" in data else np.zeros((N, T_total), dtype=np.float32)
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.steps_per_epoch = steps_per_epoch
-        self.num_episodes = self.frames.shape[0]
-        self.episode_len = self.frames.shape[1]
+        self.num_episodes = N
+        self.episode_len = T_total
 
     def __iter__(self) -> Iterator[torch.Tensor]:
         # Offset seed per TPU device so each chip gets different data
@@ -153,19 +177,29 @@ class OfflineDataset(VideoDataset):
 
             batch_frames = []
             batch_actions = []
+            batch_rewards = []
+            batch_dones = []
             for idx, start in zip(idxs, starts):
                 end = start + self.seq_len
                 f = self.frames[idx, start:end]           # (seq_len, H, W, 3)
                 a = self.actions[idx, start:end - 1]      # (seq_len-1, action_dim)
+                r = self.rewards[idx, start:end]           # (seq_len,)
+                d = self.dones[idx, start:end]             # (seq_len,)
 
                 f = torch.from_numpy(f.copy()).permute(0, 3, 1, 2).float() / 255.0
                 a = torch.from_numpy(a.copy()).float()
+                r = torch.from_numpy(r.copy()).float()
+                d = torch.from_numpy(d.copy()).float()
                 batch_frames.append(f)
                 batch_actions.append(a)
+                batch_rewards.append(r)
+                batch_dones.append(d)
 
             yield (
                 torch.stack(batch_frames),   # (B, seq_len, C, H, W)
                 torch.stack(batch_actions),  # (B, seq_len-1, action_dim)
+                torch.stack(batch_rewards),  # (B, seq_len)
+                torch.stack(batch_dones),    # (B, seq_len)
             )
 
 

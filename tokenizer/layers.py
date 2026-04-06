@@ -265,13 +265,11 @@ def _attention_with_soft_cap(
     ``flex_attention`` does not support dropout natively.
     """
     # ── CUDA fast path: flex_attention with score_mod ──────────────────
-    if _USE_FLEX_ATTN and dropout_p == 0.0:
-        if attn_mask is not None:
-            score_mod = _make_soft_cap_mask_mod(attn_mask)
-        elif is_causal:
-            score_mod = _soft_cap_causal_mod
-        else:
-            score_mod = _soft_cap_mod
+    # Note: flex_attention + torch.compile cannot trace score_mod closures
+    # that capture real tensors (e.g. attn_mask), so we only use the fast
+    # path for mask-free / causal-only cases.
+    if _USE_FLEX_ATTN and dropout_p == 0.0 and attn_mask is None:
+        score_mod = _soft_cap_causal_mod if is_causal else _soft_cap_mod
         return _flex_attention(q, k, v, score_mod=score_mod)
 
     # ── XLA / dropout fallback: manual attention ──────────────────────
@@ -581,7 +579,16 @@ class SpatialAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, num_frames: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, num_frames: int,
+                attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: (B, T * tokens_per_frame, C)
+            num_frames: T
+            attn_mask: Optional (N, N) float mask for asymmetric attention
+                       (e.g. agent tokens). 0.0 = attend, -inf = block.
+                       Broadcasts over batch and head dims.
+        """
         B, L, C = x.shape
         patches_per_frame = L // num_frames   #TODO rename the variables to be generic for both tokenizer and dynamic model
 
@@ -607,8 +614,12 @@ class SpatialAttention(nn.Module):
             k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
             v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
 
+        # Expand spatial mask for broadcasting: (N, N) -> (1, 1, N, N)
+        mask_4d = attn_mask.unsqueeze(0).unsqueeze(0) if attn_mask is not None else None
+
         out = _attention_with_soft_cap(
             q, k, v,
+            attn_mask=mask_4d,
             dropout_p=self.dropout.p if self.training else 0.0,
             training=self.training,
         )

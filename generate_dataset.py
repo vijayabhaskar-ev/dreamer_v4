@@ -31,11 +31,15 @@ def main():
 
     all_frames = []
     all_actions = []
+    all_rewards = []
+    all_dones = []
 
     for i in range(args.episodes):
         env.reset()
         ep_frames = []
         ep_actions = []
+        ep_rewards = []
+        ep_dones = []
 
         # Sinusoidal policy (matches DMControlDataset for diversity)
         freq = np.random.uniform(0.5, 3.0)
@@ -55,25 +59,39 @@ def main():
             action = np.clip(action, action_spec.minimum, action_spec.maximum)
             ep_actions.append(action)
 
+            step_reward = 0.0
+            step_done = False
             for _ in range(args.action_repeat):
                 time_step = env.step(action)
+                step_reward += time_step.reward
                 if time_step.last():
+                    step_done = True
                     env.reset()
                     break
 
+            ep_rewards.append(step_reward)
+            ep_dones.append(float(step_done))
+
         all_frames.append(np.stack(ep_frames))    # (T, H, W, 3)
         all_actions.append(np.stack(ep_actions))   # (T, action_dim)
+        all_rewards.append(np.array(ep_rewards))   # (T,)
+        all_dones.append(np.array(ep_dones))       # (T,)
 
         if (i + 1) % 100 == 0:
             print(f"{i + 1}/{args.episodes} episodes done")
 
-    frames = np.stack(all_frames).astype(np.uint8)   # (N, T, H, W, 3)
-    actions = np.stack(all_actions).astype(np.float32)  # (N, T, action_dim)
+    frames = np.stack(all_frames).astype(np.uint8)      # (N, T, H, W, 3)
+    actions = np.stack(all_actions).astype(np.float32)   # (N, T, action_dim)
+    rewards = np.stack(all_rewards).astype(np.float32)   # (N, T)
+    dones = np.stack(all_dones).astype(np.float32)       # (N, T)
 
     print(f"frames:  {frames.shape}, {frames.nbytes / 1e9:.2f} GB")
     print(f"actions: {actions.shape}, {actions.nbytes / 1e6:.1f} MB")
+    print(f"rewards: {rewards.shape}, min={rewards.min():.3f}, max={rewards.max():.3f}, mean={rewards.mean():.3f}")
+    print(f"dones:   {dones.shape}, {dones.mean() * 100:.1f}% terminal")
 
-    np.savez_compressed(args.output, frames=frames, actions=actions)
+    np.savez_compressed(args.output, frames=frames, actions=actions,
+                        rewards=rewards, dones=dones)
     print(f"Saved to {args.output}")
 
 

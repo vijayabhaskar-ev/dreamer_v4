@@ -1,5 +1,36 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
+
+
+class AgentTokenEmbedding(nn.Module):
+    """ The agent token is inserted into the dynamics transformer as a new
+    modality.  It attends to all other tokens but is invisible to them
+    (asymmetric spatial mask), preventing causal confusion.
+
+    Single-task: one learned parameter.
+    Multi-task:  nn.Embedding lookup from task_id.
+    """
+
+    def __init__(self, embed_dim: int, num_tasks: int = 1):
+        super().__init__()
+        self.num_tasks = num_tasks
+        if num_tasks == 1:
+            self.embedding = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02) #TODO Add the variance scaling as a config
+        else:
+            self.embedding = nn.Embedding(num_tasks, embed_dim)
+            nn.init.normal_(self.embedding.weight, std=0.02)
+
+
+    def forward(self, batch_size: int, task_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Returns (B, 1, embed_dim)."""
+        if self.num_tasks == 1:
+            return self.embedding.expand(batch_size, -1, -1)
+        else:
+            # task_id: (B,) int tensor
+            return self.embedding(task_id).unsqueeze(1)  # (B, 1, D)
+
 
 class ActionEmbedding(nn.Module):
     """

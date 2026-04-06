@@ -39,6 +39,18 @@ class DynamicsConfig:
     # Keep seq_len as an alias for backward compatibility (defaults to seq_len_short)
     seq_len: int = 8
 
+    # Agent tokens (Phase 2: agent finetuning)
+    num_agent_tokens: int = 1         # S_agent per frame (paper Section 3.3)
+
+    # Prediction heads
+    head_hidden_dim: int = 512        # MLP hidden dim for reward/continue heads
+    head_num_layers: int = 4          # Number of MLP layers in heads
+    num_reward_bins: int = 255        # Symexp twohot bins for reward head
+    mtp_length: int = 0              # Multi-token prediction horizon (0 = disabled, 8 for Phase 2)
+    reward_loss_scale: float = 1.0    # Weight for reward head loss
+    continue_loss_scale: float = 1.0  # Weight for continue head loss
+    bc_loss_scale: float = 1.0        # Weight for behavior cloning loss
+
     @classmethod
     def from_tokenizer(cls, tokenizer_cfg: TokenizerConfig, **overrides: Any) -> "DynamicsConfig":
         """Build dynamics config with shared tokenizer fields copied automatically."""
