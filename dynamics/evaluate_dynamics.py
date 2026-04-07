@@ -9,7 +9,7 @@ Example:
         --task cheetah_run \
         --batch-size 8 \
         --steps 20 \
-        --device cuda \
+        --device tpu \
         --output-dir eval/dynamics
 """
 
@@ -35,7 +35,7 @@ from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
 from tokenizer.layers import AttentionMask
-from device_utils import get_device
+from device_utils import get_device, mark_step, is_xla_device
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -235,34 +235,16 @@ def denoise_one_frame(
     actions_context: torch.Tensor,
     K: int,
 ) -> torch.Tensor:
-    """Generate one new frame via K-step Euler denoising.
-
-    Builds a sequence [context..., z_current] and iteratively refines
-    z_current from pure noise (tau=0) to clean (tau=1) in K steps,
-    using the velocity formulation: v = (z_hat - z) / (1 - tau).
-
-    Args:
-        model:           DynamicsModel
-        z_context:       (B, T_ctx, S_z, D) context latents (noised at tau_ctx)
-        tau_context:     (B, T_ctx) tau values for context frames
-        d_context:       (B, T_ctx) d values for context frames
-        actions_context: (B, T_ctx, action_dim) actions (T_ctx actions for T_ctx+1 frames)
-        K:               number of denoising steps
-
-    Returns:
-        (B, 1, S_z, D) generated clean latent for the new frame
-    """
+    """Generate one new frame via K-step Euler denoising."""
     B = z_context.shape[0]
     device = z_context.device
     d_step = 1.0 / K
 
-    # Start from pure noise
     z_current = torch.randn(B, 1, z_context.shape[2], z_context.shape[3], device=device)
 
     for k in range(K):
         tau_k = k / K
 
-        # Build full sequence: [context..., current prediction]
         z_seq = torch.cat([z_context, z_current], dim=1)
         tau_new = torch.full((B, 1), tau_k, device=device)
         d_new = torch.full((B, 1), d_step, device=device)
@@ -270,11 +252,11 @@ def denoise_one_frame(
         d_seq = torch.cat([d_context, d_new], dim=1)
 
         output = model(z_seq, actions_context, tau_seq, d_seq)
-        z_hat_new = output.z_hat[:, -1:]  # (B, 1, S_z, D)
+        z_hat_new = output.z_hat[:, -1:]
 
-        # Euler step: v = (z_hat - z) / (1 - tau), z_next = z + v * d
         v = (z_hat_new - z_current) / max(1.0 - tau_k, 1e-4)
         z_current = z_current + v * d_step
+        mark_step()
 
     return z_current
 
@@ -292,84 +274,61 @@ def autoregressive_rollout(
     context_length: int,
     K_max: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Autoregressively generate future frames and measure MSE vs ground truth.
-
-    Provides num_context ground-truth frames, then generates rollout_horizon
-    frames one at a time, feeding each prediction back as context.
-
-    Args:
-        model:           DynamicsModel
-        tokenizer:       MaskedAutoencoderTokenizer (for decoding GIFs)
-        z_clean_full:    (B, T, S_z, D) all ground-truth latents
-        actions_full:    (B, T-1, action_dim) all ground-truth actions
-        num_context:     C — number of GT context frames
-        rollout_horizon: H — number of frames to generate
-        K:               denoising steps per frame
-        tau_ctx:         context corruption level (e.g. 0.1)
-        context_length:  sliding window size
-        K_max:           max K from training (for context d values)
-
-    Returns:
-        z_rollout:    (B, H, S_z, D) generated latent frames
-        mse_per_step: (H,) MSE at each rollout step vs ground truth
-    """
+    """Autoregressively generate future frames and measure MSE vs ground truth."""
     device = z_clean_full.device
     B, T_total, S_z, D_lat = z_clean_full.shape
-    tau_ctx_val = 1.0 - tau_ctx  # e.g. 0.9
-    d_ctx_val = 1.0 / K_max     # smallest d — "already denoised"
+    tau_ctx_val = 1.0 - tau_ctx
+    d_ctx_val = 1.0 / K_max
 
-    # Noise context frames to match training distribution
     z_ctx_clean = z_clean_full[:, :num_context]
     tau_ctx_vec = torch.full((B, num_context), tau_ctx_val, device=device)
     z_ctx_noised, _ = add_noise(z_ctx_clean, tau_ctx_vec)
 
-    # Buffer of all frames so far (noised at tau_ctx level)
-    z_buffer = z_ctx_noised.clone()
-    tau_buffer = tau_ctx_vec.clone()
-    d_buffer = torch.full((B, num_context), d_ctx_val, device=device)
+    # Pre-allocate fixed-size buffer to avoid dynamic torch.cat
+    max_buf_len = num_context + rollout_horizon
+    z_buffer = torch.zeros(B, max_buf_len, S_z, D_lat, device=device)
+    tau_buffer = torch.full((B, max_buf_len), tau_ctx_val, device=device)
+    d_buffer = torch.full((B, max_buf_len), d_ctx_val, device=device)
+
+    z_buffer[:, :num_context] = z_ctx_noised
+    buf_len = num_context
 
     generated = []
-    mse_list = []
+    mse_per_step = torch.zeros(rollout_horizon, device=device)
 
     for h in range(rollout_horizon):
         t_target = num_context + h
         if t_target >= T_total:
             break
 
-        # Sliding window: keep last context_length frames
-        win_start = max(0, z_buffer.shape[1] - context_length)
-        z_win = z_buffer[:, win_start:]
-        tau_win = tau_buffer[:, win_start:]
-        d_win = d_buffer[:, win_start:]
+        win_start = max(0, buf_len - context_length)
+        z_win = z_buffer[:, win_start:buf_len]
+        tau_win = tau_buffer[:, win_start:buf_len]
+        d_win = d_buffer[:, win_start:buf_len]
 
-        # Actions for the window: we need T_win actions for T_win+1 frames
-        # Action index i connects absolute frame (win_start+i) to (win_start+i+1)
         abs_start = win_start
-        abs_end = t_target  # action at t_target-1 connects frame t_target-1 to t_target
+        abs_end = t_target
         actions_win = actions_full[:, abs_start:abs_end]
 
         z_gen = denoise_one_frame(
             model, z_win, tau_win, d_win, actions_win, K,
-        )  # (B, 1, S_z, D)
+        )
 
-        # MSE vs ground truth
         z_gt = z_clean_full[:, t_target:t_target + 1]
-        mse = ((z_gen - z_gt) ** 2).mean().item()
-        mse_list.append(mse)
+        mse_per_step[h] = ((z_gen - z_gt) ** 2).mean()
         generated.append(z_gen)
 
-        # Add generated frame to buffer (noised at tau_ctx to match training)
         tau_gen = torch.full((B, 1), tau_ctx_val, device=device)
         z_gen_noised, _ = add_noise(z_gen, tau_gen)
-        z_buffer = torch.cat([z_buffer, z_gen_noised], dim=1)
-        tau_buffer = torch.cat([tau_buffer, tau_gen], dim=1)
-        d_buffer = torch.cat([d_buffer, torch.full((B, 1), d_ctx_val, device=device)], dim=1)
+        z_buffer[:, buf_len:buf_len + 1] = z_gen_noised
+        buf_len += 1
+
+        mark_step()
 
         if (h + 1) % 5 == 0:
-            print(f"  [rollout] generated frame {h + 1}/{rollout_horizon}, mse={mse:.6f}")
+            print(f"  [rollout] generated frame {h + 1}/{rollout_horizon}")
 
     z_rollout = torch.cat(generated, dim=1) if generated else z_clean_full[:, :0]
-    mse_per_step = torch.tensor(mse_list, device=device)
     return z_rollout, mse_per_step
 
 
@@ -403,6 +362,7 @@ def main(args: Optional[list[str]] = None) -> None:
 
     device = resolve_device(opts.device)
     print(f"[INFO] Using device: {device}")
+    _is_xla = is_xla_device(device)
 
     tokenizer_cfg = load_tokenizer_config_from_ckpt(opts.tokenizer_ckpt, device)
     dynamics_cfg = load_dynamics_config_from_ckpt(opts.dynamics_ckpt, device)
@@ -460,22 +420,24 @@ def main(args: Optional[list[str]] = None) -> None:
 
     log2_kmax = int(math.log2(dynamics_cfg.K_max))
     d_values = torch.tensor([1.0 / (2 ** k) for k in range(log2_kmax + 1)], device=device)
-    d_sum = torch.zeros(d_values.numel(), dtype=torch.float64, device=device)
-    d_count = torch.zeros(d_values.numel(), dtype=torch.long, device=device)
+    num_d = d_values.numel()
+    d_sum = torch.zeros(num_d, dtype=torch.float64, device=device)
+    d_count = torch.zeros(num_d, dtype=torch.long, device=device)
 
-    joint_sum = torch.zeros((opts.tau_bins, d_values.numel()), dtype=torch.float64, device=device)
-    joint_count = torch.zeros((opts.tau_bins, d_values.numel()), dtype=torch.long, device=device)
+    joint_sum = torch.zeros((opts.tau_bins, num_d), dtype=torch.float64, device=device)
+    joint_count = torch.zeros((opts.tau_bins, num_d), dtype=torch.long, device=device)
 
-    overall_sum = 0.0
-    overall_count = 0
-    
+    # Accumulate on-device — no .item() calls in the loop
+    overall_sum_t = torch.tensor(0.0, dtype=torch.float64, device=device)
+    overall_count_t = torch.tensor(0, dtype=torch.long, device=device)
+
     action_delta_sum = None
     action_true_mse_sum = None
     action_shuf_mse_sum = None
     action_batches = 0
 
-    gif_count = 0
-    gif_paths: list[Path] = []
+    # Store data for GIF generation AFTER the main loop
+    gif_data: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     processed_steps = 0
 
     with torch.no_grad():
@@ -494,46 +456,44 @@ def main(args: Optional[list[str]] = None) -> None:
 
             z_clean = trainer.model.encode_frames(frames)
             tau, d = sample_tau_and_d(B, T, K_max=dynamics_cfg.K_max, device=device)
-            tau[:, 0] = 1.0 - dynamics_cfg.tau_ctx  # match training: context frame is near-clean
+            tau[:, 0] = 1.0 - dynamics_cfg.tau_ctx
             z_noised, _ = add_noise(z_clean, tau)
             z_hat = trainer.model(z_noised, actions, tau, d).z_hat
 
-            mse_bt = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))
-            overall_sum += mse_bt.sum().item()
-            overall_count += mse_bt.numel()
+            # --- Accumulate metrics on-device (no .item()) ---
+            mse_bt = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))  # (B, T)
+            overall_sum_t += mse_bt.sum().double()
+            overall_count_t += mse_bt.numel()
+
+            # Tau-bucket metrics — vectorized, no Python loop with .any()
+            # Digitize tau into bins: bin index for each (B, T) element
+            tau_flat = tau.reshape(-1)
+            mse_flat = mse_bt.reshape(-1)
+            tau_bin_idx = torch.bucketize(tau_flat, tau_edges[1:-1])  # [0, num_bins-1]
+            tau_bin_idx = tau_bin_idx.clamp(0, opts.tau_bins - 1)
 
             for i in range(opts.tau_bins):
-                low = tau_edges[i]
-                high = tau_edges[i + 1]
-                if i == opts.tau_bins - 1:
-                    mask_tau = (tau >= low) & (tau <= high)
-                else:
-                    mask_tau = (tau >= low) & (tau < high)
-                if mask_tau.any():
-                    tau_sum[i] += mse_bt[mask_tau].sum().double()
-                    tau_count[i] += mask_tau.sum()
+                mask_i = (tau_bin_idx == i)
+                tau_sum[i] += (mse_flat * mask_i.float()).sum().double()
+                tau_count[i] += mask_i.sum()
 
-            for j, d_val in enumerate(d_values):
-                mask_d = torch.isclose(d, d_val)
-                if mask_d.any():
-                    d_sum[j] += mse_bt[mask_d].sum().double()
-                    d_count[j] += mask_d.sum()
+            # D-bucket metrics — vectorized
+            d_flat = d.reshape(-1)
+            for j in range(num_d):
+                mask_j = torch.isclose(d_flat, d_values[j])
+                d_sum[j] += (mse_flat * mask_j.float()).sum().double()
+                d_count[j] += mask_j.sum()
 
+            # Joint tau x d metrics — vectorized
             for i in range(opts.tau_bins):
-                low = tau_edges[i]
-                high = tau_edges[i + 1]
-                if i == opts.tau_bins - 1:
-                    mask_tau = (tau >= low) & (tau <= high)
-                else:
-                    mask_tau = (tau >= low) & (tau < high)
-                if not mask_tau.any():
-                    continue
-                for j, d_val in enumerate(d_values):
-                    mask = mask_tau & torch.isclose(d, d_val)
-                    if mask.any():
-                        joint_sum[i, j] += mse_bt[mask].sum().double()
-                        joint_count[i, j] += mask.sum()
+                mask_i = (tau_bin_idx == i)
+                for j in range(num_d):
+                    mask_j = torch.isclose(d_flat, d_values[j])
+                    mask_ij = mask_i & mask_j
+                    joint_sum[i, j] += (mse_flat * mask_ij.float()).sum().double()
+                    joint_count[i, j] += mask_ij.sum()
 
+            # Action shuffle sensitivity
             if B > 1:
                 perm = torch.randperm(B, device=device)
                 shuffled_actions = actions[perm]
@@ -553,28 +513,47 @@ def main(args: Optional[list[str]] = None) -> None:
                 action_shuf_mse_sum += mse_shuf_t
                 action_batches += 1
 
-            if gif_count < opts.max_gifs:
-                vis_frames = frames[:1]
-                vis_clean = z_clean[:1]
-                vis_pred = z_hat[:1]
+            # Store GIF data on CPU for later (don't decode in the hot loop)
+            if len(gif_data) < opts.max_gifs:
+                gif_data.append((
+                    frames[:1].cpu(),
+                    z_clean[:1].cpu(),
+                    z_hat[:1].cpu(),
+                ))
 
-                recon_clean = decode_latents_to_frames(trainer.tokenizer, vis_clean)[0]
-                recon_pred = decode_latents_to_frames(trainer.tokenizer, vis_pred)[0]
-
-                combined = torch.cat([vis_frames[0], recon_clean, recon_pred], dim=3)
-                gif_path = output_dir / f"step_{step_idx:03d}_gt_clean_pred.gif"
-                save_video_gif(combined, gif_path, fps=opts.gif_fps)
-                gif_paths.append(gif_path)
-                gif_count += 1
+            # Trigger XLA execution
+            mark_step()
 
             processed_steps += 1
             if processed_steps % 5 == 0 or processed_steps == opts.steps:
                 print(f"[INFO] Processed {processed_steps}/{opts.steps} batches")
 
+    # --- Transfer accumulated metrics to CPU once ---
+    overall_sum = overall_sum_t.item()
+    overall_count = overall_count_t.item()
+
     if overall_count == 0:
         raise RuntimeError("No evaluation samples were processed.")
 
     overall_mse = overall_sum / overall_count
+
+    # --- Generate GIFs AFTER the main eval loop ---
+    gif_paths: list[Path] = []
+    if gif_data and opts.max_gifs > 0:
+        print(f"[INFO] Generating {len(gif_data)} GIFs...")
+        # Move model to CPU for decoding to avoid TPU sync issues
+        tokenizer_cpu = trainer.tokenizer.cpu()
+        tokenizer_cpu.eval()
+        for idx, (vis_frames, vis_clean, vis_pred) in enumerate(gif_data):
+            recon_clean = decode_latents_to_frames(tokenizer_cpu, vis_clean)[0]
+            recon_pred = decode_latents_to_frames(tokenizer_cpu, vis_pred)[0]
+            combined = torch.cat([vis_frames[0], recon_clean, recon_pred], dim=3)
+            gif_path = output_dir / f"step_{idx:03d}_gt_clean_pred.gif"
+            save_video_gif(combined, gif_path, fps=opts.gif_fps)
+            gif_paths.append(gif_path)
+        # Move tokenizer back to device for rollout
+        trainer.tokenizer.to(device)
+        print(f"[INFO] GIFs done.")
 
     # ── Autoregressive Rollout Evaluation ──────────────────────────────
     K_inf = dynamics_cfg.K_inference
@@ -591,7 +570,6 @@ def main(args: Optional[list[str]] = None) -> None:
     print(f"\n[INFO] Autoregressive rollout: {num_context} context frames, "
           f"{rollout_horizon} rollout steps, K={K_inf}")
 
-    # Re-iterate the dataset for rollout (separate from single-step eval)
     rollout_dataset = DatasetFactory.get_dataset(
         dataset_cfg,
         batch_size=opts.batch_size,
@@ -604,6 +582,9 @@ def main(args: Optional[list[str]] = None) -> None:
         num_workers=0,
         pin_memory=(device.type == "cuda"),
     )
+
+    # Store rollout GIF data for post-loop generation
+    rollout_gif_data: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     with torch.no_grad():
         for step_idx, batch in enumerate(rollout_loader):
@@ -635,28 +616,32 @@ def main(args: Optional[list[str]] = None) -> None:
                 K_max=dynamics_cfg.K_max,
             )
 
-            rollout_mse_accum[:actual_horizon] += mse_per_step.double()
+            rollout_mse_accum[:actual_horizon] += mse_per_step[:actual_horizon].double()
             rollout_count += 1
 
-            # Rollout GIFs: [GT sequence | Context + Generated sequence]
-            if rollout_gif_count < opts.max_gifs and z_rollout.shape[1] > 0:
+            if len(rollout_gif_data) < opts.max_gifs and z_rollout.shape[1] > 0:
                 n_vis = num_context + actual_horizon
-                # Ground truth frames
-                vis_gt = z_clean[:1, :n_vis]
-                # Rollout: real context + generated
-                vis_rollout = torch.cat([z_clean[:1, :num_context], z_rollout[:1]], dim=1)
+                vis_gt = z_clean[:1, :n_vis].cpu()
+                vis_rollout = torch.cat([z_clean[:1, :num_context], z_rollout[:1]], dim=1).cpu()
+                rollout_gif_data.append((vis_gt, vis_rollout))
 
-                frames_gt = decode_latents_to_frames(trainer.tokenizer, vis_gt)[0]
-                frames_pred = decode_latents_to_frames(trainer.tokenizer, vis_rollout)[0]
-
-                # Side-by-side: [GT | Rollout]
-                combined = torch.cat([frames_gt, frames_pred], dim=3)
-                gif_path = output_dir / f"rollout_{step_idx:03d}_gt_vs_pred.gif"
-                save_video_gif(combined, gif_path, fps=opts.gif_fps)
-                rollout_gif_paths.append(gif_path)
-                rollout_gif_count += 1
-
+            mark_step()
             print(f"[INFO] Rollout batch {step_idx + 1}/{opts.rollout_batches} done")
+
+    # Generate rollout GIFs after the loop
+    if rollout_gif_data and opts.max_gifs > 0:
+        print(f"[INFO] Generating {len(rollout_gif_data)} rollout GIFs...")
+        tokenizer_cpu = trainer.tokenizer.cpu()
+        tokenizer_cpu.eval()
+        for idx, (vis_gt, vis_rollout) in enumerate(rollout_gif_data):
+            frames_gt = decode_latents_to_frames(tokenizer_cpu, vis_gt)[0]
+            frames_pred = decode_latents_to_frames(tokenizer_cpu, vis_rollout)[0]
+            combined = torch.cat([frames_gt, frames_pred], dim=3)
+            gif_path = output_dir / f"rollout_{idx:03d}_gt_vs_pred.gif"
+            save_video_gif(combined, gif_path, fps=opts.gif_fps)
+            rollout_gif_paths.append(gif_path)
+        trainer.tokenizer.to(device)
+        print(f"[INFO] Rollout GIFs done.")
 
     # ── Rollout Reporting ──────────────────────────────────────────────
     rollout_rows = []
@@ -727,7 +712,7 @@ def main(args: Optional[list[str]] = None) -> None:
         "processed_batches": processed_steps,
         "batch_size": opts.batch_size,
         "seq_len": dynamics_cfg.seq_len,
-        "gifs_written": gif_count,
+        "gifs_written": len(gif_paths),
         "rollout_horizon": rollout_horizon,
         "rollout_K_inference": K_inf,
         "rollout_num_context": num_context,
@@ -777,7 +762,7 @@ def main(args: Optional[list[str]] = None) -> None:
         {
             "eval/overall_latent_mse": overall_mse,
             "eval/processed_batches": processed_steps,
-            "eval/gifs_written": gif_count,
+            "eval/gifs_written": len(gif_paths),
             "eval/seq_len": dynamics_cfg.seq_len,
             "eval/batch_size": opts.batch_size,
         }
