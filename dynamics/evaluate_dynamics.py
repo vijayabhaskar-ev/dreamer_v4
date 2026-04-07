@@ -72,9 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def safe_torch_load(path: str, device: torch.device):
     try:
-        return torch.load(path, map_location=device, weights_only=True)
+        return torch.load(path, map_location='cpu', weights_only=True)
     except (pickle.UnpicklingError, RuntimeError, TypeError):
-        return torch.load(path, map_location=device, weights_only=False)
+        return torch.load(path, map_location='cpu', weights_only=False)
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -426,6 +426,7 @@ def main(args: Optional[list[str]] = None) -> None:
         tokenizer_ckpt=opts.tokenizer_ckpt,
     )
     trainer.load_checkpoint(opts.dynamics_ckpt, strict=True)
+    trainer.model.to(device)
     trainer.model.eval()
     trainer.tokenizer.eval()
 

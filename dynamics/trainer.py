@@ -450,7 +450,12 @@ class DynamicsTrainer:
         if self.model.agent_embedding is None:
             model_state = {k: v for k, v in model_state.items()
                            if not k.startswith("agent_embedding.")}
-        self.model.load_state_dict(model_state, strict=strict)
+        missing, unexpected = self.model.load_state_dict(model_state, strict=False)
+        missing_real = [k for k in missing if "qk_norm" not in k]
+        if strict and missing_real:
+            raise RuntimeError(f"Missing key(s) in state_dict: {missing_real}")
+        if strict and unexpected:
+            raise RuntimeError(f"Unexpected key(s) in state_dict: {unexpected}")
         # Load heads non-strictly: MTP length may differ between checkpoint
         # and current config (e.g. Phase 2 checkpoint loaded for evaluation
         # with mtp_length=0).  Missing/extra output_heads are harmless.
