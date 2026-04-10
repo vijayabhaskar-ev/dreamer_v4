@@ -23,7 +23,7 @@ from .config import DynamicsConfig
 from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
-from device_utils import get_device, should_use_xla, is_master, wrap_loader
+from device_utils import get_device, should_use_xla, is_master, wrap_loader, initialize_xla_cache
 import wandb
 
 
@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-path", type=str, default=None,
                         help="Path to .npz file (required when --dataset=offline)")
     parser.add_argument("--task", type=str, default="cheetah_run")
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--steps-per-epoch", type=int, default=100)
     parser.add_argument("--val-steps-per-epoch", type=int, default=None)
 
@@ -214,8 +214,6 @@ def _train_fn(index=0, args=None):
         )
     else:
         wandb.init(mode="disabled")
-
-
     # Short-sequence dataset (T₁) — used for most training steps
     dataset_cfg_short = replace(
         tokenizer_cfg,
@@ -264,6 +262,7 @@ def _train_fn(index=0, args=None):
         )
 
     device = get_device(opts.device)
+    initialize_xla_cache()  # persist compiled graphs across restarts; no-op on CUDA/CPU
     use_pin_memory = device.type == "cuda"
 
     train_loader_short_raw = DataLoader(
@@ -271,14 +270,18 @@ def _train_fn(index=0, args=None):
         batch_size=None,
         num_workers=opts.num_workers,
         pin_memory=use_pin_memory,
-        multiprocessing_context='spawn' if opts.num_workers > 0 else None,
+        persistent_workers=opts.num_workers > 0,
+        prefetch_factor=2 if opts.num_workers > 0 else None,
+        multiprocessing_context='forkserver' if opts.num_workers > 0 else None,
     )
     train_loader_long_raw = DataLoader(
         train_dataset_long,
         batch_size=None,
         num_workers=opts.num_workers,
         pin_memory=use_pin_memory,
-        multiprocessing_context='spawn' if opts.num_workers > 0 else None,
+        persistent_workers=opts.num_workers > 0,
+        prefetch_factor=2 if opts.num_workers > 0 else None,
+        multiprocessing_context='forkserver' if opts.num_workers > 0 else None,
     )
 
     val_loader_raw = DataLoader(

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import pickle
 from typing import Dict, Optional, Tuple
 import math
+import gc
+import random
 
 import torch
 from torch.utils.data import DataLoader
@@ -17,7 +19,7 @@ from heads import RewardHead, ContinueHead, PolicyHead
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
 from tokenizer.metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
-from device_utils import get_device, get_device_type, make_grad_scaler, save_checkpoint as save_ckpt, is_master
+from device_utils import get_device, get_device_type, make_grad_scaler, save_checkpoint as save_ckpt, is_master, is_xla_device
 import wandb
 
 
@@ -72,6 +74,30 @@ def build_mtp_action_targets(
     actions_padded = F.pad(actions, (0, 0, 0, mtp_length), value=0.0)  # (B, T-1+L, A)
     # unfold on time dim → (B, T-1, L+1, A)
     return actions_padded.unfold(1, num_offsets, 1).transpose(-1, -2)
+
+
+def _xla_safe_clip_grad_norm(params, max_norm: float) -> torch.Tensor:
+    """Clip gradients entirely on-device (no .item() host sync).
+
+    PyTorch's clip_grad_norm_ internally calls .item() to compare the
+    total gradient norm against max_norm on the CPU. On XLA/TPU this
+    triggers a device→host sync every step, destroying pipelining.
+
+    This version keeps the comparison on-device using torch.clamp.
+    Returns the unclipped total_norm as a device tensor (for logging).
+    """
+    grads = [p.grad for p in params if p.grad is not None]
+    if not grads:
+        return torch.tensor(0.0)
+    # torch.stack + single sum avoids Python's left-associative chain of
+    # intermediate tensors that Python's built-in sum() would produce.
+    total_norm_sq = torch.stack([g.detach().pow(2).sum() for g in grads]).sum()
+    total_norm = total_norm_sq.sqrt()
+    # clip_coef = max_norm / (total_norm + 1e-6), clamped to [0, 1]
+    clip_coef = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
+    for g in grads:
+        g.detach().mul_(clip_coef)
+    return total_norm
 
 
 @dataclass
@@ -132,6 +158,7 @@ class DynamicsTrainer:
         self.training_cfg = training_cfg
 
         self.device = get_device(training_cfg.device)
+        self._is_xla = is_xla_device(self.device)
 
         self.rms_flow = RMSNormalizer(decay=0.99)
         self.rms_bootstrap = RMSNormalizer(decay=0.99)
@@ -178,6 +205,7 @@ class DynamicsTrainer:
         self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
         self.global_step = 0
         self._last_lr_bucket = -1
+        self._cached_clip_params: list[torch.nn.Parameter] | None = None
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
 
@@ -310,7 +338,7 @@ class DynamicsTrainer:
         self._schedule_warmup = self.training_cfg.warmup_steps
         self._schedule_min_lr = self.training_cfg.min_lr
         self._schedule_base_lr = self.training_cfg.lr
-        self._last_lr_bucket = -1  # track when LR actually changes
+   
 
     def _set_lr_from_schedule(self) -> None:
         """Set optimizer LR from schedule, quantized to reduce XLA recompilations.
@@ -352,6 +380,96 @@ class DynamicsTrainer:
             else:
                 group['lr'] = lr
 
+    # ── XLA warmup ──────────────────────────────────────────────────────
+
+    def _xla_warmup_compile(
+        self,
+        loader_short: DataLoader,
+        loader_long: DataLoader,
+    ) -> None:
+        """Pre-compile XLA graphs for both sequence lengths.
+
+        Runs one dummy forward+backward for each loader so both graphs are
+        cached before real training begins.  Resets optimizer state and XLA
+        metrics afterward.  Complete no-op on CUDA/CPU.
+
+        Skips the long loader when ``long_batch_ratio == 0`` (no long batches
+        will be used during training).  Preserves optimizer state so this is
+        safe to call after ``load_checkpoint()``.
+        """
+        if not self._is_xla:
+            return
+
+        import torch_xla
+        import torch_xla.debug.metrics as met
+
+        if is_master():
+            print("[XLA] Warming up compilation...")
+
+        saved_step = self.global_step
+        saved_bucket = self._last_lr_bucket
+        saved_opt_state = self.optimizer.state_dict()
+        self.model.train(True)
+
+        # Skip long loader warmup if long batches are never used
+        use_long = self.training_cfg.long_batch_ratio > 0
+        loaders = [("short", loader_short)]
+        if use_long and loader_long is not None:
+            loaders.append(("long", loader_long))
+
+        for name, loader in loaders:
+            if loader is None:
+                continue
+
+            batch = next(iter(loader))
+            frames, actions, rewards, dones = batch
+            frames = frames.to(self.device)
+            actions = actions.to(self.device)
+            rewards = rewards.to(self.device)
+            dones = dones.to(self.device)
+
+            if frames.dim() == 4:
+                frames = frames.unsqueeze(1)
+
+            B, T = frames.shape[0:2]
+            z_clean = self.model.encode_frames(frames)
+            tau, d = sample_tau_and_d(
+                B, T, K_max=self.dynamics_cfg.K_max, device=self.device,
+            )
+            tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
+            z_noised, _ = add_noise(z_clean, tau)
+
+            with torch.amp.autocast(
+                device_type=get_device_type(self.device),
+                enabled=self.training_cfg.amp,
+            ):
+                loss, _ = self._compute_loss(
+                    z_clean, z_noised, actions, tau, d,
+                    training=True, compute_bootstrap=True,
+                    rewards=rewards, dones=dones,
+                    use_agent_tokens=False,
+                )
+
+            self.optimizer.zero_grad(set_to_none=True)
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            torch_xla.sync()
+
+            if is_master():
+                print(f"  [XLA] {name} (T={T}) graph compiled")
+
+        # Restore optimizer state (preserves Adam momentum from checkpoint)
+        self._build_optimizer()
+        self.optimizer.load_state_dict(saved_opt_state)
+        self.global_step = saved_step
+        self._last_lr_bucket = saved_bucket
+        met.clear_all()
+
+        if is_master():
+            print("[XLA] Warmup compilation complete")
+
     # ── Training loop ───────────────────────────────────────────────────
 
     def fit(
@@ -366,7 +484,7 @@ class DynamicsTrainer:
         steps_per_epoch = self.training_cfg.steps_per_epoch
         total_steps = steps_per_epoch * self.training_cfg.epochs
         self._build_scheduler(total_steps)
-
+        self._xla_warmup_compile(train_loader_short, train_loader_long)
 
         for epoch in range(start_epoch, self.training_cfg.epochs + 1):
             train_metrics = self._run_epoch(
@@ -384,6 +502,8 @@ class DynamicsTrainer:
                     "epoch/train_loss": train_metrics["loss/dynamics_total"],
                     "epoch/train_flow": train_metrics["loss/dynamics_flow"],
                     "epoch/train_bootstrap": train_metrics["loss/dynamics_bootstrap"],
+                    "epoch/train_flow_normed": train_metrics["loss/dynamics_flow_normed"],
+                    "epoch/train_bootstrap_normed": train_metrics["loss/dynamics_bootstrap_normed"],
                     "epoch/train_reward": train_metrics["loss/dynamics_reward"],
                     "epoch/train_continue": train_metrics["loss/dynamics_continue"],
                     "global_step": self.global_step,
@@ -392,6 +512,8 @@ class DynamicsTrainer:
                     epoch_log["epoch/val_loss"] = val_metrics["loss/dynamics_total"]
                     epoch_log["epoch/val_flow"] = val_metrics["loss/dynamics_flow"]
                     epoch_log["epoch/val_bootstrap"] = val_metrics["loss/dynamics_bootstrap"]
+                    epoch_log["epoch/val_flow_normed"] = val_metrics["loss/dynamics_flow_normed"]
+                    epoch_log["epoch/val_bootstrap_normed"] = val_metrics["loss/dynamics_bootstrap_normed"]
                     epoch_log["epoch/val_reward"] = val_metrics["loss/dynamics_reward"]
                     epoch_log["epoch/val_continue"] = val_metrics["loss/dynamics_continue"]
                 wandb.log(epoch_log, step=self.global_step)
@@ -436,6 +558,8 @@ class DynamicsTrainer:
             state["continue_head"] = self.continue_head.state_dict()
             state["policy_head"] = self.policy_head.state_dict()
         save_ckpt(state, path, self.device)
+        del state
+        gc.collect()
         if is_master():
             print(f"Saved dynamics checkpoint to {path}")
 
@@ -493,6 +617,25 @@ class DynamicsTrainer:
         if "scheduler_bucket" in state:
             self._last_lr_bucket = state["scheduler_bucket"]
 
+        # Sanity-check the loaded weights — if the checkpoint was saved
+        # during a divergent run, the NaN/Inf values will propagate forward.
+        # Fail loudly here instead of training on poisoned state.
+        if is_master():
+            bad_params = []
+            for name, param in self.model.named_parameters():
+                if not torch.isfinite(param).all().item():
+                    bad_params.append(name)
+            if bad_params:
+                raise RuntimeError(
+                    f"[FATAL] Checkpoint contains non-finite values in {len(bad_params)} "
+                    f"param(s). First few: {bad_params[:5]}. "
+                    f"Roll back to an earlier checkpoint."
+                )
+            print(
+                f"[INFO] Checkpoint loaded: global_step={self.global_step}, "
+                f"lr_bucket={self._last_lr_bucket}, weights all finite."
+            )
+
         return state.get("epoch", 0) + 1
 
     # ── Epoch runner ────────────────────────────────────────────────────
@@ -514,6 +657,8 @@ class DynamicsTrainer:
         total_loss = torch.tensor(0.0, device=self.device)
         total_flow = torch.tensor(0.0, device=self.device)
         total_bootstrap = torch.tensor(0.0, device=self.device)
+        total_flow_normed = torch.tensor(0.0, device=self.device)
+        total_bootstrap_normed = torch.tensor(0.0, device=self.device)
         total_reward = torch.tensor(0.0, device=self.device)
         total_continue = torch.tensor(0.0, device=self.device)
         total_bc = torch.tensor(0.0, device=self.device)
@@ -527,6 +672,8 @@ class DynamicsTrainer:
         _log_loss = torch.tensor(0.0, device=self.device)
         _log_flow = torch.tensor(0.0, device=self.device)
         _log_bootstrap = torch.tensor(0.0, device=self.device)
+        _log_flow_normed = torch.tensor(0.0, device=self.device)
+        _log_bootstrap_normed = torch.tensor(0.0, device=self.device)
         _log_reward = torch.tensor(0.0, device=self.device)
         _log_continue = torch.tensor(0.0, device=self.device)
         _log_bc = torch.tensor(0.0, device=self.device)
@@ -548,7 +695,7 @@ class DynamicsTrainer:
         for batch_short in loader_short:
             # Decide whether to use short or long batch this step
             # Python-level branch — both T values compile once, no per-step recompilation
-            use_long = training and long_iter is not None and (torch.rand(1).item() < long_ratio)
+            use_long = training and long_iter is not None and (random.random() < long_ratio)
             if use_long:
                 try:
                     batch = next(long_iter)
@@ -584,7 +731,10 @@ class DynamicsTrainer:
                 d = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
             elif self.global_step < ramp_end:
                 ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
-                self._ramp_tensor.fill_(int(ramp_frac * 10) / 10.0)
+                # Quantize to 3 levels (0.0, 0.33, 0.67, 1.0) instead of 10
+                # to reduce XLA recompilations — fewer unique graph variants.
+                # Same curriculum behavior, just coarser discrete steps.
+                self._ramp_tensor.fill_(int(ramp_frac * 3) / 3.0)
                 mask = torch.rand_like(d) < self._ramp_tensor
                 d_min = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
                 d = torch.where(mask, d, d_min)
@@ -602,7 +752,9 @@ class DynamicsTrainer:
                     actions, self.dynamics_cfg.mtp_length,
                 )
 
-            with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
+            # Validation: wrap in no_grad to avoid building unused gradient graphs
+            grad_ctx = torch.no_grad() if not training else torch.enable_grad()
+            with grad_ctx, torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
                 loss, metrics = self._compute_loss(
                     z_clean, z_noised, actions, tau, d,
                     training=training, compute_bootstrap=need_bootstrap,
@@ -617,15 +769,35 @@ class DynamicsTrainer:
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
 
-                all_params = list(self.model.parameters())
-                if self.training_cfg.train_heads:
-                    all_params += list(self.reward_head.parameters()) + \
-                        list(self.continue_head.parameters()) + \
-                        list(self.policy_head.parameters())
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    all_params,
-                    self.training_cfg.grad_clip,
-                )
+                if self._cached_clip_params is None:
+                    all_params = list(self.model.parameters())
+                    if self.training_cfg.train_heads:
+                        all_params += list(self.reward_head.parameters()) + \
+                            list(self.continue_head.parameters()) + \
+                            list(self.policy_head.parameters())
+                    self._cached_clip_params = all_params
+                all_params = self._cached_clip_params
+                if self._is_xla:
+                    # XLA-safe: stays entirely on-device (no .item() host sync)
+                    grad_norm = _xla_safe_clip_grad_norm(all_params, self.training_cfg.grad_clip)
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        all_params, self.training_cfg.grad_clip,
+                    )
+
+                # Divergence guard — check grad_norm for NaN/Inf every 50 steps.
+                # Costs one host sync per check, but only every 50 steps so the
+                # amortized overhead is negligible. Raises instead of letting
+                # XLA crash with BrokenProcessPool and no traceback.
+                if self.global_step % 50 == 0 and isinstance(grad_norm, torch.Tensor):
+                    gn_val = grad_norm.item()
+                    if not math.isfinite(gn_val):
+                        loss_val = loss.item()
+                        raise RuntimeError(
+                            f"[FATAL] Training diverged at step {self.global_step}: "
+                            f"grad_norm={gn_val}, loss={loss_val}. "
+                            f"Check loss scaling / LR / curriculum."
+                        )
 
                 # Compute LR manually as a tensor so XLA doesn't recompile
                 # on every LR change (scheduler embeds LR as compile-time constant)
@@ -637,15 +809,19 @@ class DynamicsTrainer:
                 self.global_step += 1
 
                 # Accumulate on-device — no .item() sync per step
-                _log_loss += loss.detach()
-                _log_flow += metrics["loss_flow"]
-                _log_bootstrap += metrics["loss_bootstrap"]
-                _log_reward += metrics["loss_reward"]
-                _log_continue += metrics["loss_continue"]
-                _log_bc += metrics["loss_bc"]
-                _log_grad_norm += grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm
-                _log_tau += tau_for_log.mean().detach()
-                _log_d += d_for_log.mean().detach()
+                # All tensors detached to prevent holding the loss computation graph
+                # across accumulator ops (root cause of host memory leak).
+                _log_loss.add_(loss.detach())
+                _log_flow.add_(metrics["loss_flow"].detach())
+                _log_bootstrap.add_(metrics["loss_bootstrap"].detach())
+                _log_flow_normed.add_(metrics["loss_flow_normed"].detach())
+                _log_bootstrap_normed.add_(metrics["loss_bootstrap_normed"].detach())
+                _log_reward.add_(metrics["loss_reward"].detach())
+                _log_continue.add_(metrics["loss_continue"].detach())
+                _log_bc.add_(metrics["loss_bc"].detach())
+                _log_grad_norm.add_(grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm)
+                _log_tau.add_(tau_for_log.mean().detach())
+                _log_d.add_(d_for_log.mean().detach())
                 _log_count += 1
 
                 if self.global_step % log_interval == 0:
@@ -656,6 +832,8 @@ class DynamicsTrainer:
                             "train/loss": (_log_loss / n).item(),
                             "train/flow": (_log_flow / n).item(),
                             "train/bootstrap": (_log_bootstrap / n).item(),
+                            "train/flow_normed": (_log_flow_normed / n).item(),
+                            "train/bootstrap_normed": (_log_bootstrap_normed / n).item(),
                             "train/reward": (_log_reward / n).item(),
                             "train/continue": (_log_continue / n).item(),
                             "train/bc": (_log_bc / n).item(),
@@ -675,6 +853,13 @@ class DynamicsTrainer:
 
                         smoothed_metrics.update(self.throughput_tracker.step(B))
 
+                        if self._is_xla:
+                            import torch_xla.debug.metrics as met
+                            compile_data = met.metric_data('CompileTime')
+                            if compile_data is not None:
+                                smoothed_metrics['xla/total_compilations'] = compile_data[0]
+                                smoothed_metrics['xla/total_compile_time_s'] = compile_data[1]
+
                         if self.training_cfg.log_memory:
                             smoothed_metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
 
@@ -689,6 +874,8 @@ class DynamicsTrainer:
                     _log_loss.zero_()
                     _log_flow.zero_()
                     _log_bootstrap.zero_()
+                    _log_flow_normed.zero_()
+                    _log_bootstrap_normed.zero_()
                     _log_reward.zero_()
                     _log_continue.zero_()
                     _log_bc.zero_()
@@ -697,13 +884,22 @@ class DynamicsTrainer:
                     _log_d.zero_()
                     _log_count = 0
 
-            total_loss += loss.detach()
-            total_flow += metrics["loss_flow"]
-            total_bootstrap += metrics["loss_bootstrap"]
-            total_reward += metrics["loss_reward"]
-            total_continue += metrics["loss_continue"]
-            total_bc += metrics["loss_bc"]
+            # All tensors detached — prevents the epoch-level accumulators from
+            # holding every per-step loss computation graph alive until epoch end.
+            total_loss.add_(loss.detach())
+            total_flow.add_(metrics["loss_flow"].detach())
+            total_bootstrap.add_(metrics["loss_bootstrap"].detach())
+            total_flow_normed.add_(metrics["loss_flow_normed"].detach())
+            total_bootstrap_normed.add_(metrics["loss_bootstrap_normed"].detach())
+            total_reward.add_(metrics["loss_reward"].detach())
+            total_continue.add_(metrics["loss_continue"].detach())
+            total_bc.add_(metrics["loss_bc"].detach())
             total_steps += 1
+
+            # Periodic GC to free Python-side refs to XLA tensors and numpy copies.
+            # Without this, host memory grows linearly (~50MB/step from stale refs).
+            if total_steps % 50 == 0:
+                gc.collect()
 
         # Single .item() at epoch end — one sync instead of N
         n = max(total_steps, 1)
@@ -711,6 +907,8 @@ class DynamicsTrainer:
             "loss/dynamics_total": (total_loss / n).item(),
             "loss/dynamics_flow": (total_flow / n).item(),
             "loss/dynamics_bootstrap": (total_bootstrap / n).item(),
+            "loss/dynamics_flow_normed": (total_flow_normed / n).item(),
+            "loss/dynamics_bootstrap_normed": (total_bootstrap_normed / n).item(),
             "loss/dynamics_reward": (total_reward / n).item(),
             "loss/dynamics_continue": (total_continue / n).item(),
             "loss/dynamics_bc": (total_bc / n).item(),
@@ -732,7 +930,10 @@ class DynamicsTrainer:
             wd = group["weight_decay"]
             if wd == 0.0:
                 continue
-            sq_sum = sum(p.data.norm(2) ** 2 for p in group["params"] if p.requires_grad)
+            sq_list = [p.data.norm(2) ** 2 for p in group["params"] if p.requires_grad]
+            if not sq_list:
+                continue
+            sq_sum = torch.stack(sq_list).sum()
             metrics[f"model/wd_{name}"] = (wd * sq_sum).item()
         return metrics
 
@@ -861,6 +1062,8 @@ class DynamicsTrainer:
         metrics = {
             "loss_flow": loss_flow.detach(),
             "loss_bootstrap": loss_bootstrap.detach(),
+            "loss_flow_normed": loss_flow_normed.detach(),
+            "loss_bootstrap_normed": loss_bootstrap_normed.detach(),
             "loss_reward": loss_reward.detach() if isinstance(loss_reward, torch.Tensor) else loss_reward,
             "loss_continue": loss_continue.detach() if isinstance(loss_continue, torch.Tensor) else loss_continue,
             "loss_bc": loss_bc.detach() if isinstance(loss_bc, torch.Tensor) else loss_bc,

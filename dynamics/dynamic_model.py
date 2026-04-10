@@ -4,6 +4,7 @@ from typing import NamedTuple, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .embedding import ActionEmbedding, TauDEmbedding, AgentTokenEmbedding
 from .dynamic_block import DynamicsTransformerBlock
@@ -184,31 +185,32 @@ class DynamicsModel(nn.Module):
         if has_agent:
             agent_tok = self.agent_embedding(batch_size=B)  # (B, 1, D_embed)
 
-        frame_blocks = []
-        #TODO Current loop looks inefficient. Need to vectorize into a single cat with some reshaping
-        for t in range(T):
-            tokens_this_frame = []
+        # ── Vectorized token assembly (no Python loop over T) ──────────
+        # Action tokens: (B, T, 1, D_embed)
+        # Frame 0 uses no_action_emb; frames 1..T-1 use projected actions + no_action_emb
+        if actions is not None:
+            # actions: (B, T-1, action_dim) → pad zero at t=0 → (B, T, action_dim)
+            actions_padded = F.pad(actions, (0, 0, 1, 0))
+            projected = self.action_embedding.proj(actions_padded)  # (B, T, D_embed)
+            # Zero out the projected component for t=0 so only no_action_emb remains
+            action_mask = projected.new_ones(1, T, 1)
+            action_mask[:, 0] = 0.0
+            a_tokens = (projected * action_mask + self.action_embedding.no_action_emb).unsqueeze(2)  # (B, T, 1, D)
+        else:
+            a_tokens = self.action_embedding.no_action_emb.unsqueeze(0).expand(B, T, -1, -1)  # (B, T, 1, D)
 
-            if t == 0 or actions is None:
-                a_token = self.action_embedding(None, batch_size=B)
-            else:
-                a_token = self.action_embedding(actions[:, t-1 : t], batch_size=B)
-            tokens_this_frame.append(a_token)
+        td_tokens = tau_d.unsqueeze(2)  # (B, T, 1, D_embed)
 
-            tokens_this_frame.append(tau_d[:, t:t+1])  # (B, 1, D)
+        # z_up already (B, T, S_z, D_embed)
 
-            tokens_this_frame.append(z_up[:, t])  # (B, S_z, D)
+        registers = self.register_tokens.unsqueeze(0).expand(B, T, -1, -1)  # (B, T, S_r, D_embed)
 
-            registers = self.register_tokens.expand(B, -1, -1)  # (B, S_r, D)
-            tokens_this_frame.append(registers)
+        parts = [a_tokens, td_tokens, z_up, registers]
+        if has_agent:
+            parts.append(agent_tok.unsqueeze(1).expand(-1, T, -1, -1))  # (B, T, 1, D)
 
-            if has_agent:
-                tokens_this_frame.append(agent_tok)  # (B, 1, D)
-
-            frame_block = torch.cat(tokens_this_frame, dim=1)  # (B, N, D)
-            frame_blocks.append(frame_block)
-
-        x = torch.cat(frame_blocks, dim=1)  # (B, T*N, D)
+        x = torch.cat(parts, dim=2)  # (B, T, N, D_embed)
+        x = x.reshape(B, T * total_tokens_per_frame, -1)  # (B, T*N, D_embed)
 
         temporal_mask = self._get_sliding_window_causal_mask(T, x.device)
         spatial_mask = self._get_spatial_agent_mask(total_tokens_per_frame, x.device) if has_agent else None

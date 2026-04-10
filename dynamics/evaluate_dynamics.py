@@ -316,7 +316,9 @@ def autoregressive_rollout(
 
         z_gt = z_clean_full[:, t_target:t_target + 1]
         mse_per_step[h] = ((z_gen - z_gt) ** 2).mean()
-        generated.append(z_gen)
+        # Detach before storing — prevents holding the denoise graph across
+        # the whole rollout horizon.
+        generated.append(z_gen.detach())
 
         tau_gen = torch.full((B, 1), tau_ctx_val, device=device)
         z_gen_noised, _ = add_noise(z_gen, tau_gen)
@@ -416,20 +418,20 @@ def main(args: Optional[list[str]] = None) -> None:
 
     tau_edges = torch.linspace(0.0, 1.0, steps=opts.tau_bins + 1, device=device)
     tau_sum = torch.zeros(opts.tau_bins, dtype=torch.float64, device=device)
-    tau_count = torch.zeros(opts.tau_bins, dtype=torch.long, device=device)
+    tau_count = torch.zeros(opts.tau_bins, dtype=torch.int32, device=device)
 
     log2_kmax = int(math.log2(dynamics_cfg.K_max))
     d_values = torch.tensor([1.0 / (2 ** k) for k in range(log2_kmax + 1)], device=device)
     num_d = d_values.numel()
     d_sum = torch.zeros(num_d, dtype=torch.float64, device=device)
-    d_count = torch.zeros(num_d, dtype=torch.long, device=device)
+    d_count = torch.zeros(num_d, dtype=torch.int32, device=device)
 
     joint_sum = torch.zeros((opts.tau_bins, num_d), dtype=torch.float64, device=device)
-    joint_count = torch.zeros((opts.tau_bins, num_d), dtype=torch.long, device=device)
+    joint_count = torch.zeros((opts.tau_bins, num_d), dtype=torch.int32, device=device)
 
     # Accumulate on-device — no .item() calls in the loop
     overall_sum_t = torch.tensor(0.0, dtype=torch.float64, device=device)
-    overall_count_t = torch.tensor(0, dtype=torch.long, device=device)
+    overall_count_t = torch.tensor(0, dtype=torch.int32, device=device)
 
     action_delta_sum = None
     action_true_mse_sum = None
@@ -475,14 +477,14 @@ def main(args: Optional[list[str]] = None) -> None:
             for i in range(opts.tau_bins):
                 mask_i = (tau_bin_idx == i)
                 tau_sum[i] += (mse_flat * mask_i.float()).sum().double()
-                tau_count[i] += mask_i.sum()
+                tau_count[i] += mask_i.float().sum().int()
 
             # D-bucket metrics — vectorized
             d_flat = d.reshape(-1)
             for j in range(num_d):
                 mask_j = torch.isclose(d_flat, d_values[j])
                 d_sum[j] += (mse_flat * mask_j.float()).sum().double()
-                d_count[j] += mask_j.sum()
+                d_count[j] += mask_j.float().sum().int()
 
             # Joint tau x d metrics — vectorized
             for i in range(opts.tau_bins):
@@ -491,11 +493,11 @@ def main(args: Optional[list[str]] = None) -> None:
                     mask_j = torch.isclose(d_flat, d_values[j])
                     mask_ij = mask_i & mask_j
                     joint_sum[i, j] += (mse_flat * mask_ij.float()).sum().double()
-                    joint_count[i, j] += mask_ij.sum()
+                    joint_count[i, j] += mask_ij.float().sum().int()
 
             # Action shuffle sensitivity
             if B > 1:
-                perm = torch.randperm(B, device=device)
+                perm = torch.randperm(B).to(device)
                 shuffled_actions = actions[perm]
                 z_hat_shuf = trainer.model(z_noised, shuffled_actions, tau, d).z_hat
 
@@ -541,18 +543,14 @@ def main(args: Optional[list[str]] = None) -> None:
     gif_paths: list[Path] = []
     if gif_data and opts.max_gifs > 0:
         print(f"[INFO] Generating {len(gif_data)} GIFs...")
-        # Move model to CPU for decoding to avoid TPU sync issues
-        tokenizer_cpu = trainer.tokenizer.cpu()
-        tokenizer_cpu.eval()
         for idx, (vis_frames, vis_clean, vis_pred) in enumerate(gif_data):
-            recon_clean = decode_latents_to_frames(tokenizer_cpu, vis_clean)[0]
-            recon_pred = decode_latents_to_frames(tokenizer_cpu, vis_pred)[0]
+            recon_clean = decode_latents_to_frames(trainer.tokenizer, vis_clean.to(device))[0].cpu()
+            recon_pred = decode_latents_to_frames(trainer.tokenizer, vis_pred.to(device))[0].cpu()
             combined = torch.cat([vis_frames[0], recon_clean, recon_pred], dim=3)
             gif_path = output_dir / f"step_{idx:03d}_gt_clean_pred.gif"
             save_video_gif(combined, gif_path, fps=opts.gif_fps)
             gif_paths.append(gif_path)
-        # Move tokenizer back to device for rollout
-        trainer.tokenizer.to(device)
+            mark_step()
         print(f"[INFO] GIFs done.")
 
     # ── Autoregressive Rollout Evaluation ──────────────────────────────
@@ -631,16 +629,14 @@ def main(args: Optional[list[str]] = None) -> None:
     # Generate rollout GIFs after the loop
     if rollout_gif_data and opts.max_gifs > 0:
         print(f"[INFO] Generating {len(rollout_gif_data)} rollout GIFs...")
-        tokenizer_cpu = trainer.tokenizer.cpu()
-        tokenizer_cpu.eval()
         for idx, (vis_gt, vis_rollout) in enumerate(rollout_gif_data):
-            frames_gt = decode_latents_to_frames(tokenizer_cpu, vis_gt)[0]
-            frames_pred = decode_latents_to_frames(tokenizer_cpu, vis_rollout)[0]
+            frames_gt = decode_latents_to_frames(trainer.tokenizer, vis_gt.to(device))[0].cpu()
+            frames_pred = decode_latents_to_frames(trainer.tokenizer, vis_rollout.to(device))[0].cpu()
             combined = torch.cat([frames_gt, frames_pred], dim=3)
             gif_path = output_dir / f"rollout_{idx:03d}_gt_vs_pred.gif"
             save_video_gif(combined, gif_path, fps=opts.gif_fps)
             rollout_gif_paths.append(gif_path)
-        trainer.tokenizer.to(device)
+            mark_step()
         print(f"[INFO] Rollout GIFs done.")
 
     # ── Rollout Reporting ──────────────────────────────────────────────

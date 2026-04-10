@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import pickle
 from dataclasses import dataclass
 from typing import Dict, Iterator, Optional
@@ -102,6 +103,8 @@ class TokenizerTrainer:
             "optimizer": self.optimizer.state_dict(),
         }
         save_checkpoint(state, path, self.device)
+        del state
+        gc.collect()
         if is_master():
             print(f"Saved tokenizer checkpoint to {path}")
 
@@ -181,11 +184,12 @@ class TokenizerTrainer:
                 self.global_step += 1
 
                 # Accumulate on-device — no .item() sync per step
-                _log_loss += loss.detach()
-                _log_mse += loss_outputs.mse_loss.detach()
-                _log_lpips += loss_outputs.lpips_loss.detach() if loss_outputs.lpips_loss is not None else 0.0
-                _log_grad_norm += grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm
-                _log_mask_ratio += loss_outputs.mask_ratio.detach()
+                _log_loss.add_(loss.detach())
+                _log_mse.add_(loss_outputs.mse_loss.detach())
+                if loss_outputs.lpips_loss is not None:
+                    _log_lpips.add_(loss_outputs.lpips_loss.detach())
+                _log_grad_norm.add_(grad_norm.detach() if isinstance(grad_norm, torch.Tensor) else grad_norm)
+                _log_mask_ratio.add_(loss_outputs.mask_ratio.detach())
                 _log_count += 1
 
                 if self.global_step % log_interval == 0:
@@ -220,16 +224,16 @@ class TokenizerTrainer:
                     # Reset on ALL processes — prevents unbounded accumulation
                     _log_loss.zero_()
                     _log_mse.zero_()
-                    _log_lpips.zero_() if isinstance(_log_lpips, torch.Tensor) else None
+                    _log_lpips.zero_()
                     _log_grad_norm.zero_()
                     _log_mask_ratio.zero_()
                     _log_count = 0
 
             # Accumulate on-device — no .item() sync per step
-            total_loss += loss_outputs.total_loss.detach()
-            total_mse += loss_outputs.mse_loss.detach()
+            total_loss.add_(loss_outputs.total_loss.detach())
+            total_mse.add_(loss_outputs.mse_loss.detach())
             if loss_outputs.lpips_loss is not None:
-                total_lpips += loss_outputs.lpips_loss.detach()
+                total_lpips.add_(loss_outputs.lpips_loss.detach())
             total_steps += 1
 
         # Single .item() at epoch end — one sync instead of N

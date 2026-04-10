@@ -5,7 +5,6 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 from .config import TokenizerConfig
-from device_utils import get_ordinal
 
 class VideoDataset(IterableDataset, abc.ABC):
     """Abstract base class for video datasets."""
@@ -48,12 +47,17 @@ class DMControlDataset(VideoDataset):
     def __iter__(self) -> Iterator[torch.Tensor]:
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None:
+            # Main process — safe to import torch_xla via device_utils
+            from device_utils import get_ordinal
+            ordinal = get_ordinal()
             seed = np.random.randint(0, 2**32 - 1)
         else:
+            # Worker process — do NOT import device_utils (triggers torch_xla / libtpu init)
+            ordinal = 0
             seed = worker_info.seed % (2**32 - 1)
 
         # Offset seed per TPU device so each chip gets different data
-        seed = (seed + get_ordinal() * 17) % (2**32 - 1)
+        seed = (seed + ordinal * 17) % (2**32 - 1)
         np.random.seed(seed)
         env = self._get_env(seed=seed)
         
@@ -153,7 +157,7 @@ class OfflineDataset(VideoDataset):
         batch_size: int = 16,
         steps_per_epoch: int = 1000,
     ):
-        data = np.load(path)
+        data = np.load(path, mmap_mode='r')
         self.frames = data["frames"]    # (N, T, H, W, 3)
         self.actions = data["actions"]  # (N, T, action_dim)
         T_total = self.frames.shape[1]
@@ -167,8 +171,17 @@ class OfflineDataset(VideoDataset):
         self.episode_len = T_total
 
     def __iter__(self) -> Iterator[torch.Tensor]:
-        # Offset seed per TPU device so each chip gets different data
-        seed = (np.random.randint(0, 2**32 - 1) + get_ordinal() * 17) % (2**32 - 1)
+        # Offset seed per DataLoader worker and TPU device for data diversity
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            from device_utils import get_ordinal
+            ordinal = get_ordinal()
+            seed = np.random.randint(0, 2**32 - 1)
+        else:
+            # Worker process — do NOT import device_utils (triggers torch_xla / libtpu init)
+            ordinal = 0
+            seed = worker_info.seed % (2**32 - 1)
+        seed = (seed + ordinal * 17) % (2**32 - 1)
         np.random.seed(seed)
         for _ in range(self.steps_per_epoch):
             idxs = np.random.randint(0, self.num_episodes, size=self.batch_size)

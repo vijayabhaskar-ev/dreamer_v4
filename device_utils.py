@@ -6,6 +6,8 @@ device-specific branches scattered throughout.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 
@@ -45,8 +47,13 @@ def get_world_size() -> int:
 
 def get_ordinal() -> int:
     if _XLA_AVAILABLE:
-        import torch_xla.core.xla_model as xm
-        return xm.get_ordinal()
+        try:
+            import torch_xla.core.xla_model as xm
+            return xm.get_ordinal()
+        except RuntimeError:
+            # DataLoader worker processes can't access TPU devices.
+            # Fall back to 0; worker_info.id provides per-worker diversity.
+            return 0
     return 0
 
 
@@ -119,6 +126,30 @@ def mark_step() -> None:
     if _XLA_AVAILABLE:
         import torch_xla.core.xla_model as xm
         xm.mark_step()
+
+
+# ---------------------------------------------------------------------------
+# XLA compilation cache (persists compiled graphs across restarts)
+# ---------------------------------------------------------------------------
+
+def initialize_xla_cache(cache_dir: Optional[str] = None) -> None:
+    """Enable persistent XLA compilation cache. No-op on CUDA/CPU.
+
+    Honors ``$XLA_CACHE_DIR`` if set, else ``$TMPDIR/xla_cache`` if set,
+    else falls back to ``/tmp/xla_cache``. This lets TPU VMs with a broken
+    /tmp point the cache at a writable location (e.g., ``~/xla_cache``)
+    without code changes.
+    """
+    import os
+    if cache_dir is None:
+        cache_dir = os.environ.get('XLA_CACHE_DIR')
+        if cache_dir is None:
+            tmpdir = os.environ.get('TMPDIR')
+            cache_dir = f'{tmpdir}/xla_cache' if tmpdir else '/tmp/xla_cache'
+    os.makedirs(cache_dir, exist_ok=True)
+    if _XLA_AVAILABLE:
+        import torch_xla.runtime as xr
+        xr.initialize_cache(cache_dir, readonly=False)
 
 
 # ---------------------------------------------------------------------------

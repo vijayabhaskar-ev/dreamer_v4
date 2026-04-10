@@ -143,7 +143,7 @@ class ModelStatistics:
         for key, params in groups.items():
             if not params:
                 continue
-            sq_sum = sum(p.norm(2) ** 2 for p in params)
+            sq_sum = torch.stack([p.norm(2) ** 2 for p in params]).sum()
             stats[f"model/{key}_weight_norm"] = sq_sum.sqrt().item()
             group_max = torch.stack([p.abs().max() for p in params]).max()
             max_weight_t = group_max if max_weight_t is None else torch.maximum(max_weight_t, group_max)
@@ -190,7 +190,7 @@ class ModelStatistics:
         for key, grads in groups.items():
             if not grads:
                 continue
-            sq_sum = sum(g.norm(2) ** 2 for g in grads)
+            sq_sum = torch.stack([g.norm(2) ** 2 for g in grads]).sum()
             stats[f"model/{key}_grad_norm"] = sq_sum.sqrt().item()
 
         return stats
