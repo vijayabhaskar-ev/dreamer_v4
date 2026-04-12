@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+# MUST be first: sets env vars (inductor thread count, XLA cache dir) that
+# PyTorch reads at import time. Placing this after `import torch` is too late.
+import _env_setup  # noqa: F401  (side-effect import)
+
 import argparse
 import os
 from datetime import datetime

@@ -100,6 +100,64 @@ def _xla_safe_clip_grad_norm(params, max_norm: float) -> torch.Tensor:
     return total_norm
 
 
+class _DetachedParamView:
+    """CPU snapshot of a model's parameters and grads for diagnostic stats.
+
+    On XLA, running torch.stack/.norm/.item over live device parameters
+    creates new compiled graphs every interval (one per group, per call,
+    per Python iteration order).  Building a CPU copy once per interval
+    and running the same stat ops on the CPU copy keeps the XLA graph
+    untouched while preserving the wandb dashboards.
+
+    Single host sync per build (the .to('cpu') triggers torch_xla.sync()
+    implicitly).  Cost on a 47M-param model: ~200 ms per build.
+
+    Compatible with ModelStatistics.compute_weight_stats /
+    compute_gradient_stats — they only call .named_parameters() and
+    read .data / .grad, all of which this view supports.
+
+    Also captures the optimizer param-group structure (params + weight_decay)
+    so _compute_wd_metrics can iterate it without touching device tensors.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer | None = None,
+        include_grads: bool = True,
+    ):
+        # Build id(device_param) → cpu copy mapping while we walk the model.
+        self._items: list[tuple[str, torch.nn.Parameter]] = []
+        id_to_cpu: dict[int, torch.nn.Parameter] = {}
+        for name, p in model.named_parameters():
+            cpu_data = p.detach().to('cpu', copy=True)
+            cpu_p = torch.nn.Parameter(cpu_data, requires_grad=p.requires_grad)
+            if include_grads and p.grad is not None:
+                cpu_p.grad = p.grad.detach().to('cpu', copy=True)
+            self._items.append((name, cpu_p))
+            id_to_cpu[id(p)] = cpu_p
+
+        # Mirror the optimizer param groups using the CPU copies, preserving
+        # the weight_decay attribute that _compute_wd_metrics needs.
+        self.optimizer_groups: list[dict] = []
+        if optimizer is not None:
+            for group in optimizer.param_groups:
+                cpu_params = [
+                    id_to_cpu[id(p)] for p in group["params"]
+                    if id(p) in id_to_cpu
+                ]
+                self.optimizer_groups.append({
+                    "params": cpu_params,
+                    "weight_decay": group.get("weight_decay", 0.0),
+                })
+
+    def named_parameters(self):
+        return iter(self._items)
+
+    def parameters(self):
+        return (p for _, p in self._items)
+
+
 @dataclass
 class DynamicsTrainingConfig:
     """
@@ -128,7 +186,7 @@ class DynamicsTrainingConfig:
     log_interval: int = 10
     log_smooth_window: int = 10
     log_model_stats: bool = True
-    log_model_stats_interval: int = 50
+    log_model_stats_interval: int = 100
     log_memory: bool = True
     # Phase 2: agent finetuning
     train_heads: bool = False           # False for Phase 1, True for Phase 2
@@ -206,6 +264,8 @@ class DynamicsTrainer:
         self.global_step = 0
         self._last_lr_bucket = -1
         self._cached_clip_params: list[torch.nn.Parameter] | None = None
+        self._compile_warning_emitted = False
+        self._rss_warning_emitted = False
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
 
@@ -270,6 +330,11 @@ class DynamicsTrainer:
                 {"params": head_no_decay, "weight_decay": 0.0, "lr_multiplier": "head"},
             ])
 
+        # NOTE: capturable=True + tensor-valued lr was tried as a way to avoid
+        # baking the LR into the XLA graph, but it caused a NaN at ~step 50 on
+        # this torch_xla build.  Reverted to the stock Python-float LR path;
+        # compile count is still bounded because _LR_BUCKETS=2 quantizes the
+        # schedule to 3 distinct values (and the warmup loop covers them).
         self.optimizer = torch.optim.AdamW(param_groups, lr=cfg.lr)
 
     # ── Phase 2 setup ───────────────────────────────────────────────────
@@ -340,13 +405,21 @@ class DynamicsTrainer:
         self._schedule_base_lr = self.training_cfg.lr
    
 
+    # Number of discrete LR values the schedule can take on.  Each unique
+    # LR becomes a compile-time constant in the XLA graph, so the total
+    # compilation count is LR_BUCKETS × num_curriculum_phases × num_shapes.
+    # For a 47M-param model, each compiled train_step graph pins ~500MB–1GB
+    # of host RAM (HLO IR + PJRT executable + param/optimizer layouts).
+    # 10 × 3 × 2 = 60 graphs × ~1GB = ~60GB of host cache, which OOM-killed
+    # prior v4-8 runs.  Reducing LR_BUCKETS is the highest-leverage lever.
+    _LR_BUCKETS = 2
+
     def _set_lr_from_schedule(self) -> None:
         """Set optimizer LR from schedule, quantized to reduce XLA recompilations.
 
-        Each unique LR value creates a new XLA graph compilation (~50-100MB
-        cache entry). With 4 code path variants (full/single × boot/no-boot),
-        each LR bucket costs ~4 compilations. We use only 10 buckets → max
-        ~40 compiled graphs total, keeping XLA cache under ~2-4GB.
+        LR is a compile-time constant in the XLA graph — every distinct value
+        triggers a new compilation.  We therefore quantize the cosine + warmup
+        schedule to ``_LR_BUCKETS + 1`` discrete values.
 
         Phase 2: dynamics groups get lr * dynamics_lr_multiplier,
                  head groups get lr * head_lr_multiplier.
@@ -364,13 +437,14 @@ class DynamicsTrainer:
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             frac = max(min_lr / base_lr, cosine)
 
-        # Quantize to 10 buckets → max ~40 XLA compilations (10 × 4 code paths)
-        bucket = int(frac * 10)
+        # Quantize the schedule to few discrete LR values.  See the comment
+        # on ``_LR_BUCKETS`` above for the compilation-count math.
+        bucket = int(frac * self._LR_BUCKETS)
         if bucket == self._last_lr_bucket:
             return  # Same bucket, no LR change, no recompilation
         self._last_lr_bucket = bucket
 
-        lr = base_lr * (bucket / 10.0)
+        lr = base_lr * (bucket / float(self._LR_BUCKETS))
         cfg = self.training_cfg
         for group in self.optimizer.param_groups:
             if cfg.train_heads and group.get("lr_multiplier") == "head":
@@ -387,15 +461,28 @@ class DynamicsTrainer:
         loader_short: DataLoader,
         loader_long: DataLoader,
     ) -> None:
-        """Pre-compile XLA graphs for both sequence lengths.
+        """Pre-compile every XLA graph variant the training loop can produce.
 
-        Runs one dummy forward+backward for each loader so both graphs are
-        cached before real training begins.  Resets optimizer state and XLA
-        metrics afterward.  Complete no-op on CUDA/CPU.
+        ``_run_epoch`` has several orthogonal Python-level code paths that each
+        create a distinct compiled XLA graph.  If any combination is left
+        uncovered here, the first real training step that hits it will compile
+        on demand, pinning another ~1 GB of host RAM per miss.  Over ~30
+        misses this OOM-kills host memory mid-run.
 
-        Skips the long loader when ``long_batch_ratio == 0`` (no long batches
-        will be used during training).  Preserves optimizer state so this is
-        safe to call after ``load_checkpoint()``.
+        Variant dimensions covered:
+          - sequence shape       : short, long (if long_batch_ratio > 0)
+          - curriculum phase     : warmup / ramp / full
+          - training mode        : train (grad + backward + optimizer)
+                                   val   (no_grad + model.train(False),
+                                          which flips DropPath.forward branch)
+          - use_agent_tokens     : False, True (Phase 2 only; True also
+                                   threads MTP target tensors into the loss)
+          - clip + LR schedule   : exercised inside the training pass so the
+                                   first real step doesn't retrace with the
+                                   clip op + lr.fill_ added.
+
+        Safe to call after ``load_checkpoint()`` — saves and restores optimizer
+        state, global_step, and the last LR bucket.  Complete no-op on CUDA/CPU.
         """
         if not self._is_xla:
             return
@@ -408,14 +495,87 @@ class DynamicsTrainer:
 
         saved_step = self.global_step
         saved_bucket = self._last_lr_bucket
-        saved_opt_state = self.optimizer.state_dict()
-        self.model.train(True)
+
+        # Deep-clone parameters and optimizer state BEFORE tracing. The warmup
+        # loop below calls real optimizer.step() to trace the optimizer graph,
+        # which mutates both the model weights and the optimizer's internal
+        # state (Adam's m/v buffers and the tensor `step` counter under
+        # capturable=True).  Without deep cloning, the post-warmup restore
+        # would either (a) leave drifted weights in place or (b) share the
+        # mutated tensor `step` counter with the "saved" state_dict since
+        # torch.optim.Optimizer.state_dict() only does a shallow copy of
+        # param_groups.  Either path produces NaN at real step 0.
+        with torch.no_grad():
+            saved_model_params = [p.detach().clone() for p in self.model.parameters()]
+            saved_head_params: list[torch.Tensor] = []
+            if self.training_cfg.train_heads:
+                for head in (self.reward_head, self.continue_head, self.policy_head):
+                    saved_head_params.extend(p.detach().clone() for p in head.parameters())
+            # RMSNormalizer running stats (rms_sq) are in-place mutated by
+            # _compute_loss at every training call — synthetic-batch losses
+            # during warmup would poison the EMA, and since these tensors
+            # don't live in model.parameters() they'd otherwise escape the
+            # restore.  Clone the scalar tensor for each normalizer.
+            rms_normalizers = [
+                self.rms_flow, self.rms_bootstrap,
+                self.rms_reward, self.rms_continue, self.rms_bc,
+            ]
+            saved_rms_sq = [n.rms_sq.detach().clone() for n in rms_normalizers]
+        # Deep-copy optimizer state so in-place mutations during warmup
+        # (momentum buffers, step counter) don't leak into the restore.
+        import copy as _copy
+        saved_opt_state = _copy.deepcopy(self.optimizer.state_dict())
+        # Force XLA to materialize the clones NOW, before the warmup loop
+        # starts mutating the originals.  Lazy tensors that haven't been
+        # executed yet can end up referencing the latest IR of their source,
+        # not the IR at clone time.  Syncing here pins the cloned values.
+        import torch_xla as _txla
+        _txla.sync()
+
+        # Pre-populate clip params so _xla_safe_clip_grad_norm is exercised
+        # with its steady-state list, matching what the first real training
+        # step at trainer.py:847 will see.  Without this the first real step
+        # retraces the whole graph with the clip op newly introduced.
+        if self._cached_clip_params is None:
+            all_params = list(self.model.parameters())
+            if self.training_cfg.train_heads:
+                all_params += list(self.reward_head.parameters()) + \
+                    list(self.continue_head.parameters()) + \
+                    list(self.policy_head.parameters())
+            self._cached_clip_params = all_params
 
         # Skip long loader warmup if long batches are never used
         use_long = self.training_cfg.long_batch_ratio > 0
         loaders = [("short", loader_short)]
         if use_long and loader_long is not None:
             loaders.append(("long", loader_long))
+
+        warmup_end = self.training_cfg.curriculum_warmup_steps
+        ramp_end = self.training_cfg.curriculum_ramp_steps
+        K_max = self.dynamics_cfg.K_max
+        mtp_length = self.dynamics_cfg.mtp_length
+
+        # Phase 2 introduces a second use_agent_tokens branch inside
+        # _compute_loss, plus extra MTP target tensors that change the
+        # graph input signature.  Compile both False and True up-front.
+        use_agent_variants = [False]
+        if (self.training_cfg.train_heads and
+                self.model.agent_embedding is not None):
+            use_agent_variants = [False, True]
+
+        # train_mode=False adds a second compiled variant because:
+        #   1. model.train(False) flips DropPath.forward at tokenizer/layers.py:63
+        #      from an identity branch (returns x) to a randn+mul+div branch.
+        #   2. torch.no_grad() eliminates the backward-pass graph entirely.
+        # Both differences are structural, not value-based.
+        train_modes = [True, False]
+
+        # Curriculum phases (same as the _run_epoch branching).
+        phases = [
+            ("warmup", saved_step),      # whatever phase we're actually in (fresh: 0)
+            ("ramp", warmup_end + 1),    # simulate curriculum-ramp phase
+            ("full", ramp_end + 1),      # simulate full-training phase
+        ]
 
         for name, loader in loaders:
             if loader is None:
@@ -432,39 +592,129 @@ class DynamicsTrainer:
                 frames = frames.unsqueeze(1)
 
             B, T = frames.shape[0:2]
+            # Encode frames once per loader — tokenizer output is deterministic
+            # so we can reuse it across all three phase compilations.
             z_clean = self.model.encode_frames(frames)
-            tau, d = sample_tau_and_d(
-                B, T, K_max=self.dynamics_cfg.K_max, device=self.device,
-            )
-            tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
-            z_noised, _ = add_noise(z_clean, tau)
 
-            with torch.amp.autocast(
-                device_type=get_device_type(self.device),
-                enabled=self.training_cfg.amp,
-            ):
-                loss, _ = self._compute_loss(
-                    z_clean, z_noised, actions, tau, d,
-                    training=True, compute_bootstrap=True,
-                    rewards=rewards, dones=dones,
-                    use_agent_tokens=False,
-                )
+            for train_mode in train_modes:
+                self.model.train(train_mode)
+                if self.training_cfg.train_heads:
+                    self.reward_head.train(train_mode)
+                    self.continue_head.train(train_mode)
+                    self.policy_head.train(train_mode)
 
-            self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            torch_xla.sync()
+                for use_agent in use_agent_variants:
+                    for phase_name, phase_step in phases:
+                        # Fast-forward global_step so curriculum / LR schedule
+                        # branches match what _run_epoch will evaluate.
+                        self.global_step = phase_step
+                        # Reset the LR bucket so _set_lr_from_schedule actually
+                        # executes fill_ at least once per phase during warmup.
+                        self._last_lr_bucket = -1
 
-            if is_master():
-                print(f"  [XLA] {name} (T={T}) graph compiled")
+                        tau, d = sample_tau_and_d(
+                            B, T, K_max=K_max, device=self.device,
+                        )
+                        tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
 
-        # Restore optimizer state (preserves Adam momentum from checkpoint)
-        self._build_optimizer()
+                        # Apply the SAME curriculum d-override as _run_epoch
+                        if self.global_step < warmup_end:
+                            d = torch.full_like(d, 1.0 / K_max)
+                        elif self.global_step < ramp_end:
+                            ramp_frac = (self.global_step - warmup_end) / (ramp_end - warmup_end)
+                            self._ramp_tensor.fill_(int(ramp_frac * 3) / 3.0)
+                            mask = torch.rand_like(d) < self._ramp_tensor
+                            d_min_t = torch.full_like(d, 1.0 / K_max)
+                            d = torch.where(mask, d, d_min_t)
+                        # else: Path C, use raw d as-is
+
+                        z_noised, _ = add_noise(z_clean, tau)
+
+                        need_bootstrap = self.global_step >= warmup_end
+
+                        # Build MTP targets when agent tokens are in use, so
+                        # the traced graph input signature matches Phase 2.
+                        rewards_future, dones_future, actions_future = None, None, None
+                        if use_agent and mtp_length > 0:
+                            rewards_future, dones_future = build_mtp_targets(
+                                rewards, dones, mtp_length,
+                            )
+                            actions_future = build_mtp_action_targets(
+                                actions, mtp_length,
+                            )
+
+                        grad_ctx = torch.enable_grad() if train_mode else torch.no_grad()
+                        with grad_ctx, torch.amp.autocast(
+                            device_type=get_device_type(self.device),
+                            enabled=self.training_cfg.amp,
+                        ):
+                            loss, _ = self._compute_loss(
+                                z_clean, z_noised, actions, tau, d,
+                                training=train_mode, compute_bootstrap=need_bootstrap,
+                                rewards=rewards, dones=dones,
+                                use_agent_tokens=use_agent,
+                                rewards_future=rewards_future,
+                                dones_future=dones_future,
+                                actions_future=actions_future,
+                            )
+
+                        if train_mode:
+                            self.optimizer.zero_grad(set_to_none=True)
+                            self.scaler.scale(loss).backward()
+                            self.scaler.unscale_(self.optimizer)
+                            # Exercise the clip path so _cached_clip_params
+                            # and the XLA-safe clip op are in the traced graph.
+                            _xla_safe_clip_grad_norm(
+                                self._cached_clip_params, self.training_cfg.grad_clip,
+                            )
+                            # Exercise the LR schedule path so lr.fill_(...) is
+                            # in the traced graph alongside the optimizer step.
+                            self._set_lr_from_schedule()
+                            self.scaler.step(self.optimizer)
+                            self.scaler.update()
+                        torch_xla.sync()
+
+                        if is_master():
+                            mode_str = "train" if train_mode else "val"
+                            print(
+                                f"  [XLA] {name} (T={T}, phase={phase_name}, "
+                                f"mode={mode_str}, agent={use_agent}, "
+                                f"bootstrap={need_bootstrap}) compiled"
+                            )
+
+        # Restore model weights to pre-warmup values. The warmup loop ran
+        # real optimizer steps that updated the weights; without this restore
+        # the first real training step sees drifted (or worse, NaN-adjacent)
+        # weights and the divergence guard fires at step 0.
+        with torch.no_grad():
+            for p, saved in zip(self.model.parameters(), saved_model_params):
+                p.data.copy_(saved)
+            if self.training_cfg.train_heads:
+                saved_iter = iter(saved_head_params)
+                for head in (self.reward_head, self.continue_head, self.policy_head):
+                    for p in head.parameters():
+                        p.data.copy_(next(saved_iter))
+            # Restore RMSNormalizer running stats — the warmup's synthetic
+            # losses would otherwise leave the EMAs at wildly scaled (or NaN)
+            # values, poisoning loss normalization on the first real step.
+            for normalizer, saved in zip(rms_normalizers, saved_rms_sq):
+                normalizer.rms_sq.copy_(saved)
+
+        # Restore optimizer state (preserves Adam momentum from checkpoint).
+        # Load into the existing optimizer object instead of rebuilding — the
+        # rebuild would change self.optimizer's Python identity, forcing XLA
+        # to recompile the optimizer_step graph on the first real training step.
         self.optimizer.load_state_dict(saved_opt_state)
         self.global_step = saved_step
         self._last_lr_bucket = saved_bucket
+        # Free the cloned tensors now that the restore is done, so they
+        # don't hold HBM for the rest of training.
+        del saved_model_params, saved_head_params, saved_opt_state, saved_rms_sq
+
+        # Release any transient compile scratch buffers before training begins,
+        # maximizing HBM headroom for the first real training step.
+        torch_xla.sync()
+        gc.collect()
         met.clear_all()
 
         if is_master():
@@ -516,13 +766,29 @@ class DynamicsTrainer:
                     epoch_log["epoch/val_bootstrap_normed"] = val_metrics["loss/dynamics_bootstrap_normed"]
                     epoch_log["epoch/val_reward"] = val_metrics["loss/dynamics_reward"]
                     epoch_log["epoch/val_continue"] = val_metrics["loss/dynamics_continue"]
-                wandb.log(epoch_log, step=self.global_step)
+                # commit=True forces wandb to flush its in-memory event buffer
+                # to disk (offline mode) or to the server (online mode).  Without
+                # this, offline-mode runs accumulate every logged dict in RAM
+                # until wandb.finish() — over a 300-epoch run that's GBs of
+                # serialized payloads pinned in the master process.
+                wandb.log(epoch_log, step=self.global_step, commit=True)
+
+                # Surface the XLA compile count in the epoch line so host-RAM
+                # blow-ups from runaway recompilation are immediately visible
+                # in the training terminal (not just in wandb).
+                compile_str = ""
+                if self._is_xla:
+                    import torch_xla.debug.metrics as met
+                    cd = met.metric_data('CompileTime')
+                    if cd is not None:
+                        compile_str = f" xla_compiles={int(cd[0])}"
 
                 print(
                     f"Epoch {epoch}: train_loss={train_metrics['loss/dynamics_total']:.4f} "
                     f"flow={train_metrics['loss/dynamics_flow']:.4f} "
                     f"bootstrap={train_metrics['loss/dynamics_bootstrap']:.4f}"
                     + (f" val_loss={val_metrics['loss/dynamics_total']:.4f}" if val_metrics else "")
+                    + compile_str
                 )
 
             if (
@@ -700,6 +966,12 @@ class DynamicsTrainer:
                 try:
                     batch = next(long_iter)
                 except StopIteration:
+                    # Explicitly drop the exhausted iterator before allocating
+                    # a new one — _MultiProcessingDataLoaderIter holds refs to
+                    # worker queues + prefetched batches that otherwise leak
+                    # across long-loader epoch boundaries.
+                    del long_iter
+                    gc.collect()
                     long_iter = iter(loader_long)
                     batch = next(long_iter)
             else:
@@ -787,15 +1059,19 @@ class DynamicsTrainer:
 
                 # Divergence guard — check grad_norm for NaN/Inf every 50 steps.
                 # Costs one host sync per check, but only every 50 steps so the
-                # amortized overhead is negligible. Raises instead of letting
-                # XLA crash with BrokenProcessPool and no traceback.
+                # amortized overhead is negligible.  On NaN, dumps the sub-losses
+                # so we can pinpoint which term went bad without needing another run.
                 if self.global_step % 50 == 0 and isinstance(grad_norm, torch.Tensor):
                     gn_val = grad_norm.item()
                     if not math.isfinite(gn_val):
                         loss_val = loss.item()
+                        sub = {k: float(v.detach().item())
+                               for k, v in metrics.items()
+                               if isinstance(v, torch.Tensor) and v.numel() == 1}
                         raise RuntimeError(
                             f"[FATAL] Training diverged at step {self.global_step}: "
-                            f"grad_norm={gn_val}, loss={loss_val}. "
+                            f"grad_norm={gn_val}, loss={loss_val}, "
+                            f"sub_losses={sub}. "
                             f"Check loss scaling / LR / curriculum."
                         )
 
@@ -857,16 +1133,68 @@ class DynamicsTrainer:
                             import torch_xla.debug.metrics as met
                             compile_data = met.metric_data('CompileTime')
                             if compile_data is not None:
-                                smoothed_metrics['xla/total_compilations'] = compile_data[0]
+                                n_compiles = compile_data[0]
+                                smoothed_metrics['xla/total_compilations'] = n_compiles
                                 smoothed_metrics['xla/total_compile_time_s'] = compile_data[1]
+                                # Guard rail: warn loudly if compile count is
+                                # leaking new graph variants.  Target after the
+                                # CPU-offload model_stats fix is ≤25.
+                                if n_compiles > 25 and not self._compile_warning_emitted:
+                                    print(
+                                        f"[WARN] XLA compilation count is "
+                                        f"{n_compiles} — expected ≤25. New "
+                                        f"graph variants are leaking. Check "
+                                        f"train/val, LR bucket handling, "
+                                        f"agent-token branches, and any new "
+                                        f"Python-scalar-in-tensor ops. Host "
+                                        f"RAM will OOM if this keeps climbing."
+                                    )
+                                    self._compile_warning_emitted = True
+
+                            # Host-RAM guard rail: read RSS from /proc/self/status
+                            # (no psutil dependency — works on all Linux).
+                            try:
+                                with open('/proc/self/status') as _f:
+                                    for _line in _f:
+                                        if _line.startswith('VmRSS:'):
+                                            rss_kb = int(_line.split()[1])
+                                            rss_gb = rss_kb / (1024 ** 2)
+                                            smoothed_metrics['host/rss_gb'] = rss_gb
+                                            if rss_gb > 60 and not self._rss_warning_emitted:
+                                                print(
+                                                    f"[WARN] Host RSS is {rss_gb:.1f} GB "
+                                                    f"— approaching the OOM threshold. "
+                                                    f"Compile count: {int(n_compiles) if compile_data is not None else 'unknown'}."
+                                                )
+                                                self._rss_warning_emitted = True
+                                            break
+                            except OSError:
+                                pass
 
                         if self.training_cfg.log_memory:
                             smoothed_metrics.update(GPUMemoryTracker.get_memory_stats(self.device))
 
                         if self.training_cfg.log_model_stats and self.global_step % model_stats_interval == 0:
-                            smoothed_metrics.update(ModelStatistics.compute_weight_stats(self.model))
-                            smoothed_metrics.update(ModelStatistics.compute_gradient_stats(self.model))
-                            smoothed_metrics.update(self._compute_wd_metrics())
+                            if self._is_xla:
+                                # CPU offload: build a single host-side snapshot
+                                # of weights+grads and run all the stat ops on
+                                # CPU.  Keeps the XLA graph clean (no per-group
+                                # torch.stack/.norm/.item compiles) while still
+                                # producing the wandb dashboard values.
+                                with torch.no_grad():
+                                    cpu_view = _DetachedParamView(
+                                        self.model,
+                                        optimizer=self.optimizer,
+                                        include_grads=True,
+                                    )
+                                smoothed_metrics.update(ModelStatistics.compute_weight_stats(cpu_view))
+                                smoothed_metrics.update(ModelStatistics.compute_gradient_stats(cpu_view))
+                                smoothed_metrics.update(self._compute_wd_metrics(cpu_view=cpu_view))
+                                del cpu_view
+                            else:
+                                smoothed_metrics.update(ModelStatistics.compute_weight_stats(self.model))
+                                smoothed_metrics.update(ModelStatistics.compute_gradient_stats(self.model))
+                                smoothed_metrics.update(self._compute_wd_metrics())
 
                         wandb.log(smoothed_metrics, step=self.global_step)
 
@@ -898,12 +1226,15 @@ class DynamicsTrainer:
 
             # Periodic GC to free Python-side refs to XLA tensors and numpy copies.
             # Without this, host memory grows linearly (~50MB/step from stale refs).
-            if total_steps % 50 == 0:
+            # On XLA, run more often (every 20 steps) to keep stale wrappers from
+            # holding device buffers alive across many compiled-program executions.
+            gc_interval = 20 if self._is_xla else 50
+            if total_steps % gc_interval == 0:
                 gc.collect()
 
         # Single .item() at epoch end — one sync instead of N
         n = max(total_steps, 1)
-        return {
+        epoch_metrics = {
             "loss/dynamics_total": (total_loss / n).item(),
             "loss/dynamics_flow": (total_flow / n).item(),
             "loss/dynamics_bootstrap": (total_bootstrap / n).item(),
@@ -913,20 +1244,42 @@ class DynamicsTrainer:
             "loss/dynamics_continue": (total_continue / n).item(),
             "loss/dynamics_bc": (total_bc / n).item(),
         }
+        # Explicitly drop on-device accumulators so any Python references to
+        # the underlying graph subtrees are released before the next epoch.
+        # Each is a scalar so the bytes saved are tiny, but the IR cleanup
+        # prevents stale graph nodes from pinning compiled-program buffers.
+        del total_loss, total_flow, total_bootstrap
+        del total_flow_normed, total_bootstrap_normed
+        del total_reward, total_continue, total_bc
+        del _log_loss, _log_flow, _log_bootstrap
+        del _log_flow_normed, _log_bootstrap_normed
+        del _log_reward, _log_continue, _log_bc
+        del _log_grad_norm, _log_tau, _log_d
+        if self._is_xla:
+            gc.collect()
+        return epoch_metrics
 
     # ── Loss computation ────────────────────────────────────────────────
 
-    def _compute_wd_metrics(self) -> Dict[str, float]:
+    def _compute_wd_metrics(self, cpu_view: "_DetachedParamView | None" = None) -> Dict[str, float]:
         """Per-group effective weight decay: wd * sum(||p||^2).
 
         Shows how much regularization each group contributes.
         Only called at model_stats_interval so .item() syncs are acceptable.
+
+        On XLA, pass a pre-built ``cpu_view`` and the iteration runs over
+        the CPU snapshot of the optimizer's param groups instead of touching
+        the live device tensors — keeps the XLA graph clean.
         """
         names = ["attn_ff", "no_decay", "default"]
         if self.training_cfg.train_heads:
             names.extend(["head_decay", "head_no_decay"])
+        groups_iter = (
+            cpu_view.optimizer_groups if cpu_view is not None
+            else self.optimizer.param_groups
+        )
         metrics = {}
-        for name, group in zip(names, self.optimizer.param_groups):
+        for name, group in zip(names, groups_iter):
             wd = group["weight_decay"]
             if wd == 0.0:
                 continue

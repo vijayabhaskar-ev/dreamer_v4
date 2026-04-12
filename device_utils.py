@@ -132,13 +132,23 @@ def mark_step() -> None:
 # XLA compilation cache (persists compiled graphs across restarts)
 # ---------------------------------------------------------------------------
 
-def initialize_xla_cache(cache_dir: Optional[str] = None) -> None:
+def initialize_xla_cache(
+    cache_dir: Optional[str] = None,
+    max_size_gb: float = 15.0,
+) -> None:
     """Enable persistent XLA compilation cache. No-op on CUDA/CPU.
 
+    Design:
+    - Single shared cache directory across all TPU processes (rank 0..N-1)
+    - Only rank 0 writes; ranks 1..N-1 are read-only
+      → avoids concurrent-write corruption AND the N-fold disk bloat that
+      per-rank caches produce
+    - Auto-clear on rank 0 if the cache exceeds ``max_size_gb``
+      → safety net against stale entries accumulating over weeks
+
     Honors ``$XLA_CACHE_DIR`` if set, else ``$TMPDIR/xla_cache`` if set,
-    else falls back to ``/tmp/xla_cache``. This lets TPU VMs with a broken
-    /tmp point the cache at a writable location (e.g., ``~/xla_cache``)
-    without code changes.
+    else falls back to ``/tmp/xla_cache``. Set ``XLA_CACHE_DIR=~/xla_cache``
+    to put the cache in your home directory where you can manage it.
     """
     import os
     if cache_dir is None:
@@ -146,10 +156,78 @@ def initialize_xla_cache(cache_dir: Optional[str] = None) -> None:
         if cache_dir is None:
             tmpdir = os.environ.get('TMPDIR')
             cache_dir = f'{tmpdir}/xla_cache' if tmpdir else '/tmp/xla_cache'
+
     os.makedirs(cache_dir, exist_ok=True)
-    if _XLA_AVAILABLE:
-        import torch_xla.runtime as xr
-        xr.initialize_cache(cache_dir, readonly=False)
+
+    if not _XLA_AVAILABLE:
+        return
+
+    import torch_xla.runtime as xr
+
+    # Determine whether this process is the writer (rank 0) or a read-only
+    # reader (any other rank). If ordinal lookup fails (e.g., PJRT not yet
+    # initialized), default to writer — single-process fallback.
+    try:
+        ordinal = xr.global_ordinal()
+    except Exception:
+        ordinal = 0
+    is_writer = (ordinal == 0)
+
+    # Auto-clear the cache on rank 0 if it exceeds the size limit, AND
+    # delete any zero-byte files left behind by a crash mid-write.
+    # A zero-byte .xla_proto would cause torch_xla to die later with
+    # "TfrtTpuExecutable proto deserialization failed" when it tries to
+    # load it, which is unrecoverable inside the TPU runtime.
+    if is_writer:
+        try:
+            size_bytes = 0
+            file_count = 0
+            zero_byte_files = []
+            for dirpath, _, filenames in os.walk(cache_dir):
+                for f in filenames:
+                    fpath = os.path.join(dirpath, f)
+                    try:
+                        sz = os.path.getsize(fpath)
+                    except OSError:
+                        continue
+                    size_bytes += sz
+                    file_count += 1
+                    if sz == 0:
+                        zero_byte_files.append(fpath)
+
+            size_gb = size_bytes / (1024 ** 3)
+
+            if zero_byte_files:
+                print(
+                    f"[XLA] Found {len(zero_byte_files)} zero-byte cache "
+                    f"file(s) (likely half-written from a prior crash). "
+                    f"Deleting to prevent deserialize error."
+                )
+                for fpath in zero_byte_files:
+                    try:
+                        os.remove(fpath)
+                    except OSError as e:
+                        print(f"[XLA]   Could not delete {fpath}: {e}")
+
+            if size_gb > max_size_gb:
+                import shutil
+                print(
+                    f"[XLA] Cache at {cache_dir} is {size_gb:.1f} GB "
+                    f"(> {max_size_gb} GB limit). Clearing..."
+                )
+                shutil.rmtree(cache_dir)
+                os.makedirs(cache_dir, exist_ok=True)
+                file_count = 0
+                size_gb = 0.0
+
+            print(
+                f"[XLA] Cache at {cache_dir}: "
+                f"{file_count} files, {size_gb:.2f} GB"
+            )
+        except Exception as e:
+            print(f"[XLA] Cache size check failed: {e}")
+
+    xr.initialize_cache(cache_dir, readonly=not is_writer)
 
 
 # ---------------------------------------------------------------------------
