@@ -463,26 +463,21 @@ class DynamicsTrainer:
     ) -> None:
         """Pre-compile every XLA graph variant the training loop can produce.
 
-        ``_run_epoch`` has several orthogonal Python-level code paths that each
-        create a distinct compiled XLA graph.  If any combination is left
-        uncovered here, the first real training step that hits it will compile
-        on demand, pinning another ~1 GB of host RAM per miss.  Over ~30
-        misses this OOM-kills host memory mid-run.
+        Runs real forward+backward+optimizer steps with **LR forced to zero**
+        so the optimizer graph is fully traced without mutating model weights.
+        No save/restore of parameters or optimizer state — that approach
+        breaks XLA's tensor-identity tracking and causes a 16× per-step
+        throughput regression.
 
         Variant dimensions covered:
           - sequence shape       : short, long (if long_batch_ratio > 0)
           - curriculum phase     : warmup / ramp / full
           - training mode        : train (grad + backward + optimizer)
-                                   val   (no_grad + model.train(False),
-                                          which flips DropPath.forward branch)
-          - use_agent_tokens     : False, True (Phase 2 only; True also
-                                   threads MTP target tensors into the loss)
-          - clip + LR schedule   : exercised inside the training pass so the
-                                   first real step doesn't retrace with the
-                                   clip op + lr.fill_ added.
+                                   val   (no_grad + model.train(False))
+          - use_agent_tokens     : False, True (Phase 2 only)
+          - clip + LR schedule   : exercised inside the training pass
 
-        Safe to call after ``load_checkpoint()`` — saves and restores optimizer
-        state, global_step, and the last LR bucket.  Complete no-op on CUDA/CPU.
+        Complete no-op on CUDA/CPU.
         """
         if not self._is_xla:
             return
@@ -496,46 +491,7 @@ class DynamicsTrainer:
         saved_step = self.global_step
         saved_bucket = self._last_lr_bucket
 
-        # Deep-clone parameters and optimizer state BEFORE tracing. The warmup
-        # loop below calls real optimizer.step() to trace the optimizer graph,
-        # which mutates both the model weights and the optimizer's internal
-        # state (Adam's m/v buffers and the tensor `step` counter under
-        # capturable=True).  Without deep cloning, the post-warmup restore
-        # would either (a) leave drifted weights in place or (b) share the
-        # mutated tensor `step` counter with the "saved" state_dict since
-        # torch.optim.Optimizer.state_dict() only does a shallow copy of
-        # param_groups.  Either path produces NaN at real step 0.
-        with torch.no_grad():
-            saved_model_params = [p.detach().clone() for p in self.model.parameters()]
-            saved_head_params: list[torch.Tensor] = []
-            if self.training_cfg.train_heads:
-                for head in (self.reward_head, self.continue_head, self.policy_head):
-                    saved_head_params.extend(p.detach().clone() for p in head.parameters())
-            # RMSNormalizer running stats (rms_sq) are in-place mutated by
-            # _compute_loss at every training call — synthetic-batch losses
-            # during warmup would poison the EMA, and since these tensors
-            # don't live in model.parameters() they'd otherwise escape the
-            # restore.  Clone the scalar tensor for each normalizer.
-            rms_normalizers = [
-                self.rms_flow, self.rms_bootstrap,
-                self.rms_reward, self.rms_continue, self.rms_bc,
-            ]
-            saved_rms_sq = [n.rms_sq.detach().clone() for n in rms_normalizers]
-        # Deep-copy optimizer state so in-place mutations during warmup
-        # (momentum buffers, step counter) don't leak into the restore.
-        import copy as _copy
-        saved_opt_state = _copy.deepcopy(self.optimizer.state_dict())
-        # Force XLA to materialize the clones NOW, before the warmup loop
-        # starts mutating the originals.  Lazy tensors that haven't been
-        # executed yet can end up referencing the latest IR of their source,
-        # not the IR at clone time.  Syncing here pins the cloned values.
-        import torch_xla as _txla
-        _txla.sync()
-
-        # Pre-populate clip params so _xla_safe_clip_grad_norm is exercised
-        # with its steady-state list, matching what the first real training
-        # step at trainer.py:847 will see.  Without this the first real step
-        # retraces the whole graph with the clip op newly introduced.
+        # Pre-populate clip params so the clip op is in the traced graph.
         if self._cached_clip_params is None:
             all_params = list(self.model.parameters())
             if self.training_cfg.train_heads:
@@ -543,6 +499,15 @@ class DynamicsTrainer:
                     list(self.continue_head.parameters()) + \
                     list(self.policy_head.parameters())
             self._cached_clip_params = all_params
+
+        # Save original LR values, then zero them for the warmup.
+        # The optimizer.step() will trace the full optimizer graph but
+        # apply zero-magnitude updates (lr=0 → param -= 0).  This avoids
+        # weight drift WITHOUT cloning/restoring parameters, which is
+        # critical for preserving XLA tensor identity and throughput.
+        saved_lrs = [group['lr'] for group in self.optimizer.param_groups]
+        for group in self.optimizer.param_groups:
+            group['lr'] = 0.0
 
         # Skip long loader warmup if long batches are never used
         use_long = self.training_cfg.long_batch_ratio > 0
@@ -555,26 +520,17 @@ class DynamicsTrainer:
         K_max = self.dynamics_cfg.K_max
         mtp_length = self.dynamics_cfg.mtp_length
 
-        # Phase 2 introduces a second use_agent_tokens branch inside
-        # _compute_loss, plus extra MTP target tensors that change the
-        # graph input signature.  Compile both False and True up-front.
         use_agent_variants = [False]
         if (self.training_cfg.train_heads and
                 self.model.agent_embedding is not None):
             use_agent_variants = [False, True]
 
-        # train_mode=False adds a second compiled variant because:
-        #   1. model.train(False) flips DropPath.forward at tokenizer/layers.py:63
-        #      from an identity branch (returns x) to a randn+mul+div branch.
-        #   2. torch.no_grad() eliminates the backward-pass graph entirely.
-        # Both differences are structural, not value-based.
         train_modes = [True, False]
 
-        # Curriculum phases (same as the _run_epoch branching).
         phases = [
-            ("warmup", saved_step),      # whatever phase we're actually in (fresh: 0)
-            ("ramp", warmup_end + 1),    # simulate curriculum-ramp phase
-            ("full", ramp_end + 1),      # simulate full-training phase
+            ("warmup", saved_step),
+            ("ramp", warmup_end + 1),
+            ("full", ramp_end + 1),
         ]
 
         for name, loader in loaders:
@@ -592,8 +548,6 @@ class DynamicsTrainer:
                 frames = frames.unsqueeze(1)
 
             B, T = frames.shape[0:2]
-            # Encode frames once per loader — tokenizer output is deterministic
-            # so we can reuse it across all three phase compilations.
             z_clean = self.model.encode_frames(frames)
 
             for train_mode in train_modes:
@@ -605,11 +559,7 @@ class DynamicsTrainer:
 
                 for use_agent in use_agent_variants:
                     for phase_name, phase_step in phases:
-                        # Fast-forward global_step so curriculum / LR schedule
-                        # branches match what _run_epoch will evaluate.
                         self.global_step = phase_step
-                        # Reset the LR bucket so _set_lr_from_schedule actually
-                        # executes fill_ at least once per phase during warmup.
                         self._last_lr_bucket = -1
 
                         tau, d = sample_tau_and_d(
@@ -617,7 +567,6 @@ class DynamicsTrainer:
                         )
                         tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
 
-                        # Apply the SAME curriculum d-override as _run_epoch
                         if self.global_step < warmup_end:
                             d = torch.full_like(d, 1.0 / K_max)
                         elif self.global_step < ramp_end:
@@ -626,14 +575,10 @@ class DynamicsTrainer:
                             mask = torch.rand_like(d) < self._ramp_tensor
                             d_min_t = torch.full_like(d, 1.0 / K_max)
                             d = torch.where(mask, d, d_min_t)
-                        # else: Path C, use raw d as-is
 
                         z_noised, _ = add_noise(z_clean, tau)
-
                         need_bootstrap = self.global_step >= warmup_end
 
-                        # Build MTP targets when agent tokens are in use, so
-                        # the traced graph input signature matches Phase 2.
                         rewards_future, dones_future, actions_future = None, None, None
                         if use_agent and mtp_length > 0:
                             rewards_future, dones_future = build_mtp_targets(
@@ -662,15 +607,13 @@ class DynamicsTrainer:
                             self.optimizer.zero_grad(set_to_none=True)
                             self.scaler.scale(loss).backward()
                             self.scaler.unscale_(self.optimizer)
-                            # Exercise the clip path so _cached_clip_params
-                            # and the XLA-safe clip op are in the traced graph.
                             _xla_safe_clip_grad_norm(
                                 self._cached_clip_params, self.training_cfg.grad_clip,
                             )
-                            # Exercise the LR schedule path so lr.fill_(...) is
-                            # in the traced graph alongside the optimizer step.
+                            # Exercise LR schedule path (will set LR to 0 since
+                            # we zeroed it, but traces the bucket-change code).
                             self._set_lr_from_schedule()
-                            self.scaler.step(self.optimizer)
+                            self.scaler.step(self.optimizer)  # lr=0 → zero update
                             self.scaler.update()
                         torch_xla.sync()
 
@@ -682,37 +625,18 @@ class DynamicsTrainer:
                                 f"bootstrap={need_bootstrap}) compiled"
                             )
 
-        # Restore model weights to pre-warmup values. The warmup loop ran
-        # real optimizer steps that updated the weights; without this restore
-        # the first real training step sees drifted (or worse, NaN-adjacent)
-        # weights and the divergence guard fires at step 0.
-        with torch.no_grad():
-            for p, saved in zip(self.model.parameters(), saved_model_params):
-                p.data.copy_(saved)
-            if self.training_cfg.train_heads:
-                saved_iter = iter(saved_head_params)
-                for head in (self.reward_head, self.continue_head, self.policy_head):
-                    for p in head.parameters():
-                        p.data.copy_(next(saved_iter))
-            # Restore RMSNormalizer running stats — the warmup's synthetic
-            # losses would otherwise leave the EMAs at wildly scaled (or NaN)
-            # values, poisoning loss normalization on the first real step.
-            for normalizer, saved in zip(rms_normalizers, saved_rms_sq):
-                normalizer.rms_sq.copy_(saved)
-
-        # Restore optimizer state (preserves Adam momentum from checkpoint).
-        # Load into the existing optimizer object instead of rebuilding — the
-        # rebuild would change self.optimizer's Python identity, forcing XLA
-        # to recompile the optimizer_step graph on the first real training step.
-        self.optimizer.load_state_dict(saved_opt_state)
+        # Restore LR and Python-int state. No tensor identity is changed.
+        for group, lr in zip(self.optimizer.param_groups, saved_lrs):
+            group['lr'] = lr
         self.global_step = saved_step
         self._last_lr_bucket = saved_bucket
-        # Free the cloned tensors now that the restore is done, so they
-        # don't hold HBM for the rest of training.
-        del saved_model_params, saved_head_params, saved_opt_state, saved_rms_sq
+        # Put model back in training mode for real training.
+        self.model.train(True)
+        if self.training_cfg.train_heads:
+            self.reward_head.train(True)
+            self.continue_head.train(True)
+            self.policy_head.train(True)
 
-        # Release any transient compile scratch buffers before training begins,
-        # maximizing HBM headroom for the first real training step.
         torch_xla.sync()
         gc.collect()
         met.clear_all()

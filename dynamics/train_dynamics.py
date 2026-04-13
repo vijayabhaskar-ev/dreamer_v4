@@ -269,12 +269,19 @@ def _train_fn(index=0, args=None):
     initialize_xla_cache()  # persist compiled graphs across restarts; no-op on CUDA/CPU
     use_pin_memory = device.type == "cuda"
 
+    # persistent_workers=False is CRITICAL — with forkserver (or spawn)
+    # each DataLoader worker re-imports torch + torch_xla + numpy from
+    # scratch (~2.5 GB per worker, no copy-on-write).  With 4 PJRT workers
+    # × 2 loaders × 4 workers each = 32 DataLoader workers × 2.5 GB =
+    # ~80 GB.  persistent_workers=True keeps all 32 alive forever, pinning
+    # that 80 GB permanently and pushing Committed_AS past 380 GB → OOM.
+    # persistent_workers=False tears workers down at each epoch boundary,
+    # so the 80 GB is reclaimed and memory stays bounded.
     train_loader_short_raw = DataLoader(
         train_dataset_short,
         batch_size=None,
         num_workers=opts.num_workers,
         pin_memory=use_pin_memory,
-        persistent_workers=opts.num_workers > 0,
         prefetch_factor=2 if opts.num_workers > 0 else None,
         multiprocessing_context='forkserver' if opts.num_workers > 0 else None,
     )
@@ -283,7 +290,6 @@ def _train_fn(index=0, args=None):
         batch_size=None,
         num_workers=opts.num_workers,
         pin_memory=use_pin_memory,
-        persistent_workers=opts.num_workers > 0,
         prefetch_factor=2 if opts.num_workers > 0 else None,
         multiprocessing_context='forkserver' if opts.num_workers > 0 else None,
     )
