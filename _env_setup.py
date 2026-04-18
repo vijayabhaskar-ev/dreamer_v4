@@ -51,6 +51,30 @@ _setdefault('XLA_CACHE_DIR', os.path.expanduser('~/xla_cache'))
 
 
 # ---------------------------------------------------------------------------
+# tempfile redirect — keep wandb tempdirs out of /tmp
+# ---------------------------------------------------------------------------
+# wandb stages media/artifacts via tempfile.mkdtemp() and frequently leaves
+# orphans in /tmp on crash/SIGKILL. Over many failed iterations this fills
+# /tmp with thousands of `tmp*wandb*` directories, slowing every subsequent
+# tempfile.mkdtemp() call (collision retry loop) and eventually wedging
+# anything that needs a tempdir — including pip and the training loop itself.
+#
+# Redirect TMPDIR/TMP/TEMP to a dedicated location under $HOME so wandb's
+# tempdir churn is contained AND survives a future /tmp wipe. We don't auto-
+# clean here because import-time cleanup would race with concurrent training
+# runs; the cleanup happens explicitly at xmp.spawn time in train_dynamics.py.
+_dreamer_tmp = os.path.expanduser('~/dreamer_tmp')
+os.makedirs(_dreamer_tmp, exist_ok=True)
+_setdefault('TMPDIR', _dreamer_tmp)
+_setdefault('TMP', _dreamer_tmp)
+_setdefault('TEMP', _dreamer_tmp)
+# wandb honors WANDB_CACHE_DIR / WANDB_DATA_DIR for its on-disk staging area.
+# Pointing both at the same dreamer_tmp keeps wandb fully off /tmp.
+_setdefault('WANDB_CACHE_DIR', _dreamer_tmp)
+_setdefault('WANDB_DATA_DIR', _dreamer_tmp)
+
+
+# ---------------------------------------------------------------------------
 # PJRT in-memory caps — REMOVED
 # ---------------------------------------------------------------------------
 # Attempted to cap PJRT compile cache and buffer pool via XLA_FLAGS with

@@ -209,8 +209,9 @@ def initialize_xla_cache(
                     except OSError as e:
                         print(f"[XLA]   Could not delete {fpath}: {e}")
 
+            import shutil
+
             if size_gb > max_size_gb:
-                import shutil
                 print(
                     f"[XLA] Cache at {cache_dir} is {size_gb:.1f} GB "
                     f"(> {max_size_gb} GB limit). Clearing..."
@@ -220,9 +221,37 @@ def initialize_xla_cache(
                 file_count = 0
                 size_gb = 0.0
 
+            # Disk-space guard: PJRT writes compiled executables to the cache
+            # during training without bound, and an ENOSPC there silently wedges
+            # the training loop (we lost a week debugging this on a 100%-full
+            # /dev/root). If free space on the cache filesystem is below the
+            # threshold, clear the cache preemptively even if it's under the
+            # size limit. This is independent of and stricter than max_size_gb.
+            free_gb = shutil.disk_usage(cache_dir).free / (1024 ** 3)
+            min_free_gb = 20.0
+            if free_gb < min_free_gb:
+                print(
+                    f"[XLA] Only {free_gb:.1f} GB free on cache filesystem "
+                    f"(< {min_free_gb} GB headroom). Clearing cache "
+                    f"preemptively to avoid mid-training ENOSPC wedge."
+                )
+                shutil.rmtree(cache_dir)
+                os.makedirs(cache_dir, exist_ok=True)
+                file_count = 0
+                size_gb = 0.0
+                free_gb = shutil.disk_usage(cache_dir).free / (1024 ** 3)
+                if free_gb < min_free_gb:
+                    print(
+                        f"[XLA][WARN] Still only {free_gb:.1f} GB free after "
+                        f"clearing the cache. Something else is filling the "
+                        f"disk. Training is likely to ENOSPC-wedge during "
+                        f"compilation. Investigate before continuing."
+                    )
+
             print(
                 f"[XLA] Cache at {cache_dir}: "
-                f"{file_count} files, {size_gb:.2f} GB"
+                f"{file_count} files, {size_gb:.2f} GB, "
+                f"{free_gb:.1f} GB free on filesystem"
             )
         except Exception as e:
             print(f"[XLA] Cache size check failed: {e}")
