@@ -159,41 +159,43 @@ class RewardHead(nn.Module):
         features = self.backbone(h)
         return self.output_heads[mtp_offset](features)
 
-    def loss(self, h: torch.Tensor, reward_true: torch.Tensor) -> torch.Tensor:
+    def loss(self, h: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Categorical cross-entropy with twohot targets (single-step).
 
         Uses only the first output head (mtp_offset=0).  For MTP training,
         use loss_mtp() instead.
 
         Args:
-            h:           (B, T, D) latent states
-            reward_true: (B, T) real-valued rewards
+            h:      (B, T, D) latent states
+            target: (B, T) real-valued scalar targets
+                    (rewards for reward_head, λ-returns for value_head)
         Returns:
             scalar loss
         """
         #TODO Need to modify this for muti head training after initial pipeline
-        logits = self.forward(h, mtp_offset=0)                     # (B, T, num_bins)
-        target = twohot_encode(reward_true, self.bins_symlog)      # (B, T, num_bins)
+        logits = self.forward(h, mtp_offset=0)                   # (B, T, num_bins)
+        twohot_target = twohot_encode(target, self.bins_symlog)  # (B, T, num_bins)
         log_probs = F.log_softmax(logits, dim=-1)
-        return -(target * log_probs).sum(dim=-1).mean()
-
-    def loss_mtp(self, h: torch.Tensor, rewards_future: torch.Tensor) -> torch.Tensor:
+        return -(twohot_target * log_probs).sum(dim=-1).mean()
+    
+    def loss_mtp(self, h: torch.Tensor, targets_future: torch.Tensor) -> torch.Tensor:
         """MTP loss: sum of cross-entropy losses across temporal offsets.
 
         Args:
             h:              (B, T, D) latent states at each position
-            rewards_future: (B, T, L+1) rewards at offsets 0..L from each position
+            targets_future: (B, T, L+1) scalar targets at offsets 0..L
+                            (rewards for reward_head, λ-returns for value_head)
         Returns:
             scalar loss (averaged over batch and time, summed over offsets)
         """
         features = self.backbone(h)                                # (B, T, hidden)
-        num_offsets = min(rewards_future.shape[-1], len(self.output_heads))
+        num_offsets = min(targets_future.shape[-1], len(self.output_heads))
         losses = []
         for n in range(num_offsets):
             logits = self.output_heads[n](features)                # (B, T, num_bins)
-            target = twohot_encode(rewards_future[..., n], self.bins_symlog)
+            twohot_target = twohot_encode(targets_future[..., n], self.bins_symlog)
             log_probs = F.log_softmax(logits, dim=-1)
-            losses.append(-(target * log_probs).sum(dim=-1).mean())
+            losses.append(-(twohot_target * log_probs).sum(dim=-1).mean())
         return torch.stack(losses).sum()
 
     def predict(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:

@@ -57,9 +57,25 @@ def get_ordinal() -> int:
     return 0
 
 
-def wrap_loader(loader, device):
-    """Wrap a DataLoader with MpDeviceLoader for async host→device transfer."""
-    if is_xla_device(device):
+def wrap_loader(loader, device, enable_mp_device_loader: bool = False):
+    """Wrap a DataLoader for the target device.
+
+    enable_mp_device_loader:
+        False (default): return the loader unchanged. On XLA, the
+            training loop's `.to(xla_device)` is lazy and fuses into the
+            compiled step graph, so MpDeviceLoader's async prefetch
+            provides no measurable benefit at typical batch sizes
+            (~1.5 MB/batch → ~0.2 ms PCIe transfer, vs ~1s step time).
+            Required on torch_xla 2.7: MpDeviceLoader's PerDeviceLoader
+            spawned ~1 background thread per next() call that did not
+            reliably join, accumulating to ~10k threads over 5 hours and
+            tripping the hang watchdog (Apr 20-21 2026 debug).
+        True: re-enable MpDeviceLoader. Flip only when scaling to v4-32+
+            AND after verifying the torch_xla version has the thread-leak
+            fix (2.8+). Measure TPU duty cycle before vs after for ≥15
+            min; keep enabled only if it shows a measurable improvement.
+    """
+    if enable_mp_device_loader and is_xla_device(device):
         import torch_xla.distributed.parallel_loader as pl
         return pl.MpDeviceLoader(loader, device)
     return loader

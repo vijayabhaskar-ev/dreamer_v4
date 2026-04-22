@@ -87,6 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
     # Logging
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--log-model-stats-interval", type=int, default=50)
+    # On XLA/TPU the CPU-offload model-stats path has non-trivial compile
+    # cost per invocation.  Firing every 50 steps on v4-8 drove per-rank
+    # host RSS past 60 GB and caused a silent OOM-kill hang at epoch 51.
+    # Default to firing rarely on XLA; lightweight per-step health stats
+    # (weight_norm, grad_norm, max_abs) still log every log-interval via
+    # the on-device training-graph path.
+    parser.add_argument("--log-model-stats-interval-xla", type=int, default=2000)
     parser.add_argument("--checkpoint-interval", type=int, default=None)
 
     # Dataset
@@ -98,6 +105,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--steps-per-epoch", type=int, default=100)
     parser.add_argument("--val-steps-per-epoch", type=int, default=None)
+    parser.add_argument(
+        "--enable-mp-device-loader",
+        action="store_true",
+        help=(
+            "Re-enable torch_xla MpDeviceLoader for async host→device "
+            "prefetch.  Disabled by default because MpDeviceLoader on "
+            "torch_xla 2.7 leaks ~1 thread per next() call, hitting ~10k "
+            "threads over 5 hours and tripping the watchdog.  Only safe "
+            "to enable after verifying the thread-leak fix in newer "
+            "torch_xla (e.g. on v4-32 pod images with 2.8+).  When "
+            "enabling, measure TPU duty cycle for ≥15 min and keep on "
+            "only if it shows a measurable improvement."
+        ),
+    )
 
     # WandB
     parser.add_argument("--wandb-project", type=str, default="dreamer-v4-dynamics")
@@ -187,6 +208,7 @@ def _train_fn(index=0, args=None):
         checkpoint_interval=checkpoint_interval,
         log_interval=opts.log_interval,
         log_model_stats_interval=opts.log_model_stats_interval,
+        log_model_stats_interval_xla=opts.log_model_stats_interval_xla,
         warmup_steps=opts.warmup_steps,
         min_lr=opts.min_lr,
         curriculum_warmup_steps=opts.curriculum_warmup_steps,
@@ -301,10 +323,20 @@ def _train_fn(index=0, args=None):
         pin_memory=use_pin_memory,
     ) if val_dataset is not None else None
 
-    # Wrap with MpDeviceLoader for async host→device transfer on TPU
-    train_loader_short = wrap_loader(train_loader_short_raw, device)
-    train_loader_long = wrap_loader(train_loader_long_raw, device)
-    val_loader = wrap_loader(val_loader_raw, device) if val_loader_raw is not None else None
+    # Opt-in MpDeviceLoader wrapping — OFF by default on torch_xla 2.7 (see
+    # wrap_loader docstring + --enable-mp-device-loader flag).
+    train_loader_short = wrap_loader(
+        train_loader_short_raw, device,
+        enable_mp_device_loader=opts.enable_mp_device_loader,
+    )
+    train_loader_long = wrap_loader(
+        train_loader_long_raw, device,
+        enable_mp_device_loader=opts.enable_mp_device_loader,
+    )
+    val_loader = wrap_loader(
+        val_loader_raw, device,
+        enable_mp_device_loader=opts.enable_mp_device_loader,
+    ) if val_loader_raw is not None else None
 
     trainer = DynamicsTrainer(
         dynamics_cfg=dynamics_cfg,
