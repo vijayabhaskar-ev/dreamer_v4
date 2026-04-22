@@ -829,7 +829,53 @@ class DynamicsTrainer:
             target=_hang_watchdog, args=(self,), daemon=True,
         ).start()
 
+        # TODO(REMOVE-WHEN-LEAK-FIXED): Operational workaround for the
+        # torch_xla 2.5 MpDeviceLoader thread leak.  ~1.18 host threads
+        # leak per training step per rank.  Over ~5 hours per-rank thread
+        # count climbs to ~10k, one rank OOMs on pthread_create / shm,
+        # and the others wedge on a cross-rank collective.
+        # - Upgrading to torch_xla 2.6 fixes the leak but causes an SDPA
+        #   NaN divergence on the first training step after resume.
+        # - Disabling MpDeviceLoader on 2.5 hangs on the first collective.
+        # Until the library fix lands (likely 2.7+ with API migration),
+        # we ride the leak by exiting cleanly at 4h45m and relying on
+        # --resume-from via run_training_loop.sh to auto-restart.
+        #
+        # NOT NEEDED ON CUDA: MpDeviceLoader is XLA-only; the leak
+        # doesn't exist in the CUDA DataLoader path.  The `self._is_xla`
+        # guard below keeps this auto-exit entirely out of CUDA/CPU runs.
+        import time as _auto_exit_time
+        _AUTO_EXIT_SECONDS = 4 * 3600 + 45 * 60   # 4h45m
+        _fit_start = _auto_exit_time.monotonic()
+
         for epoch in range(start_epoch, self.training_cfg.epochs + 1):
+            # TODO(REMOVE-WHEN-LEAK-FIXED): see block above `for epoch`.
+            if self._is_xla:
+                _elapsed = _auto_exit_time.monotonic() - _fit_start
+                if _elapsed > _AUTO_EXIT_SECONDS:
+                    _last_epoch = epoch - 1
+                    if is_master():
+                        print(
+                            f"[AUTO-EXIT] {_elapsed:.0f}s elapsed "
+                            f"(threshold {_AUTO_EXIT_SECONDS}s).  Saving "
+                            f"and exiting cleanly before the torch_xla "
+                            f"2.5 MpDeviceLoader thread leak becomes "
+                            f"fatal.  Resume with --resume-from "
+                            f"{checkpoint_dir}/"
+                            f"dynamics_epoch_{_last_epoch:03d}.pt",
+                            flush=True,
+                        )
+                        if checkpoint_dir is not None and _last_epoch >= 1:
+                            _ckpt_path = (
+                                f"{checkpoint_dir}/"
+                                f"dynamics_epoch_{_last_epoch:03d}.pt"
+                            )
+                            self.save_checkpoint(_ckpt_path, _last_epoch)
+                    import torch_xla
+                    torch_xla.sync()
+                    import os as _os_exit
+                    _os_exit._exit(0)
+
             train_metrics = self._run_epoch(
                 train_loader_short, train_loader_long, epoch, training=True,
             )
