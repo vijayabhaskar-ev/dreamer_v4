@@ -19,9 +19,23 @@
 set -u  # fail on unset variables
 
 MAX_RESTARTS=200
+MAX_CONSECUTIVE_CRASHES=3   # non-zero exits tolerated before we stop
 CKPT_DIR="checkpoints/dynamics"
 TOKENIZER_CKPT="checkpoints/tokenizer/final.pt"
 DATASET_PATH="cheetah_run.npz"
+
+# Use a single wandb run across all cycles so charts (epoch, global_step,
+# losses, host/threads, etc.) show continuous progression across the
+# 4h30m auto-exit boundaries instead of appearing as N fragmented runs.
+# Generated once per wrapper session; re-running this script starts a
+# new wandb run.  train_dynamics.py reads WANDB_RUN_ID and passes it to
+# wandb.init(id=..., resume="allow").
+if [ -z "${WANDB_RUN_ID:-}" ]; then
+    export WANDB_RUN_ID="dreamer_dyn_$(date +%Y%m%d_%H%M%S)"
+fi
+echo "==> WANDB_RUN_ID=$WANDB_RUN_ID (persists across all cycles below)"
+
+consecutive_crashes=0
 
 for i in $(seq 1 $MAX_RESTARTS); do
     echo "==> Training cycle $i at $(date)"
@@ -41,7 +55,7 @@ for i in $(seq 1 $MAX_RESTARTS); do
     python -m dynamics.train_dynamics \
         --tokenizer-ckpt "$TOKENIZER_CKPT" \
         --dataset offline --dataset-path "$DATASET_PATH" \
-        --batch-size 32 --steps-per-epoch 200 --epochs 300 \
+        --batch-size 32 --steps-per-epoch 200 --epochs 1500 \
         --device tpu --lr 4e-4 \
         --seq-len-short 8 --seq-len-long 16 --long-batch-ratio 0.15 \
         --num-workers 0 --checkpoint-interval 20 \
@@ -50,14 +64,37 @@ for i in $(seq 1 $MAX_RESTARTS); do
         $resume_arg
     exit_code=$?
 
-    if [ $exit_code -eq 0 ]; then
-        echo "==> Cycle $i exited cleanly (AUTO-EXIT) at $(date).  Resuming in 60s..."
+    # TODO(REMOVE-WHEN-LEAK-FIXED): check for the auto-exit marker.
+    # The python side writes "$CKPT_DIR/.auto_exit_in_progress" the
+    # moment it enters the auto-exit block.  If the marker is
+    # present, treat ANY exit code as a clean auto-exit cycle —
+    # regardless of whether the watchdog fired, xm.rendezvous
+    # hung, or the xmp.spawn coordinator SIGTERMed survivors.  The
+    # marker is cleaned up here so the next cycle starts fresh.
+    marker_path="$CKPT_DIR/.auto_exit_in_progress"
+    if [ -f "$marker_path" ]; then
+        marker_content=$(cat "$marker_path" 2>/dev/null || echo "unknown")
+        echo "==> Auto-exit marker found: $marker_content"
+        rm -f "$marker_path"
+        echo "==> Cycle $i intended auto-exit (exit code $exit_code treated as clean).  Resuming in 60s..."
+        consecutive_crashes=0
+        sleep 60
+    elif [ $exit_code -eq 0 ]; then
+        echo "==> Cycle $i exited cleanly (exit code 0) at $(date).  Resuming in 60s..."
+        consecutive_crashes=0
         sleep 60
     else
-        echo "==> Cycle $i crashed with exit code $exit_code at $(date)."
-        echo "    Not a clean auto-exit — stopping the loop for investigation."
-        echo "    (Fail-loud: we do NOT blindly retry real crashes.)"
-        exit $exit_code
+        consecutive_crashes=$((consecutive_crashes + 1))
+        echo "==> Cycle $i crashed with exit code $exit_code at $(date) (no auto-exit marker)."
+        echo "    Consecutive crashes: $consecutive_crashes / $MAX_CONSECUTIVE_CRASHES"
+        if [ $consecutive_crashes -ge $MAX_CONSECUTIVE_CRASHES ]; then
+            echo "    Hit $MAX_CONSECUTIVE_CRASHES consecutive non-zero exits — stopping."
+            echo "    (This isn't the expected thread-leak AUTO-EXIT pattern; a real"
+            echo "     bug is likely.  Investigate the last training log above.)"
+            exit $exit_code
+        fi
+        echo "    Likely a crash before auto-exit could start.  Retrying from latest checkpoint in 60s..."
+        sleep 60
     fi
 done
 

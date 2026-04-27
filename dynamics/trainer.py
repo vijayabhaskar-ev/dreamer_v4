@@ -303,6 +303,16 @@ class DynamicsTrainer:
         self._expected_compile_count: int | None = None
         self._compile_tolerance: int = 2
         self._rss_warning_emitted = False
+        # TODO(REMOVE-WHEN-LEAK-FIXED): flag set by log-interval thread
+        # tracer when host/threads crosses the torch_xla 2.5 leak
+        # threshold.  Consumed by fit()'s per-epoch auto-exit check.
+        self._auto_exit_requested = False
+        # TODO(REMOVE-WHEN-LEAK-FIXED): set to True the moment we enter
+        # the auto-exit block.  The watchdog thread reads this and
+        # skips firing so that slow save_checkpoint / wandb.finish /
+        # rendezvous calls during auto-exit don't get misinterpreted
+        # as "hung training" and trigger _os._exit(1).
+        self._in_auto_exit = False
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
 
@@ -521,7 +531,15 @@ class DynamicsTrainer:
             return  # Same bucket, no LR change, no recompilation
         self._last_lr_bucket = bucket
 
-        lr = base_lr * (bucket / float(self._LR_BUCKETS))
+        # Honor the paper's min_lr floor.  Without max(...), bucket=0
+        # would give lr=0 literally (integer quantization discards the
+        # min_lr/base_lr floor computed on `frac` above), which is NOT
+        # what the Dreamer V4 paper specifies — it specifies cosine
+        # decay to min_lr=1e-6, a near-zero fine-tune tail rather than
+        # a hard freeze.  Clamping here restores paper spec without
+        # changing the XLA compile count (still 3 distinct lr values:
+        # base_lr, base_lr/2, min_lr).
+        lr = max(min_lr, base_lr * (bucket / float(self._LR_BUCKETS)))
         cfg = self.training_cfg
         for group in self.optimizer.param_groups:
             if cfg.train_heads and group.get("lr_multiplier") == "head":
@@ -816,6 +834,15 @@ class DynamicsTrainer:
                 if trainer.global_step - start_step < grace_steps:
                     last_change = _time.monotonic()
                     continue
+                # TODO(REMOVE-WHEN-LEAK-FIXED): don't fire during the
+                # auto-exit sequence.  global_step stops advancing by
+                # design once the auto-exit block is entered (save +
+                # wandb.finish + rendezvous + exit).  Firing here
+                # would kill the process mid-cleanup with _os._exit(1)
+                # and corrupt the bash wrapper's crash counter.
+                if getattr(trainer, "_in_auto_exit", False):
+                    last_change = _time.monotonic()
+                    continue
                 idle_for = _time.monotonic() - last_change
                 if idle_for >= idle_threshold_s:
                     print(
@@ -831,36 +858,79 @@ class DynamicsTrainer:
 
         # TODO(REMOVE-WHEN-LEAK-FIXED): Operational workaround for the
         # torch_xla 2.5 MpDeviceLoader thread leak.  ~1.18 host threads
-        # leak per training step per rank.  Over ~5 hours per-rank thread
+        # leak per training step per rank.  Over ~5h per-rank thread
         # count climbs to ~10k, one rank OOMs on pthread_create / shm,
         # and the others wedge on a cross-rank collective.
         # - Upgrading to torch_xla 2.6 fixes the leak but causes an SDPA
         #   NaN divergence on the first training step after resume.
         # - Disabling MpDeviceLoader on 2.5 hangs on the first collective.
         # Until the library fix lands (likely 2.7+ with API migration),
-        # we ride the leak by exiting cleanly at 4h45m and relying on
-        # --resume-from via run_training_loop.sh to auto-restart.
+        # we ride the leak by exiting cleanly before the crash cliff
+        # (whichever fires first: host/threads > 6500 via the tracer, OR
+        # wall-clock > 4h30m) and rely on run_training_loop.sh to
+        # auto-restart from the latest checkpoint.
         #
         # NOT NEEDED ON CUDA: MpDeviceLoader is XLA-only; the leak
         # doesn't exist in the CUDA DataLoader path.  The `self._is_xla`
         # guard below keeps this auto-exit entirely out of CUDA/CPU runs.
+        #
+        # WILL NOT PORT TO v4-32: the 6500-thread trigger is tuned to
+        # v4-8's 4 ranks per host.  v4-32 has 32 ranks per host; the
+        # per-process threshold and/or the summed budget will be
+        # different.  Before moving to v4-32, the underlying library
+        # issue must be resolved (torch_xla upgrade or custom prefetch
+        # loader) so this whole workaround can be deleted.
         import time as _auto_exit_time
-        _AUTO_EXIT_SECONDS = 4 * 3600 + 45 * 60   # 4h45m
+        _AUTO_EXIT_SECONDS = 4 * 3600 + 30 * 60   # 4h30m backstop
         _fit_start = _auto_exit_time.monotonic()
 
         for epoch in range(start_epoch, self.training_cfg.epochs + 1):
             # TODO(REMOVE-WHEN-LEAK-FIXED): see block above `for epoch`.
             if self._is_xla:
                 _elapsed = _auto_exit_time.monotonic() - _fit_start
-                if _elapsed > _AUTO_EXIT_SECONDS:
+                _thread_trigger = self._auto_exit_requested
+                _wall_trigger = _elapsed > _AUTO_EXIT_SECONDS
+                if _thread_trigger or _wall_trigger:
                     _last_epoch = epoch - 1
+                    _reason = (
+                        "thread count > 6500" if _thread_trigger
+                        else f"wall-clock > {_AUTO_EXIT_SECONDS}s"
+                    )
+                    # TODO(REMOVE-WHEN-LEAK-FIXED): mark the watchdog
+                    # and the bash wrapper that what follows is an
+                    # intentional auto-exit, NOT a hang.  The flag
+                    # disables the watchdog's idle-firing; the marker
+                    # file tells run_training_loop.sh to treat ANY
+                    # exit code (including watchdog-fired code 1 or
+                    # SIGTERM) as a clean auto-exit cycle and
+                    # auto-resume.  Both are necessary because slow
+                    # xm.rendezvous / torch_xla.sync / wandb.finish
+                    # on the degraded torch_xla 2.5 runtime can
+                    # trip the watchdog or race the parent process.
+                    self._in_auto_exit = True
+                    if is_master() and checkpoint_dir is not None:
+                        try:
+                            _marker_path = (
+                                f"{checkpoint_dir}/.auto_exit_in_progress"
+                            )
+                            with open(_marker_path, "w") as _mf:
+                                _mf.write(
+                                    f"epoch={_last_epoch} "
+                                    f"reason={_reason}\n"
+                                )
+                        except OSError as _mfexc:
+                            print(
+                                f"[AUTO-EXIT] warning: could not write "
+                                f"marker file: {_mfexc}",
+                                flush=True,
+                            )
                     if is_master():
                         print(
-                            f"[AUTO-EXIT] {_elapsed:.0f}s elapsed "
-                            f"(threshold {_AUTO_EXIT_SECONDS}s).  Saving "
-                            f"and exiting cleanly before the torch_xla "
-                            f"2.5 MpDeviceLoader thread leak becomes "
-                            f"fatal.  Resume with --resume-from "
+                            f"[AUTO-EXIT] Trigger: {_reason} "
+                            f"(elapsed {_elapsed:.0f}s).  Saving and "
+                            f"exiting cleanly before the torch_xla 2.5 "
+                            f"MpDeviceLoader thread leak becomes fatal.  "
+                            f"Resume with --resume-from "
                             f"{checkpoint_dir}/"
                             f"dynamics_epoch_{_last_epoch:03d}.pt",
                             flush=True,
@@ -871,6 +941,43 @@ class DynamicsTrainer:
                                 f"dynamics_epoch_{_last_epoch:03d}.pt"
                             )
                             self.save_checkpoint(_ckpt_path, _last_epoch)
+                        # TODO(REMOVE-WHEN-LEAK-FIXED): flush wandb
+                        # BEFORE _os._exit(0) to avoid leaving the
+                        # offline .wandb file truncated mid-write.
+                        # Without this, the next cycle's
+                        # wandb.init(id=X, resume="allow") may fail to
+                        # resume cleanly — either starting a fresh run
+                        # (fragmenting charts like epoch / global_step)
+                        # or missing the last few log events before the
+                        # abnormal exit.  wandb.finish() finalizes the
+                        # run cleanly; resume="allow" on the next cycle
+                        # still accepts a FINISHED run.  Master-only —
+                        # non-master ranks initialized wandb in
+                        # "disabled" mode so finish() is a no-op there.
+                        try:
+                            wandb.finish()
+                        except Exception as _wandb_exc:
+                            print(
+                                f"[AUTO-EXIT] Warning: wandb.finish() "
+                                f"raised {type(_wandb_exc).__name__}: "
+                                f"{_wandb_exc}.  Charts may be truncated.",
+                                flush=True,
+                            )
+                    # TODO(REMOVE-WHEN-LEAK-FIXED): cross-rank barrier.
+                    # torch_xla.sync() below is per-rank (flushes the
+                    # local queue), not a cross-rank barrier.  Without
+                    # this rendezvous, non-master ranks skip the
+                    # is_master() block and race ahead to _os._exit(0)
+                    # while master is still inside save_checkpoint(...).
+                    # The xmp.spawn coordinator then interprets those
+                    # early exits as failure, SIGTERMs master mid-save,
+                    # and reports BrokenProcessPool (exit code 1) — so
+                    # the bash wrapper counts a clean auto-exit as a
+                    # crash.  xm.rendezvous is the torch_xla cross-rank
+                    # barrier: all ranks must arrive with the same tag
+                    # before any proceed.
+                    import torch_xla.core.xla_model as _xm_exit
+                    _xm_exit.rendezvous("dreamer_auto_exit_barrier")
                     import torch_xla
                     torch_xla.sync()
                     import os as _os_exit
@@ -1392,6 +1499,31 @@ class DynamicsTrainer:
                         _local_shm = len(_os_probe.listdir('/dev/shm'))
                     except OSError:
                         pass
+
+                    # TODO(REMOVE-WHEN-LEAK-FIXED): thread-count trigger.
+                    # Adapts to actual resource pressure rather than a
+                    # brittle wall-clock estimate.  Fires when master's
+                    # Threads count crosses ~65% of the observed ~10k
+                    # crash cliff on v4-8.  *WILL NOT PORT to v4-32*:
+                    # thread counts scale with rank count (v4-32 has
+                    # 32 ranks per host vs 4 on v4-8) so the relevant
+                    # threshold on larger topologies is different, and
+                    # may not be a function of master's count alone.
+                    # Before scaling to v4-32, the real fix (torch_xla
+                    # 2.7+ upgrade with API migration, or a custom
+                    # prefetch loader) must land so this trigger can be
+                    # removed entirely.
+                    if (is_master()
+                            and _local_threads > 6500
+                            and not self._auto_exit_requested):
+                        print(
+                            f"[AUTO-EXIT] host/threads={_local_threads} > "
+                            f"6500 (~65% of the ~10k torch_xla 2.5 "
+                            f"thread-leak crash cliff).  Requesting "
+                            f"clean exit at next epoch boundary.",
+                            flush=True,
+                        )
+                        self._auto_exit_requested = True
 
                     if _local_rss > 55 and not self._rss_warning_emitted:
                         try:

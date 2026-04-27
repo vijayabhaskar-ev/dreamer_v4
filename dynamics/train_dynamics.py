@@ -15,6 +15,7 @@ from __future__ import annotations
 import _env_setup  # noqa: F401  (side-effect import)
 
 import argparse
+import os
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -225,10 +226,22 @@ def _train_fn(index=0, args=None):
         else:
             run_name = opts.wandb_name
         wandb_mode = "disabled" if opts.wandb_disabled else ("offline" if opts.wandb_offline else "online")
+        # TODO(REMOVE-WHEN-LEAK-FIXED): Allow resuming the SAME wandb
+        # run across run_training_loop.sh cycles by reading a stable
+        # id from env.  When WANDB_RUN_ID is set (the bash wrapper
+        # exports it once per training session), every cycle appends
+        # to that one run → charts show continuous epoch /
+        # global_step progression instead of N fragmented runs.
+        # Unset → wandb generates a fresh id as before.  Keeping this
+        # even after the leak fix is harmless and nice-to-have for
+        # resume-across-preemptions behavior.
+        _wandb_run_id = os.environ.get("WANDB_RUN_ID")
         wandb.init(
             project=opts.wandb_project,
             entity=opts.wandb_entity,
             name=run_name,
+            id=_wandb_run_id,
+            resume="allow" if _wandb_run_id else None,
             config={
                 "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
                 "training": vars(training_cfg),
