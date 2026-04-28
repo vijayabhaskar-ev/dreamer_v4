@@ -43,7 +43,11 @@ class MaskedAutoencoderLoss(nn.Module): #TODO Need to refactor including handlin
             b, t = target.shape[:2]
             recon_video = recon.view(b * t, *recon.shape[2:])
             target_video = target.view(b * t, *target.shape[2:])
-            lpips_val = self.lpips(recon_video, target_video)
+            # LPIPS' pretrained backbone expects [-1, 1]; frames are stored as [0, 1].
+            lpips_val = self.lpips(
+                recon_video.clamp(0.0, 1.0) * 2 - 1,
+                target_video * 2 - 1,
+            )
             lpips_loss = lpips_val.mean()
         total = mse_loss if lpips_loss is None else mse_loss + 0.2 *  lpips_loss
 

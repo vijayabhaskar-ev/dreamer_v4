@@ -71,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Frames to generate autoregressively (0 = seq_len - context)")
     parser.add_argument("--rollout-batches", type=int, default=10,
                         help="Batches for rollout eval (expensive: K*H forward passes each)")
+    parser.add_argument("--seq-len", type=int, default=0,
+                        help="Sequence length for eval (0 = use checkpoint's dynamics_cfg.seq_len). "
+                             "Recommended: 8 (T_short), 16 (= context window), 32 (T_long). "
+                             "Capped at dynamics_cfg.seq_len_long.")
     return parser
 
 
@@ -396,11 +400,20 @@ def main(args: Optional[list[str]] = None) -> None:
     trainer.model.eval()
     trainer.tokenizer.eval()
 
+    eval_seq_len = opts.seq_len if opts.seq_len > 0 else dynamics_cfg.seq_len
+    if eval_seq_len > dynamics_cfg.seq_len_long:
+        raise ValueError(
+            f"--seq-len={eval_seq_len} exceeds training seq_len_long="
+            f"{dynamics_cfg.seq_len_long}; OOD for the model."
+        )
+    print(f"[INFO] Eval seq_len: {eval_seq_len} "
+          f"(short={dynamics_cfg.seq_len_short}, long={dynamics_cfg.seq_len_long})")
+
     dataset_cfg = replace(
         tokenizer_cfg,
         dataset_name=opts.dataset,
         task_name=opts.task,
-        seq_len=dynamics_cfg.seq_len,
+        seq_len=eval_seq_len,
     )
 
     steps_per_worker = opts.steps
@@ -562,7 +575,7 @@ def main(args: Optional[list[str]] = None) -> None:
     num_context = opts.num_context_frames
     rollout_horizon = opts.rollout_horizon
     if rollout_horizon == 0:
-        rollout_horizon = dynamics_cfg.seq_len - num_context
+        rollout_horizon = eval_seq_len - num_context
 
     rollout_mse_accum = torch.zeros(rollout_horizon, dtype=torch.float64, device=device)
     rollout_count = 0
@@ -711,7 +724,7 @@ def main(args: Optional[list[str]] = None) -> None:
         "overall_latent_mse": overall_mse,
         "processed_batches": processed_steps,
         "batch_size": opts.batch_size,
-        "seq_len": dynamics_cfg.seq_len,
+        "seq_len": eval_seq_len,
         "gifs_written": len(gif_paths),
         "rollout_horizon": rollout_horizon,
         "rollout_K_inference": K_inf,
@@ -763,7 +776,7 @@ def main(args: Optional[list[str]] = None) -> None:
             "eval/overall_latent_mse": overall_mse,
             "eval/processed_batches": processed_steps,
             "eval/gifs_written": len(gif_paths),
-            "eval/seq_len": dynamics_cfg.seq_len,
+            "eval/seq_len": eval_seq_len,
             "eval/batch_size": opts.batch_size,
         }
     )
