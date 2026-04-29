@@ -278,12 +278,14 @@ def _train_fn(index=0, args=None):
         batch_size=training_cfg.batch_size,
         steps_per_epoch=train_steps_per_worker,
         dataset_path=opts.dataset_path,
+        expected_action_dim=opts.action_dim,
     )
     train_dataset_long = DatasetFactory.get_dataset(
         dataset_cfg_long,
         batch_size=training_cfg.batch_size,
         steps_per_epoch=train_steps_per_worker,
         dataset_path=opts.dataset_path,
+        expected_action_dim=opts.action_dim,
     )
 
     # Validation uses short sequences only
@@ -298,6 +300,7 @@ def _train_fn(index=0, args=None):
             batch_size=training_cfg.batch_size,
             steps_per_epoch=val_steps,
             dataset_path=opts.dataset_path,
+            expected_action_dim=opts.action_dim,
         )
 
     device = get_device(opts.device)

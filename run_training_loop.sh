@@ -22,7 +22,11 @@ MAX_RESTARTS=200
 MAX_CONSECUTIVE_CRASHES=3   # non-zero exits tolerated before we stop
 CKPT_DIR="checkpoints/dynamics"
 TOKENIZER_CKPT="checkpoints/tokenizer/final.pt"
-DATASET_PATH="cheetah_run.npz"
+# Override these via the environment when training a different DMC task, e.g.
+#   DATASET_PATH=ball_in_cup_catch.npz ACTION_DIM=2 TASK=ball_in_cup_catch ./run_training_loop.sh
+DATASET_PATH="${DATASET_PATH:-cheetah_run.npz}"
+ACTION_DIM="${ACTION_DIM:-6}"
+TASK="${TASK:-cheetah_run}"
 
 # Use a single wandb run across all cycles so charts (epoch, global_step,
 # losses, host/threads, etc.) show continuous progression across the
@@ -54,6 +58,7 @@ for i in $(seq 1 $MAX_RESTARTS); do
 
     python -m dynamics.train_dynamics \
         --tokenizer-ckpt "$TOKENIZER_CKPT" \
+        --task "$TASK" --action-dim "$ACTION_DIM" \
         --dataset offline --dataset-path "$DATASET_PATH" \
         --batch-size 32 --steps-per-epoch 200 --epochs 1500 \
         --device tpu --lr 4e-4 \

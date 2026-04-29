@@ -6,9 +6,28 @@ import torch
 from torch.utils.data import IterableDataset
 from .config import TokenizerConfig
 
+# DMC domains whose names contain underscores. All other DMC domains are
+# single tokens, so the default split-on-first-underscore works for them.
+# Source: dm_control/suite/__init__.py (DOMAINS dict).
+_COMPOUND_DMC_DOMAINS = ("ball_in_cup", "point_mass")
+
+
+def _split_dmc_task_name(task_name: str) -> Tuple[str, str]:
+    """Split a DMC task identifier 'domain_task' into (domain, task).
+
+    Handles compound-name domains like 'ball_in_cup' that contain underscores.
+    """
+    for domain in _COMPOUND_DMC_DOMAINS:
+        prefix = domain + "_"
+        if task_name.startswith(prefix):
+            return domain, task_name[len(prefix):]
+    parts = task_name.split('_', 1)
+    return parts[0], parts[1]
+
+
 class VideoDataset(IterableDataset, abc.ABC):
     """Abstract base class for video datasets."""
-    
+
     @abc.abstractmethod
     def __iter__(self) -> Iterator[torch.Tensor]:
         """Yields batches of video sequences: (B, T, C, H, W)"""
@@ -20,22 +39,24 @@ class DMControlDataset(VideoDataset):
     Generates data on-the-fly by stepping through the environment.
     """
     def __init__(
-        self, 
-        task_name: str, 
+        self,
+        task_name: str,
         action_repeat: int = 2,
         img_size: Tuple[int, int] = (64, 64),
         seq_len: int = 16,
         batch_size: int = 16,
         camera_id: int = 0,
         steps_per_epoch: int = 1000,
+        expected_action_dim: Optional[int] = None,
     ):
-        self.domain, self.task = task_name.split('_', 1)
+        self.domain, self.task = _split_dmc_task_name(task_name)
         self.action_repeat = action_repeat
         self.img_size = img_size
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.camera_id = camera_id
         self.steps_per_epoch = steps_per_epoch
+        self.expected_action_dim = expected_action_dim
         
     def _get_env(self, seed: Optional[int] = None):
         from dm_control import suite
@@ -60,7 +81,15 @@ class DMControlDataset(VideoDataset):
         seed = (seed + ordinal * 17) % (2**32 - 1)
         np.random.seed(seed)
         env = self._get_env(seed=seed)
-        
+
+        if self.expected_action_dim is not None:
+            real_action_dim = env.action_spec().shape[0]
+            if real_action_dim != self.expected_action_dim:
+                raise ValueError(
+                    f"Task '{self.domain}_{self.task}' has action_dim={real_action_dim}, "
+                    f"but training was configured with action_dim={self.expected_action_dim}"
+                )
+
         for _ in range(self.steps_per_epoch): #TODO Need to refactor this after debugging the initial training pipleline.
             batch_videos = []
             batch_actions = []
@@ -223,6 +252,7 @@ class DatasetFactory:
         batch_size: int,
         steps_per_epoch: int = 1000,
         dataset_path: Optional[str] = None,
+        expected_action_dim: Optional[int] = None,
     ) -> IterableDataset:
         if config.dataset_name == "offline":
             if dataset_path is None:
@@ -240,7 +270,8 @@ class DatasetFactory:
                 img_size=config.image_size,
                 seq_len=config.seq_len,
                 batch_size=batch_size,
-                steps_per_epoch=steps_per_epoch
+                steps_per_epoch=steps_per_epoch,
+                expected_action_dim=expected_action_dim,
             )
         elif config.dataset_name == "moving_square":
             from .train_tokenizer import MovingSquareDataset, MovingSquareIterableDataset

@@ -3,6 +3,11 @@
 Usage:
     python generate_dataset.py --domain cheetah --task run --episodes 2000 --seq-len 50
     python generate_dataset.py --domain walker --task walk --episodes 1000 --seq-len 30 --output walker_walk.npz
+    python generate_dataset.py --domain ball_in_cup --task catch --episodes 2000 --seq-len 50
+
+Note: pass `--domain` and `--task` separately. Compound DMC domains
+(`ball_in_cup`, `point_mass`) contain underscores, so a single 'domain_task'
+string would be ambiguous to parse.
 """
 
 import argparse
