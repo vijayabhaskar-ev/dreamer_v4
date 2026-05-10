@@ -1,6 +1,6 @@
 # Dreamer V4
 
-A from-scratch PyTorch implementation of **DreamerV4** (Hafner et al., DeepMind, 2024) — a model-based reinforcement learning agent that learns by *imagining* trajectories inside a learned world model. This repo covers all three training phases of the paper:
+A from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025; [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)) — a model-based reinforcement learning agent that learns by *imagining* trajectories inside a learned world model. This repo covers all three training phases of the paper:
 
 1. **Tokenizer** — a masked autoencoder that compresses 64×64 RGB frames into a small set of latent tokens.
 2. **Dynamics model** — a block-causal transformer trained with a flow-matching objective (with bootstrap loss and curriculum) to predict future latents.
@@ -241,10 +241,10 @@ A non-trivial fraction of this repo is plumbing to keep TPU runs healthy. The co
 
 ## References
 
-- Hafner, D., Pasukonis, J., Ba, J., Lillicrap, T. — *Mastering Diverse Control Tasks Through World Models* / DreamerV4 (2024).
+- Hafner, D., Yan, W., Lillicrap, T. — *Training Agents Inside of Scalable World Models* (DreamerV4). [arXiv:2509.24527](https://arxiv.org/abs/2509.24527), Sep 29 2025.
+- Hafner, D., Pasukonis, J., Ba, J., Lillicrap, T. — *Mastering Diverse Domains through World Models* (DreamerV3). [arXiv:2301.04104](https://arxiv.org/abs/2301.04104), Jan 2023; published as *Mastering Diverse Control Tasks Through World Models*, *Nature*, Apr 2 2025, [DOI:10.1038/s41586-025-08744-2](https://doi.org/10.1038/s41586-025-08744-2).
 - Lipman, Y. et al. — *Flow Matching for Generative Modeling* (2023).
 - Abdolmaleki, A. et al. — *Maximum a Posteriori Policy Optimization* (2018).
-- Hafner, D. et al. — DreamerV3 (2023).
 
 ---
 
