@@ -25,8 +25,15 @@ class TokenizerConfig:
     drop_path: float = 0.1 #TODO Dreawer v4 uses droppath instead of dropout. Need to check the implementation of drop_path after completion of the tokenizer
     mask_prob_min: float = 0.0
     mask_prob_max: float = 0.9
-    latent_dim: int = 128
+    latent_dim: int = 16
+    use_attention_soft_cap: bool = False
+    tanh_scale: float = 1.0
+ 
     num_latent_tokens: int = 32 #TODO Should mopdify the num_latent_tokens based on the image size and patch size. Maybe compute it dyamically?
+    # NOTE: paper compression ratio is ~90:1 (Minecraft 384×640×3=737k → 512×16=8192 bottleneck).
+    # User at 64×64×3=12288 with 32×128=4096 bottleneck is 3:1 — way over-provisioned.
+    # For paper-matched compression: num_latent_tokens × latent_dim ≈ 12288/90 = ~137.
+    # Suggested: num_latent_tokens=16, latent_dim=8 → 128 bottleneck (96:1 compression).
     learned_cls_tokens: int = 0 #TODO Not used in dreamer v4/ MAE
     #reconstruction_loss: Literal["mse", "lpips", "mse_lpips"] = "mse" #TODO not being used(Right now we are directly passing in command line)
     norm_loss_by: Literal["pixels", "tokens"] = "pixels"

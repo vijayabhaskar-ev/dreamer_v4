@@ -23,7 +23,7 @@ import wandb
 class TokenizerTrainingConfig: #TODO Need to move this to config.py
     epochs: int = 10
     batch_size: int = 32
-    lr: float = 1e-4
+    lr: float = 3e-4
     weight_decay: float = 0.05
     grad_clip: float = 1.0
     amp: bool = False
@@ -54,16 +54,53 @@ class TokenizerTrainer:
         self.device = get_device(training_cfg.device)
         self.model = MaskedAutoencoderTokenizer(tokenizer_cfg).to(self.device)
         self.loss_module = loss_module or MaskedAutoencoderLoss(lpips_module=None)
+        self.loss_module = self.loss_module.to(self.device)
+
+        # Parameter-group weight decay split (standard MAE / paper recipe).
+        # Apply weight_decay only to matrix weights (ndim >= 2). Exclude
+        # norms, biases, embeddings, and learnable token banks. Uniform decay
+        # on those creates a tug-of-war with the recon-loss-driven scale and
+        # progressively de-normalizes the network — a contributing factor to
+        # the saturation regime documented in Iter 23/36.
+        decay_params, no_decay_params = [], []
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            # No-decay rules (specific, not substring):
+            #   - 1D params (biases, norm gains)
+            #   - RMSNorm / LayerNorm weights
+            #   - Learnable token banks: mask_token, decoder_queries, latent_tokens
+            #   - Explicit ".bias" parameters
+            # NOTE: do NOT use a loose "embed" substring match — it would also
+            # catch patch_embed.proj.weight (a Conv2d kernel, ndim=4) which
+            # should receive decay. There are no nn.Embedding lookup tables in
+            # the tokenizer, so explicit token-bank names suffice.
+            if (
+                p.ndim < 2
+                or "norm" in n.lower()
+                or "latent_tokens" in n
+                or "decoder_queries" in n
+                or "mask_token" in n
+                or n.endswith(".bias")
+            ):
+                no_decay_params.append(p)
+            else:
+                decay_params.append(p)
+        param_groups = [
+            {"params": decay_params, "weight_decay": training_cfg.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
+            param_groups,
             lr=training_cfg.lr,
-            weight_decay=training_cfg.weight_decay,
         )
         self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
-        
+
         self.global_step = 0
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
+        self._rss_warning_emitted = False
 
     def fit(
         self,
@@ -76,7 +113,21 @@ class TokenizerTrainer:
             train_metrics = self._run_epoch(train_loader, epoch, training=True) #TODO Need to refacto r this to make sure it runs only duyirng traingin
             val_metrics = None
             if val_loader is not None: #TODO Need to refactor this including _run_epoch
-                val_metrics = self._run_epoch(val_loader, epoch, training=False)
+                # Wrap eval in torch.no_grad() — prevents autograd graph from
+                # building during forward pass. Without this, LPIPS' VGG16
+                # activations get pinned in GPU memory expecting a backward
+                # pass that never comes. OOMs on the 4090 at production batch
+                # size (run on 2026-05-11: 22 GB pinned during eval LPIPS).
+                # No effect on training path; val_loss values unchanged.
+                with torch.no_grad():
+                    val_metrics = self._run_epoch(val_loader, epoch, training=False)
+
+                # In-training latent diagnostics — logs effective rank,
+                # n95 components, norm std within sequence, and abs_max to
+                # wandb each epoch. Spot saturation lock-in / mode collapse
+                # live instead of waiting for training to finish and running
+                # latent_temporal_diagnostic.py separately. ~1s overhead.
+                self._log_latent_metrics(val_loader)
 
             if is_master():
                 print(
@@ -107,6 +158,77 @@ class TokenizerTrainer:
         gc.collect()
         if is_master():
             print(f"Saved tokenizer checkpoint to {path}")
+
+
+
+    #TODO refactor this so that it doesnt affect the training speed and remove the data loading inside this function.
+    @torch.no_grad()
+    def _log_latent_metrics(self, val_loader: DataLoader) -> None:
+        """Lightweight in-training latent diagnostic. Logs 4 metrics to wandb:
+
+        - latent/effective_rank: Shannon-entropy effective rank of latent SVD.
+          Catches collapse — should be > 5 on a healthy tokenizer; values near
+          1.0 mean total mode collapse.
+        - latent/n95_components: number of components for 95% variance.
+        - latent/norm_std_within_seq: std of latent norm across timesteps within
+          a single sequence. Catches tanh saturation lock-in — when tanh pins
+          the bottleneck at max norm sqrt(D), this value goes to exactly 0.
+        - latent/abs_max: peak latent magnitude. With tanh active should stay
+          near 1.0; without tanh tracks the encoder's natural scale.
+
+        Runs in ~1 second on RTX 4090 over 3 val batches. Logged each epoch.
+        """
+        if not is_master():
+            return
+
+        was_training = self.model.training
+        self.model.eval()
+
+        all_latents = []
+        norm_stds = []
+        try:
+            for i, batch in enumerate(val_loader):
+                if i >= 3:  # 3 batches is enough for a stable rank estimate
+                    break
+                frames = batch[0] if isinstance(batch, (list, tuple)) else batch
+                frames = frames.to(self.device)
+                if frames.dim() == 4:
+                    frames = frames.unsqueeze(1)
+                z = self.model.encode_only(frames)  # (B, T*L, D)
+                B = z.shape[0]
+                T = frames.shape[1]
+                L = self.tokenizer_cfg.num_latent_tokens
+                D = self.tokenizer_cfg.latent_dim
+                z_4d = z.view(B, T, L, D)
+                # Norm trajectory: first latent slot per frame, norm per t, std over T
+                first_slot = z_4d[:, :, 0, :]                       # (B, T, D)
+                norms_per_t = first_slot.norm(dim=-1)               # (B, T)
+                norm_stds.append(norms_per_t.std(dim=1).mean().item())
+                all_latents.append(z_4d.reshape(-1, D).cpu())
+        finally:
+            if was_training:
+                self.model.train()
+
+        if not all_latents:
+            return
+
+        latents_flat = torch.cat(all_latents, dim=0)               # (N, D)
+        centered = latents_flat - latents_flat.mean(dim=0, keepdim=True)
+        S = torch.linalg.svdvals(centered)
+        var = S ** 2
+        total = var.sum().clamp_min(1e-12)
+        var_norm = var / total
+        eff_rank = float(torch.exp(-(var_norm * (var_norm + 1e-12).log()).sum()))
+        cum = torch.cumsum(var_norm, dim=0)
+        n_95 = int((cum < 0.95).sum().item()) + 1
+
+        metrics = {
+            "latent/effective_rank": eff_rank,
+            "latent/n95_components": float(n_95),
+            "latent/norm_std_within_seq": float(sum(norm_stds) / max(1, len(norm_stds))),
+            "latent/abs_max": float(latents_flat.abs().max().item()),
+        }
+        wandb.log(metrics, step=self.global_step)
 
     def load_checkpoint(self, path: str, strict: bool = True) -> int:
         try:
@@ -155,7 +277,7 @@ class TokenizerTrainer:
             if frames.dim() == 4: #TODO change it after intial implementation
                 frames = frames.unsqueeze(1)
 
-            with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp): #TODO Replace the deprecated class
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=self.training_cfg.amp):
                 outputs = self.model(frames)
                 loss_outputs = self.loss_module(
                     recon=outputs.reconstructed,
@@ -170,14 +292,13 @@ class TokenizerTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                
-                # clip_grad_norm_ returns the pre-clip gradient norm
+
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     self.training_cfg.grad_clip,
                 )
-                
-                self.scaler.step(self.optimizer)  # xm.optimizer_step on TPU (includes mark_step)
+
+                self.scaler.step(self.optimizer)
                 self.scaler.update()
 
                 self.global_step += 1
@@ -192,14 +313,52 @@ class TokenizerTrainer:
                 _log_count += 1
 
                 if self.global_step % log_interval == 0:
+                    # Host-side resource counters from /proc/self/status (passive — no GPU sync).
+                    _local_rss = -1.0
+                    _local_threads = -1
+                    _local_fds = -1
+                    _local_shm = -1
+                    try:
+                        with open('/proc/self/status') as _f:
+                            for _line in _f:
+                                if _line.startswith('RssAnon:'):
+                                    _local_rss = int(_line.split()[1]) / (1024 ** 2)
+                                elif _line.startswith('Threads:'):
+                                    _local_threads = int(_line.split()[1])
+                    except OSError:
+                        pass
+                    try:
+                        import os as _os_probe
+                        _local_fds = len(_os_probe.listdir('/proc/self/fd'))
+                        _local_shm = len(_os_probe.listdir('/dev/shm'))
+                    except OSError:
+                        pass
+
+                    # RSS warning — early OOM signal. Threshold 55 GB matches dynamics.
+                    if _local_rss > 55 and not self._rss_warning_emitted:
+                        print(
+                            f"[WARN] RSS {_local_rss:.1f} GB — near OOM-kill threshold.",
+                            flush=True,
+                        )
+                        self._rss_warning_emitted = True
+
                     if is_master():
                         n = max(_log_count, 1)
+                        # Single device→host transfer instead of 5 separate .item() calls.
+                        log_vec = torch.stack([
+                            _log_loss / n,
+                            _log_mse / n,
+                            _log_lpips / n,
+                            _log_grad_norm / n,
+                            _log_mask_ratio / n,
+                        ]).cpu().tolist()
+                        loss_v, mse_v, lpips_v, grad_v, mask_v = log_vec
                         self.metrics_buffer.update({
-                            "train/loss": (_log_loss / n).item(),
-                            "train/mse": (_log_mse / n).item(),
-                            "train/lpips": (_log_lpips / n).item() if isinstance(_log_lpips, torch.Tensor) else _log_lpips / n,
-                            "train/grad_norm": (_log_grad_norm / n).item() if isinstance(_log_grad_norm, torch.Tensor) else _log_grad_norm / n,
-                            "train/mask_ratio": (_log_mask_ratio / n).item(),
+                            "train/loss": loss_v,
+                            "train/mse": mse_v,
+                            "train/lpips": lpips_v,
+                            "train/grad_norm": grad_v,
+                            "train/mask_ratio": mask_v,
                         })
 
                         metrics = self.metrics_buffer.get_averages()
@@ -218,9 +377,19 @@ class TokenizerTrainer:
                             metrics.update(ModelStatistics.compute_weight_stats(self.model))
                             metrics.update(ModelStatistics.compute_gradient_stats(self.model))
 
+                        # Host-side resource metrics.
+                        if _local_rss >= 0:
+                            metrics['host/rss_anon_gb'] = _local_rss
+                        if _local_threads >= 0:
+                            metrics['host/threads'] = _local_threads
+                        if _local_fds >= 0:
+                            metrics['host/fd_count'] = _local_fds
+                        if _local_shm >= 0:
+                            metrics['host/shm_entries'] = _local_shm
+
                         wandb.log(metrics, step=self.global_step)
 
-                    # Reset on ALL processes — prevents unbounded accumulation
+                    # Reset accumulators — prevents unbounded accumulation
                     _log_loss.zero_()
                     _log_mse.zero_()
                     _log_lpips.zero_()
@@ -235,13 +404,19 @@ class TokenizerTrainer:
                 total_lpips.add_(loss_outputs.lpips_loss.detach())
             total_steps += 1
 
-        # Single .item() at epoch end — one sync instead of N
+        # Single batched device→host transfer — one sync instead of 3-4
+        denom = max(total_steps, 1)
+        loss_v, mse_v, lpips_v = torch.stack([
+            total_loss / denom,
+            total_mse / denom,
+            total_lpips / denom,
+        ]).cpu().tolist()
         epoch_metrics = {
-            "loss/tokenizer_total": (total_loss / max(total_steps, 1)).item(),
-            "loss/tokenizer_mse": (total_mse / max(total_steps, 1)).item(),
+            "loss/tokenizer_total": loss_v,
+            "loss/tokenizer_mse": mse_v,
         }
-        if total_lpips.item() > 0:
-            epoch_metrics["loss/tokenizer_lpips"] = (total_lpips / max(total_steps, 1)).item()
+        if lpips_v > 0:
+            epoch_metrics["loss/tokenizer_lpips"] = lpips_v
         return epoch_metrics
 
     @torch.no_grad()
@@ -250,11 +425,12 @@ class TokenizerTrainer:
         Evaluates the model on the validation set and saves visualizations.
         """
         self.model.eval()
-        total_loss = 0.0
-        total_mse = 0.0
-        total_lpips = 0.0
-        total_steps = 0
-        
+        # On-device accumulators — avoid per-batch .item() syncs in the eval loop.
+        total_loss = torch.zeros((), device=self.device)
+        total_mse = torch.zeros((), device=self.device)
+        total_lpips = torch.zeros((), device=self.device)
+        total_steps = 0  # host int — no sync needed
+
         import os
         os.makedirs(output_dir, exist_ok=True)
 
@@ -274,7 +450,7 @@ class TokenizerTrainer:
             from .masking import sample_random_mask
             mask = sample_random_mask(frames.size(0), seq_len, 0.75, 0.75, self.device, num_frames=t) #TODO need to check the mask ratio for evaluation
             
-            with torch.amp.autocast(device_type=get_device_type(self.device), enabled=self.training_cfg.amp):
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=self.training_cfg.amp):
                 outputs = self.model(frames, mask=mask)
                 loss_outputs = self.loss_module(
                     recon=outputs.reconstructed,
@@ -284,29 +460,36 @@ class TokenizerTrainer:
                     normalize_by=self.tokenizer_cfg.norm_loss_by,
                 )
 
-            total_loss += loss_outputs.total_loss.item()
-            total_mse += loss_outputs.mse_loss.item()
+            total_loss.add_(loss_outputs.total_loss.detach())
+            total_mse.add_(loss_outputs.mse_loss.detach())
             if loss_outputs.lpips_loss is not None:
-                total_lpips += loss_outputs.lpips_loss.item()
+                total_lpips.add_(loss_outputs.lpips_loss.detach())
             total_steps += 1
 
             # Visualize first batch
         
             self.visualize_reconstruction(val_loader, i, output_dir)
 
+        # Single batched device→host transfer at eval end (was 3*N per-batch syncs).
+        denom = max(total_steps, 1)
+        loss_v, mse_v, lpips_v = torch.stack([
+            total_loss / denom,
+            total_mse / denom,
+            total_lpips / denom,
+        ]).cpu().tolist()
         metrics = {
-            "eval/loss": total_loss / max(total_steps, 1),
-            "eval/mse": total_mse / max(total_steps, 1),
+            "eval/loss": loss_v,
+            "eval/mse": mse_v,
         }
-        if total_lpips > 0:
-            metrics["eval/lpips"] = total_lpips / max(total_steps, 1)
-            
+        if lpips_v > 0:
+            metrics["eval/lpips"] = lpips_v
+
         print("Evaluation Results:")
         for k, v in metrics.items():
             print(f"  {k}: {v:.4f}")
-        
+
         wandb.log(metrics)
-            
+
         return metrics
 
     @torch.no_grad()

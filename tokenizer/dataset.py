@@ -68,17 +68,10 @@ class DMControlDataset(VideoDataset):
     def __iter__(self) -> Iterator[torch.Tensor]:
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None:
-            # Main process — safe to import torch_xla via device_utils
-            from device_utils import get_ordinal
-            ordinal = get_ordinal()
             seed = np.random.randint(0, 2**32 - 1)
         else:
-            # Worker process — do NOT import device_utils (triggers torch_xla / libtpu init)
-            ordinal = 0
             seed = worker_info.seed % (2**32 - 1)
 
-        # Offset seed per TPU device so each chip gets different data
-        seed = (seed + ordinal * 17) % (2**32 - 1)
         np.random.seed(seed)
         env = self._get_env(seed=seed)
 
@@ -185,7 +178,15 @@ class OfflineDataset(VideoDataset):
         seq_len: int = 50,
         batch_size: int = 16,
         steps_per_epoch: int = 1000,
+        split: str = "train",
+        val_fraction: float = 0.1,
+        split_seed: int = 0,
     ):
+        if split not in ("train", "val"):
+            raise ValueError(f"split must be 'train' or 'val', got {split!r}")
+        if not 0.0 < val_fraction < 1.0:
+            raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
+
         data = np.load(path, mmap_mode='r')
         self.frames = data["frames"]    # (N, T, H, W, 3)
         self.actions = data["actions"]  # (N, T, action_dim)
@@ -196,24 +197,37 @@ class OfflineDataset(VideoDataset):
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.steps_per_epoch = steps_per_epoch
-        self.num_episodes = N
         self.episode_len = T_total
 
+        # Episode-level train/val split. We store an index array rather than
+        # slicing self.frames[keep] so the underlying mmap is preserved —
+        # numpy fancy indexing would otherwise load every selected episode
+        # into RAM up-front, which OOMs on large datasets (e.g. Hansen 10k).
+        split_rng = np.random.RandomState(split_seed)
+        perm = split_rng.permutation(N)
+        n_val = max(1, int(round(N * val_fraction)))
+        if n_val >= N:
+            raise ValueError(
+                f"val_fraction={val_fraction} leaves zero training episodes "
+                f"(N={N}, n_val={n_val})"
+            )
+        val_idx = perm[:n_val]
+        train_idx = perm[n_val:]
+        self.allowed_idx = val_idx if split == "val" else train_idx
+        self.split = split
+        self.num_episodes = len(self.allowed_idx)
+
     def __iter__(self) -> Iterator[torch.Tensor]:
-        # Offset seed per DataLoader worker and TPU device for data diversity
+        # Per-worker seed for data diversity across DataLoader workers.
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None:
-            from device_utils import get_ordinal
-            ordinal = get_ordinal()
             seed = np.random.randint(0, 2**32 - 1)
         else:
-            # Worker process — do NOT import device_utils (triggers torch_xla / libtpu init)
-            ordinal = 0
             seed = worker_info.seed % (2**32 - 1)
-        seed = (seed + ordinal * 17) % (2**32 - 1)
         np.random.seed(seed)
         for _ in range(self.steps_per_epoch):
-            idxs = np.random.randint(0, self.num_episodes, size=self.batch_size)
+            local_idxs = np.random.randint(0, self.num_episodes, size=self.batch_size)
+            idxs = self.allowed_idx[local_idxs]
             max_start = max(0, self.episode_len - self.seq_len)
             starts = np.random.randint(0, max_start + 1, size=self.batch_size)
 
@@ -253,6 +267,9 @@ class DatasetFactory:
         steps_per_epoch: int = 1000,
         dataset_path: Optional[str] = None,
         expected_action_dim: Optional[int] = None,
+        split: str = "train",
+        val_fraction: float = 0.1,
+        split_seed: int = 0,
     ) -> IterableDataset:
         if config.dataset_name == "offline":
             if dataset_path is None:
@@ -262,6 +279,9 @@ class DatasetFactory:
                 seq_len=config.seq_len,
                 batch_size=batch_size,
                 steps_per_epoch=steps_per_epoch,
+                split=split,
+                val_fraction=val_fraction,
+                split_seed=split_seed,
             )
         elif config.dataset_name == "dm_control":
             return DMControlDataset(

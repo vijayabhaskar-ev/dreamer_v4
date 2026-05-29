@@ -9,25 +9,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from device_utils import _XLA_AVAILABLE
-
-# ---------------------------------------------------------------------------
-# flex_attention (PyTorch 2.5+) — fused kernels with custom score transforms
-# Used on CUDA to get Flash-Attention-level efficiency with soft capping.
-# On XLA/TPU we keep the manual path since the XLA compiler fuses it natively.
-# ---------------------------------------------------------------------------
+# flex_attention (PyTorch 2.5+) — fused kernels with custom score transforms.
+# Falls back to the manual path on older PyTorch.
 _USE_FLEX_ATTN = False
-if not _XLA_AVAILABLE:
-    try:
-        from torch.nn.attention.flex_attention import (
-            flex_attention as _flex_attention,
-        )
-        _flex_attention = torch.compile(_flex_attention)
-        _USE_FLEX_ATTN = True
-    except ImportError:
-        pass
+try:
+    from torch.nn.attention.flex_attention import (
+        flex_attention as _flex_attention,
+    )
+    _flex_attention = torch.compile(_flex_attention)
+    _USE_FLEX_ATTN = True
+except ImportError:
+    pass
 
 _SOFT_CAP = 30.0 #TODO Add to config
+
+# Module-level flag controlling whether attention-score soft-capping is applied.
+# Default True = paper §3.4 spec. Iter 46 (2026-05-27): MaskedAutoencoderTokenizer
+# sets this to False at construction time based on `config.use_attention_soft_cap`
+# to match Hansen's verified-working reference (which omits soft-cap entirely).
+# Set via `set_soft_cap_enabled(False)` BEFORE constructing the model.
+_SOFT_CAP_ENABLED = True
+
+
+def set_soft_cap_enabled(enabled: bool) -> None:
+    """Toggle attention soft-capping globally for the module.
+    Must be called BEFORE model construction since flex_attention compiles its
+    score_mod at first call. Hansen's reference omits this entirely; setting
+    False matches that deviation.
+    """
+    global _SOFT_CAP_ENABLED
+    _SOFT_CAP_ENABLED = enabled
 
 
 def _soft_cap_mod(score, b, h, q_idx, kv_idx):
@@ -255,16 +266,26 @@ def _attention_with_soft_cap(
     """Scaled dot-product attention with logit soft capping (Gemma 2).
 
     Backend dispatch:
-      - **CUDA** (flex_attention): Fused Triton kernels via ``torch.compile``.
-        Memory-efficient tiled computation — never materialises the full
-        (L_q × L_k) attention matrix.  Requires PyTorch ≥ 2.5.
-      - **XLA / fallback**: Manual matmul → tanh → softmax → matmul.
-        The XLA compiler fuses this into an efficient graph natively.
-
-    Falls back to the manual path when dropout is requested, since
-    ``flex_attention`` does not support dropout natively.
+      - **flex_attention** (PyTorch ≥ 2.5): Fused Triton kernels via
+        ``torch.compile``. Memory-efficient tiled computation — never
+        materialises the full (L_q × L_k) attention matrix.
+      - **Manual fallback**: matmul → tanh → softmax → matmul. Used when
+        flex_attention is unavailable, when dropout is requested (flex
+        does not support it), or when ``attn_mask`` is non-None.
     """
-    # ── CUDA fast path: flex_attention with score_mod ──────────────────
+    # ── Iter 46 soft-cap disable path ────────────────────────────────
+    # When _SOFT_CAP_ENABLED is False, bypass both the flex_attention
+    # score_mod (which always applies soft-cap) and the manual cap line
+    # below. Use plain SDPA — matches Hansen exactly.
+    if not _SOFT_CAP_ENABLED:
+        return F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p if training else 0.0,
+            is_causal=is_causal,
+        )
+
+    # ── flex_attention fast path with score_mod ──────────────────────
     # Note: flex_attention + torch.compile cannot trace score_mod closures
     # that capture real tensors (e.g. attn_mask), so we only use the fast
     # path for mask-free / causal-only cases.
@@ -272,7 +293,7 @@ def _attention_with_soft_cap(
         score_mod = _soft_cap_causal_mod if is_causal else _soft_cap_mod
         return _flex_attention(q, k, v, score_mod=score_mod)
 
-    # ── XLA / dropout fallback: manual attention ──────────────────────
+    # ── Manual fallback (mask / dropout / no flex_attention) ─────────
     scale = q.shape[-1] ** -0.5
     scores = torch.matmul(q * scale, k.transpose(-2, -1))  # (B, H, Lq, Lk)
     scores = cap * torch.tanh(scores / cap)
@@ -404,18 +425,23 @@ class LatentCrossAttention(nn.Module):
             cache_key = (L_q, L_kv, num_frames)
             if self._cached_rope_key != cache_key:
                 num_patches = L_kv - L_q
-                latents_per_frame = L_q // num_frames
-                patches_per_frame = num_patches // num_frames
-                assert latents_per_frame * num_frames == L_q
-                assert patches_per_frame * num_frames == num_patches
-                q_frame_idx = torch.arange(L_q, device=q.device) // latents_per_frame
-                k_latent_frames = torch.arange(L_q, device=k.device) // latents_per_frame
-                k_patches_frames = torch.arange(num_patches, device=k.device) // patches_per_frame
-                self._cached_q_frame_idx = q_frame_idx
-                self._cached_k_frame_idx = torch.cat([k_latent_frames, k_patches_frames])
+                # Global token indices: latents at 0..L_q-1, patches at L_q..L_q+num_patches-1.
+                # Previous floor-div indexing (// latents_per_frame) gave all L tokens within a
+                # frame the SAME RoPE position, causing post-attention latent collapse.
+                # NOTE: requires self.rope.max_positions >= L_q + num_patches (set in tokenizer.py).
+                # TODO: rename self.rope (currently named rope_temporal) — it now encodes mixed
+                # sequence position rather than time-only.
+                self._cached_q_frame_idx = torch.arange(L_q, device=q.device)
+                k_latent_idx = torch.arange(L_q, device=k.device)
+                k_patches_idx = torch.arange(L_q, L_q + num_patches, device=k.device)
+                self._cached_k_frame_idx = torch.cat([k_latent_idx, k_patches_idx])
                 self._cached_rope_key = cache_key
 
-            cos, sin = self.rope(num_frames, latents.device, latents.dtype)
+            # Pass max position index we'll lookup (NOT num_frames). RotaryPositionEmbedding.forward
+            # returns a slice of size seq_len from the cache; if we ask for only num_frames=4
+            # positions, position_ids up to L_kv-1 will be OOB.
+            # L_kv = L_q + num_patches by construction (context = [latents, patches]).
+            cos, sin = self.rope(L_kv, latents.device, latents.dtype)
 
             q = apply_rotary_pos_emb_with_indices(q, cos, sin, self._cached_q_frame_idx)
             k = apply_rotary_pos_emb_with_indices(k, cos, sin, self._cached_k_frame_idx)
@@ -517,13 +543,18 @@ class PatchToLatentCrossAttention(nn.Module):
         if self.rope is not None and num_frames > 1:
             cache_key = (L_q, L_kv, num_frames)
             if self._cached_rope_key != cache_key:
-                latents_per_frame = L_kv // num_frames
-                patches_per_frame = L_q // num_frames
-                self._cached_q_frame_idx = torch.arange(L_q, device=q.device) // patches_per_frame
-                self._cached_k_frame_idx = torch.arange(L_kv, device=k.device) // latents_per_frame
+                # Symmetric to encoder's LatentCrossAttention: latents (K) at positions 0..L_kv-1,
+                # patches (Q) at positions L_kv..L_kv+L_q-1. Preserves the same relative offsets
+                # between latent and patch tokens that the encoder uses, so QK relationships
+                # transfer cleanly between encode and decode phases.
+                self._cached_q_frame_idx = torch.arange(L_kv, L_kv + L_q, device=q.device)
+                self._cached_k_frame_idx = torch.arange(L_kv, device=k.device)
                 self._cached_rope_key = cache_key
 
-            cos, sin = self.rope(num_frames, q.device, q.dtype)
+            # Pass max position index we'll lookup (NOT num_frames). Mirrors the same
+            # fix applied in LatentCrossAttention.forward — see note there.
+            rope_seq_len = L_kv + L_q
+            cos, sin = self.rope(rope_seq_len, q.device, q.dtype)
             q = apply_rotary_pos_emb_with_indices(q, cos, sin, self._cached_q_frame_idx)
             k = apply_rotary_pos_emb_with_indices(k, cos, sin, self._cached_k_frame_idx)
             
@@ -832,12 +863,13 @@ class TransformerBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
 
     def forward(
-        self, 
-        x: torch.Tensor, 
+        self,
+        x: torch.Tensor,
         num_frames: int,
         temporal_mask: Optional[AttentionMask] = None,
         latent_cross_mask: Optional[AttentionMask] = None,
         num_latents: int = 0,
+        encoder_modality_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -846,14 +878,20 @@ class TransformerBlock(nn.Module):
             temporal_mask: Causal mask for temporal attention (T, T)
             latent_cross_mask: Block causal mask for latent-to-all attention (L, L+T*N)
             num_latents: Number of latent tokens at the start of sequence
+            encoder_modality_mask: Float mask (L_pf+N_pf, L_pf+N_pf) for encoder
+                spatial attention. Paper §3.1: latent queries see all; patch queries
+                see patches only. 0.0=attend, -inf=block. Encoder-only; decoder
+                already has patches-only spatial.
         """
         if num_latents > 0:
             latents = x[:, :num_latents, :]
             patches = x[:, num_latents:, :]
-            
+
             if self.is_decoder:
                 # DECODER: patches cross-attend to latents (read compressed info)
-                # Per paper: "each decoder modality attends within itself and to the latents"
+                # Per paper §3.1: "each decoder modality attends within itself and to the latents"
+                # So decoder modality (patches) attends within itself (spatial+temporal below)
+                # AND to latents (this cross-attn). Latents themselves don't update in decoder.
                 patches = patches + self.drop_path(
                     self.patch_to_latent_attn(
                         self.patch_to_latent_norm(patches),
@@ -861,29 +899,60 @@ class TransformerBlock(nn.Module):
                         num_frames
                     )
                 )
-                # Latents in decoder don't update - they only serve as keys/values
+
+                # Decoder spatial/temporal: PATCHES ONLY (paper-correct decoder behavior).
+                patches = patches + self.drop_path(
+                    self.spatial_attn(self.norm1(patches), num_frames)
+                )
+                if self.use_temporal:
+                    patches = patches + self.drop_path(
+                        self.temporal_attn(self.norm_temporal(patches), num_frames, temporal_mask)
+                    )
+
+                x = torch.cat([latents, patches], dim=1)
             else:
-                # ENCODER: latents cross-attend to all tokens
+                # ENCODER: latents cross-attend to all tokens (existing path).
                 context = torch.cat([latents, patches], dim=1)
                 latents = latents + self.drop_path(
                     self.latent_cross_attn(
-                        self.latent_norm(latents), 
+                        self.latent_norm(latents),
                         self.context_norm(context),
                         num_frames,
                         latent_cross_mask
                     )
                 )
-            
-            patches = patches + self.drop_path(
-                self.spatial_attn(self.norm1(patches), num_frames)
-            )
-            
-            if self.use_temporal:
-                patches = patches + self.drop_path(
-                    self.temporal_attn(self.norm_temporal(patches), num_frames, temporal_mask)
+
+                # Fix A canonical: Real Fix 2 = spatial + temporal on FULL [latents, patches]
+                # sequence. The latents-only-temporal variant (Iter 30) collapsed to rank 1.4
+                # with tanh, matching all 7 prior tanh experiments. Fix A's full-sequence
+                # temporal is the regime that produced rank 9.19 — the only working config.
+                B, D = latents.shape[0], latents.shape[-1]
+                latents_per_frame = num_latents // num_frames
+                patches_per_frame = patches.shape[1] // num_frames
+
+                latents_4d = latents.view(B, num_frames, latents_per_frame, D)
+                patches_4d = patches.view(B, num_frames, patches_per_frame, D)
+                per_frame = torch.cat([latents_4d, patches_4d], dim=2)  # (B, T, L+N, D)
+                x_full = per_frame.flatten(1, 2)                        # (B, T*(L+N), D)
+
+                # Paper §3.1: in the encoder, patch queries attend to patches
+                # only (not to latents); latent queries attend to all. The
+                # `encoder_modality_mask` enforces this on the per-frame
+                # (L+N, L+N) spatial attention map.
+                x_full = x_full + self.drop_path(
+                    self.spatial_attn(self.norm1(x_full), num_frames, encoder_modality_mask)
                 )
-            
-            x = torch.cat([latents, patches], dim=1)
+                if self.use_temporal:
+                    x_full = x_full + self.drop_path(
+                        self.temporal_attn(self.norm_temporal(x_full), num_frames, temporal_mask)
+                    )
+
+                # De-layout back to [all_latents, all_patches] for the next block.
+                per_frame_back = x_full.view(B, num_frames, latents_per_frame + patches_per_frame, D)
+                latents = per_frame_back[:, :, :latents_per_frame, :].reshape(B, num_frames * latents_per_frame, D)
+                patches = per_frame_back[:, :, latents_per_frame:, :].reshape(B, num_frames * patches_per_frame, D)
+
+                x = torch.cat([latents, patches], dim=1)
         else: #TODO May be remove this else block if not needed 
             x = x + self.drop_path(self.spatial_attn(self.norm1(x), num_frames))
             

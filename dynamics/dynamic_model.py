@@ -155,6 +155,13 @@ class DynamicsModel(nn.Module):
         with torch.no_grad():
             B, T = frames.shape[:2]
             z = self.tokenizer.encode_only(frames)  # (B, T*S_z, latent_dim)
+            #TODO revert this chnage in final refactor
+            # Rescale to paper-equivalent magnitude. Tokenizer with tanh_scale=k
+            # saturates each dim at ±k; dividing by k gives ±1 (paper §3.2 expectation
+            # for flow matching). Auto-adapts: k=1 (paper) is a no-op, k=10 (Iter 42)
+            # divides by 10. getattr fallback handles pre-Iter-41 checkpoints (Fix A).
+            k = getattr(self.tokenizer.config, "tanh_scale", 1.0)
+            z = z / k
             z = z.view(B, T, -1, z.shape[-1])
             return z
 
