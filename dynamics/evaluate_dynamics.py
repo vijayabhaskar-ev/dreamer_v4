@@ -9,14 +9,14 @@ Example:
         --task cheetah_run \
         --batch-size 8 \
         --steps 20 \
-        --device tpu \
+        --device cuda \
         --output-dir eval/dynamics
 """
 
 from __future__ import annotations
 
-# MUST be first: sets env vars (inductor thread count, XLA cache dir) that
-# PyTorch reads at import time. Placing this after `import torch` is too late.
+# MUST be first: sets env vars (inductor thread count) that PyTorch reads at
+# import time. Placing this after `import torch` is too late.
 import _env_setup  # noqa: F401  (side-effect import)
 
 import argparse
@@ -39,7 +39,7 @@ from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
 from tokenizer.layers import AttentionMask
-from device_utils import get_device, mark_step, is_xla_device
+from device_utils import get_device
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -264,7 +264,6 @@ def denoise_one_frame(
 
         v = (z_hat_new - z_current) / max(1.0 - tau_k, 1e-4)
         z_current = z_current + v * d_step
-        mark_step()
 
     return z_current
 
@@ -333,8 +332,6 @@ def autoregressive_rollout(
         z_buffer[:, buf_len:buf_len + 1] = z_gen_noised
         buf_len += 1
 
-        mark_step()
-
         if (h + 1) % 5 == 0:
             print(f"  [rollout] generated frame {h + 1}/{rollout_horizon}")
 
@@ -372,7 +369,6 @@ def main(args: Optional[list[str]] = None) -> None:
 
     device = resolve_device(opts.device)
     print(f"[INFO] Using device: {device}")
-    _is_xla = is_xla_device(device)
 
     tokenizer_cfg = load_tokenizer_config_from_ckpt(opts.tokenizer_ckpt, device)
     dynamics_cfg = load_dynamics_config_from_ckpt(opts.dynamics_ckpt, device)
@@ -540,9 +536,6 @@ def main(args: Optional[list[str]] = None) -> None:
                     z_hat[:1].cpu(),
                 ))
 
-            # Trigger XLA execution
-            mark_step()
-
             processed_steps += 1
             if processed_steps % 5 == 0 or processed_steps == opts.steps:
                 print(f"[INFO] Processed {processed_steps}/{opts.steps} batches")
@@ -567,7 +560,6 @@ def main(args: Optional[list[str]] = None) -> None:
             gif_path = output_dir / f"step_{idx:03d}_gt_clean_pred.gif"
             save_video_gif(combined, gif_path, fps=opts.gif_fps)
             gif_paths.append(gif_path)
-            mark_step()
         print(f"[INFO] GIFs done.")
 
     # ── Autoregressive Rollout Evaluation ──────────────────────────────
@@ -640,7 +632,6 @@ def main(args: Optional[list[str]] = None) -> None:
                 vis_rollout = torch.cat([z_clean[:1, :num_context], z_rollout[:1]], dim=1).cpu()
                 rollout_gif_data.append((vis_gt, vis_rollout))
 
-            mark_step()
             print(f"[INFO] Rollout batch {step_idx + 1}/{opts.rollout_batches} done")
 
     # Generate rollout GIFs after the loop
@@ -653,7 +644,6 @@ def main(args: Optional[list[str]] = None) -> None:
             gif_path = output_dir / f"rollout_{idx:03d}_gt_vs_pred.gif"
             save_video_gif(combined, gif_path, fps=opts.gif_fps)
             rollout_gif_paths.append(gif_path)
-            mark_step()
         print(f"[INFO] Rollout GIFs done.")
 
     # ── Rollout Reporting ──────────────────────────────────────────────

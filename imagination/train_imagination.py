@@ -34,7 +34,7 @@ import wandb
 from dynamics.config import DynamicsConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
-from device_utils import get_device, should_use_xla, is_master, wrap_loader
+from device_utils import get_device, is_master
 
 from .config import ImaginationConfig
 from .trainer import ImaginationTrainer
@@ -229,7 +229,7 @@ def _train_fn(index=0, args=None):
         pin_memory=use_pin_memory,
         multiprocessing_context="spawn" if opts.num_workers > 0 else None,
     )
-    train_loader = wrap_loader(train_loader_raw, device)
+    train_loader = train_loader_raw
 
     # ── Trainer ─────────────────────────────────────────────────────
     trainer = ImaginationTrainer(
@@ -283,11 +283,7 @@ def _train_fn(index=0, args=None):
 def main(args: Optional[list[str]] = None) -> None:
     opts = build_parser().parse_args(args)
 
-    if should_use_xla(opts.device):
-        import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(_train_fn, args=(opts,), nprocs=None)
-    else:
-        _train_fn(index=0, args=opts)
+    _train_fn(index=0, args=opts)
 
 
 if __name__ == "__main__":

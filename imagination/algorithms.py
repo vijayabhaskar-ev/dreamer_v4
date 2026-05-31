@@ -145,7 +145,7 @@ def pmpo_policy_loss(
 
     log_prob = policy_head._log_prob(mu, log_std, actions)
 
-    # Float masks (not boolean indexing) keep the graph shape static for XLA.
+    # Float masks (not boolean indexing) keep the tensor shapes static and avoid data-dependent control flow.
     pos_mask = (advantages >= 0).float()
     neg_mask = 1 - pos_mask
     pos_term = -(alpha * (pos_mask * log_prob).sum()) / pos_mask.sum().clamp(min=1.0)

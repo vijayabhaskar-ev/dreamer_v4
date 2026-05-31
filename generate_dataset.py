@@ -1,4 +1,4 @@
-"""Generate an offline dataset from dm_control for TPU-friendly training.
+"""Generate an offline dataset from dm_control for offline training.
 
 Usage:
     python generate_dataset.py --domain cheetah --task run --episodes 2000 --seq-len 50

@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 
 from dynamics.flow_matching import add_noise
-from device_utils import mark_step
 
 
 @torch.no_grad()
@@ -125,8 +124,6 @@ def imagine_rollout(
       actions_buffer[:, buf_len] = a_new 
 
       buf_len = buf_len + 1
-
-      mark_step()
 
     values_buf[:, horizon] = v_new
 

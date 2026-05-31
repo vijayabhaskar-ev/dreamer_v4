@@ -99,7 +99,7 @@ class ModelStatistics:
         """Compute weight norm statistics grouped by layer type.
 
         Accumulates squared norms on-device and calls .item() only once
-        per group at the end — avoids per-parameter XLA syncs.
+        per group at the end — avoids per-parameter host↔device syncs.
 
         Args:
             model: PyTorch model to analyze.
@@ -158,7 +158,7 @@ class ModelStatistics:
         """Compute gradient norm statistics grouped by layer type.
 
         Accumulates squared norms on-device and calls .item() only once
-        per group at the end — avoids per-parameter XLA syncs.
+        per group at the end — avoids per-parameter host↔device syncs.
 
         Args:
             model: PyTorch model with computed gradients.

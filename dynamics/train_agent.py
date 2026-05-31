@@ -18,7 +18,7 @@ See Section 3.3 of the Dreamer V4 paper for details on agent finetuning.
 
 from __future__ import annotations
 
-# MUST be first: sets env vars (inductor thread count, XLA cache dir) that
+# MUST be first: sets env vars (inductor thread count, cache dir) that
 # PyTorch reads at import time. Placing this after `import torch` is too late.
 import _env_setup  # noqa: F401  (side-effect import)
 
@@ -35,7 +35,7 @@ from .config import DynamicsConfig
 from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
-from device_utils import get_device, should_use_xla, is_master, wrap_loader
+from device_utils import get_device, is_master
 import wandb
 
 
@@ -310,9 +310,9 @@ def _train_fn(index=0, args=None):
         pin_memory=use_pin_memory,
     ) if val_dataset is not None else None
 
-    train_loader_short = wrap_loader(train_loader_short_raw, device)
-    train_loader_long = wrap_loader(train_loader_long_raw, device)
-    val_loader = wrap_loader(val_loader_raw, device) if val_loader_raw is not None else None
+    train_loader_short = train_loader_short_raw
+    train_loader_long = train_loader_long_raw
+    val_loader = val_loader_raw if val_loader_raw is not None else None
 
     # ── Trainer + Phase 2 setup ──────────────────────────────────────
 
@@ -399,11 +399,7 @@ def _train_fn(index=0, args=None):
 def main(args: Optional[list[str]] = None) -> None:
     opts = build_parser().parse_args(args)
 
-    if should_use_xla(opts.device):
-        import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(_train_fn, args=(opts,), nprocs=None)
-    else:
-        _train_fn(index=0, args=opts)
+    _train_fn(index=0, args=opts)
 
 
 

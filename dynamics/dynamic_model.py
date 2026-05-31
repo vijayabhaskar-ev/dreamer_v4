@@ -105,7 +105,7 @@ class DynamicsModel(nn.Module):
             q - k <= C      (window — not too far back)
 
         Cached per T value. For two fixed T values (T₁, T₂) this means
-        exactly two cached masks — no XLA recompilation from mask changes.
+        exactly two cached masks, rebuilt only when a new T is first seen.
         """
         if T not in self._temporal_mask_cache:
             C = self._context_length

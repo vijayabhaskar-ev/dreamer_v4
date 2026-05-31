@@ -68,7 +68,7 @@ def twohot_encode(x: torch.Tensor, bins_symlog: torch.Tensor) -> torch.Tensor:
     k = pos.long().clamp(max=N - 2)   # lower bin index
     w = pos - k.float()               # interpolation weight ∈ [0, 1]
 
-    # XLA triggers graph recompilation if shapes vary. `scatter_` is a single fixed-graph operation that XLA can compile once and reuse — it's the TPU-friendly way to do indexed writes.   
+    # `scatter_` is a single fixed-shape operation, so it's an efficient way to do indexed writes without dynamic-shape branching.
     result = x.new_zeros(*x.shape, N)
     result.scatter_(-1, k.unsqueeze(-1), (1.0 - w).unsqueeze(-1))
     result.scatter_add_(-1, (k + 1).unsqueeze(-1), w.unsqueeze(-1))

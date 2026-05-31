@@ -10,8 +10,8 @@ Requires a pretrained tokenizer checkpoint.
 
 from __future__ import annotations
 
-# MUST be first: sets env vars (inductor thread count, XLA cache dir) that
-# PyTorch reads at import time. Placing this after `import torch` is too late.
+# MUST be first: sets env vars (inductor thread count) that PyTorch reads at
+# import time. Placing this after `import torch` is too late.
 import _env_setup  # noqa: F401  (side-effect import)
 
 import argparse
@@ -28,7 +28,7 @@ from .config import DynamicsConfig
 from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
-from device_utils import get_device, should_use_xla, is_master, wrap_loader, initialize_xla_cache
+from device_utils import get_device, is_master
 import wandb
 
 
@@ -88,13 +88,6 @@ def build_parser() -> argparse.ArgumentParser:
     # Logging
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--log-model-stats-interval", type=int, default=50)
-    # On XLA/TPU the CPU-offload model-stats path has non-trivial compile
-    # cost per invocation.  Firing every 50 steps on v4-8 drove per-rank
-    # host RSS past 60 GB and caused a silent OOM-kill hang at epoch 51.
-    # Default to firing rarely on XLA; lightweight per-step health stats
-    # (weight_norm, grad_norm, max_abs) still log every log-interval via
-    # the on-device training-graph path.
-    parser.add_argument("--log-model-stats-interval-xla", type=int, default=2000)
     parser.add_argument("--checkpoint-interval", type=int, default=None)
 
     # Dataset
@@ -106,20 +99,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--steps-per-epoch", type=int, default=100)
     parser.add_argument("--val-steps-per-epoch", type=int, default=None)
-    parser.add_argument(
-        "--enable-mp-device-loader",
-        action="store_true",
-        help=(
-            "Re-enable torch_xla MpDeviceLoader for async host→device "
-            "prefetch.  Disabled by default because MpDeviceLoader on "
-            "torch_xla 2.7 leaks ~1 thread per next() call, hitting ~10k "
-            "threads over 5 hours and tripping the watchdog.  Only safe "
-            "to enable after verifying the thread-leak fix in newer "
-            "torch_xla (e.g. on v4-32 pod images with 2.8+).  When "
-            "enabling, measure TPU duty cycle for ≥15 min and keep on "
-            "only if it shows a measurable improvement."
-        ),
-    )
 
     # WandB
     parser.add_argument("--wandb-project", type=str, default="dreamer-v4-dynamics")
@@ -145,7 +124,7 @@ def load_tokenizer_config_from_ckpt(ckpt_path: str, device: str = "cpu") -> Opti
 
 
 def _train_fn(index=0, args=None):
-    """Per-device training function (called by xmp.spawn or directly)."""
+    """Per-device training function (called directly)."""
     opts = args if args is not None else build_parser().parse_args()
 
     ckpt_dir = Path(opts.checkpoint_dir)
@@ -209,7 +188,6 @@ def _train_fn(index=0, args=None):
         checkpoint_interval=checkpoint_interval,
         log_interval=opts.log_interval,
         log_model_stats_interval=opts.log_model_stats_interval,
-        log_model_stats_interval_xla=opts.log_model_stats_interval_xla,
         warmup_steps=opts.warmup_steps,
         min_lr=opts.min_lr,
         curriculum_warmup_steps=opts.curriculum_warmup_steps,
@@ -226,14 +204,11 @@ def _train_fn(index=0, args=None):
         else:
             run_name = opts.wandb_name
         wandb_mode = "disabled" if opts.wandb_disabled else ("offline" if opts.wandb_offline else "online")
-        # TODO(REMOVE-WHEN-LEAK-FIXED): Allow resuming the SAME wandb
-        # run across run_training_loop.sh cycles by reading a stable
-        # id from env.  When WANDB_RUN_ID is set (the bash wrapper
-        # exports it once per training session), every cycle appends
-        # to that one run → charts show continuous epoch /
+        # Allow resuming the SAME wandb run across restarts by reading a
+        # stable id from env.  When WANDB_RUN_ID is set, every restart
+        # appends to that one run → charts show continuous epoch /
         # global_step progression instead of N fragmented runs.
-        # Unset → wandb generates a fresh id as before.  Keeping this
-        # even after the leak fix is harmless and nice-to-have for
+        # Unset → wandb generates a fresh id as before.  Nice-to-have for
         # resume-across-preemptions behavior.
         _wandb_run_id = os.environ.get("WANDB_RUN_ID")
         wandb.init(
@@ -304,17 +279,18 @@ def _train_fn(index=0, args=None):
         )
 
     device = get_device(opts.device)
-    initialize_xla_cache()  # persist compiled graphs across restarts; no-op on CUDA/CPU
     use_pin_memory = device.type == "cuda"
 
-    # persistent_workers=False is CRITICAL — with forkserver (or spawn)
-    # each DataLoader worker re-imports torch + torch_xla + numpy from
-    # scratch (~2.5 GB per worker, no copy-on-write).  With 4 PJRT workers
-    # × 2 loaders × 4 workers each = 32 DataLoader workers × 2.5 GB =
-    # ~80 GB.  persistent_workers=True keeps all 32 alive forever, pinning
-    # that 80 GB permanently and pushing Committed_AS past 380 GB → OOM.
-    # persistent_workers=False tears workers down at each epoch boundary,
-    # so the 80 GB is reclaimed and memory stays bounded.
+    # With forkserver (or spawn) each DataLoader worker re-imports torch +
+    # numpy from scratch (~2.5 GB per worker, no copy-on-write). On CUDA
+    # single-process we have 2 loaders × 4 workers = 8 worker processes
+    # × 2.5 GB = 20 GB worst case, which fits comfortably on a 51 GB host.
+    # Setting persistent_workers=True on CUDA keeps those workers alive
+    # across epochs, eliminating the 5-10 sec teardown/restart pause at
+    # every epoch boundary. It stays off on CPU to avoid pinning that RAM.
+    use_persistent_workers = (
+        opts.num_workers > 0 and device.type == "cuda"
+    )
     train_loader_short_raw = DataLoader(
         train_dataset_short,
         batch_size=None,
@@ -322,6 +298,7 @@ def _train_fn(index=0, args=None):
         pin_memory=use_pin_memory,
         prefetch_factor=2 if opts.num_workers > 0 else None,
         multiprocessing_context='forkserver' if opts.num_workers > 0 else None,
+        persistent_workers=use_persistent_workers,
     )
     train_loader_long_raw = DataLoader(
         train_dataset_long,
@@ -330,6 +307,7 @@ def _train_fn(index=0, args=None):
         pin_memory=use_pin_memory,
         prefetch_factor=2 if opts.num_workers > 0 else None,
         multiprocessing_context='forkserver' if opts.num_workers > 0 else None,
+        persistent_workers=use_persistent_workers,
     )
 
     val_loader_raw = DataLoader(
@@ -339,20 +317,9 @@ def _train_fn(index=0, args=None):
         pin_memory=use_pin_memory,
     ) if val_dataset is not None else None
 
-    # Opt-in MpDeviceLoader wrapping — OFF by default on torch_xla 2.7 (see
-    # wrap_loader docstring + --enable-mp-device-loader flag).
-    train_loader_short = wrap_loader(
-        train_loader_short_raw, device,
-        enable_mp_device_loader=opts.enable_mp_device_loader,
-    )
-    train_loader_long = wrap_loader(
-        train_loader_long_raw, device,
-        enable_mp_device_loader=opts.enable_mp_device_loader,
-    )
-    val_loader = wrap_loader(
-        val_loader_raw, device,
-        enable_mp_device_loader=opts.enable_mp_device_loader,
-    ) if val_loader_raw is not None else None
+    train_loader_short = train_loader_short_raw
+    train_loader_long = train_loader_long_raw
+    val_loader = val_loader_raw if val_loader_raw is not None else None
 
     trainer = DynamicsTrainer(
         dynamics_cfg=dynamics_cfg,
@@ -409,12 +376,8 @@ def _train_fn(index=0, args=None):
 def main(args: Optional[list[str]] = None) -> None:
     opts = build_parser().parse_args(args)
 
-    if should_use_xla(opts.device):
-        import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(_train_fn, args=(opts,), nprocs=None)
-    else:
-        #TODO Implement multi-GPU training
-        _train_fn(index=0, args=opts)
+    #TODO Implement multi-GPU training
+    _train_fn(index=0, args=opts)
 
 
 if __name__ == "__main__":

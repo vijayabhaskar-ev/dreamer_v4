@@ -11,7 +11,7 @@ Example:
         --dataset offline --dataset-path cheetah_run.npz \\
         --batch-size 32 --steps 100 \\
         --max-gifs 4 --top-k-worst 8 \\
-        --device tpu --output-dir evaluation/tokenizer
+        --device cuda --output-dir evaluation/tokenizer
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from PIL import Image
 from torch.utils.data import DataLoader
 import wandb
 
-from device_utils import get_device, is_xla_device, mark_step
+from device_utils import get_device
 from dynamics.evaluate_dynamics import (
     decode_latents_to_frames,
     load_tokenizer_config_from_ckpt,
@@ -161,7 +161,6 @@ def main(args: Optional[list[str]] = None) -> None:
 
     device = resolve_device(opts.device)
     print(f"[INFO] Using device: {device}")
-    _is_xla = is_xla_device(device)
 
     tokenizer_cfg = load_tokenizer_config_from_ckpt(opts.tokenizer_ckpt, device)
     eval_seq_len = opts.seq_len if opts.seq_len > 0 else tokenizer_cfg.seq_len
@@ -261,8 +260,6 @@ def main(args: Optional[list[str]] = None) -> None:
                 gif_data.append((frames_cpu[0].clone(), recon_cpu[0].clone()))
 
             processed += 1
-            if _is_xla:
-                mark_step()
             if processed % 10 == 0 or processed == opts.steps:
                 print(f"[INFO] Processed {processed}/{opts.steps} batches")
 

@@ -33,10 +33,8 @@ from heads import RewardHead, ContinueHead, PolicyHead
 from device_utils import (
     get_device,
     make_grad_scaler,
-    mark_step,
     save_checkpoint as save_ckpt,
     is_master,
-    is_xla_device,
 )
 
 from .config import ImaginationConfig
@@ -76,7 +74,6 @@ class ImaginationTrainer:
         self.tokenizer_cfg = tokenizer_cfg
         self.cfg = imagination_cfg
         self.device = get_device(imagination_cfg.device)
-        self._is_xla = is_xla_device(self.device)
 
         # ── Tokenizer (frozen) ──────────────────────────────────────
         self.tokenizer = MaskedAutoencoderTokenizer(tokenizer_cfg).to(self.device)
@@ -259,7 +256,7 @@ class ImaginationTrainer:
         self.optimizer = torch.optim.AdamW(param_groups, lr=self.cfg.lr)
 
     def _set_lr_from_schedule(self, total_steps: int) -> None:
-        """Linear warmup + cosine decay, quantized to 2 buckets for XLA."""
+        """Linear warmup + cosine decay, quantized to a few buckets."""
         step = self.global_step
         warmup = self.cfg.warmup_steps
         if step < warmup:
@@ -269,7 +266,7 @@ class ImaginationTrainer:
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             frac = max(self.cfg.min_lr / self.cfg.lr, cosine)
 
-        # Quantize to 2 buckets (XLA recompilation lesson from MEMORY.md)
+        # Quantize to 2 buckets
         bucket = round(frac * 2) / 2
         lr = self.cfg.lr * bucket
         for pg in self.optimizer.param_groups:
@@ -353,9 +350,6 @@ class ImaginationTrainer:
             self.cfg.grad_clip,
         )
         self.optimizer.step()
-
-        if self._is_xla:
-            mark_step()
 
         return {
             "loss/total": total_loss.detach(),
