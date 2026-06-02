@@ -14,9 +14,8 @@ import copy
 import gc
 import math
 import pickle
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import torch
 import torch.nn as nn

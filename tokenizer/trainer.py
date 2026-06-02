@@ -5,7 +5,7 @@ from __future__ import annotations
 import gc
 import pickle
 from dataclasses import dataclass
-from typing import Dict, Iterator, Optional
+from typing import Dict, Optional
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset
@@ -14,7 +14,7 @@ from .config import TokenizerConfig
 from .losses import MaskedAutoencoderLoss
 from .tokenizer import MaskedAutoencoderTokenizer
 from .metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
-from device_utils import get_device, get_device_type, make_grad_scaler, save_checkpoint, is_master
+from device_utils import get_device, make_grad_scaler, save_checkpoint, is_master
 from PIL import Image
 import wandb
 
