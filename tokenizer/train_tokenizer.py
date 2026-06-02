@@ -7,18 +7,16 @@ from __future__ import annotations
 import _env_setup  # noqa: F401  (side-effect import)
 
 import argparse
-import os
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import torch
 from torch.utils.data import DataLoader, IterableDataset
 
 from .config import TokenizerConfig
 from .trainer import TokenizerTrainer, TokenizerTrainingConfig, MaskedAutoencoderLoss
 from .dataset import DatasetFactory
 from device_utils import get_device, is_master
+from wandb_utils import init_wandb, add_wandb_args
 import wandb
 
 try:
@@ -90,10 +88,7 @@ def build_parser() -> argparse.ArgumentParser: #TODO Need to check the defeault 
                              "of epoch count. Lower = more checkpoints to "
                              "compare for picking the best.")
     # WandB arguments
-    parser.add_argument("--wandb-project", type=str, default="dreamer-v4-tokenizer", help="WandB project name")
-    parser.add_argument("--wandb-entity", type=str, default=None, help="WandB entity (user/team)")
-    parser.add_argument("--wandb-name", type=str, default=None, help="WandB run name")
-    parser.add_argument("--wandb-offline", action="store_true", help="Run WandB in offline mode")
+    add_wandb_args(parser, default_project="dreamer-v4-tokenizer")
     return parser
 
 
@@ -101,23 +96,12 @@ def _train_fn(index=0, args=None):
     """Per-device training function."""
     parsed = args if args is not None else build_parser().parse_args()
 
-    # Only master initializes wandb; workers get disabled mode
-    if is_master():
-        if parsed.wandb_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"{parsed.dataset}_{parsed.task}_{timestamp}"
-        else:
-            run_name = parsed.wandb_name
-
-        wandb.init(
-            project=parsed.wandb_project,
-            entity=parsed.wandb_entity,
-            name=run_name,
-            mode="offline" if parsed.wandb_offline else "online",
-            config=vars(parsed),
-        )
-    else:
-        wandb.init(mode="disabled")
+    # Only master initializes wandb; workers get disabled mode.
+    init_wandb(
+        parsed,
+        run_name_prefix=f"{parsed.dataset}_{parsed.task}",
+        config=vars(parsed),
+    )
 
     if is_master():
         Path(parsed.checkpoint_dir).mkdir(parents=True, exist_ok=True)

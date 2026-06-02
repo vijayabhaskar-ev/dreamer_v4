@@ -15,9 +15,7 @@ from __future__ import annotations
 import _env_setup  # noqa: F401  (side-effect import)
 
 import argparse
-import os
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +27,7 @@ from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
 from device_utils import get_device, is_master
+from wandb_utils import init_wandb, add_wandb_args
 import wandb
 
 
@@ -101,11 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-steps-per-epoch", type=int, default=None)
 
     # WandB
-    parser.add_argument("--wandb-project", type=str, default="dreamer-v4-dynamics")
-    parser.add_argument("--wandb-entity", type=str, default=None)
-    parser.add_argument("--wandb-name", type=str, default=None)
-    parser.add_argument("--wandb-offline", action="store_true")
-    parser.add_argument("--wandb-disabled", action="store_true")
+    add_wandb_args(parser, default_project="dreamer-v4-dynamics")
 
     return parser
 
@@ -196,38 +191,21 @@ def _train_fn(index=0, args=None):
         long_batch_ratio=opts.long_batch_ratio,
     )
 
-    # Only master initializes wandb; workers get disabled mode
-    if is_master():
-        if opts.wandb_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"{opts.dataset}_{opts.task}_{timestamp}"
-        else:
-            run_name = opts.wandb_name
-        wandb_mode = "disabled" if opts.wandb_disabled else ("offline" if opts.wandb_offline else "online")
-        # Allow resuming the SAME wandb run across restarts by reading a
-        # stable id from env.  When WANDB_RUN_ID is set, every restart
-        # appends to that one run → charts show continuous epoch /
-        # global_step progression instead of N fragmented runs.
-        # Unset → wandb generates a fresh id as before.  Nice-to-have for
-        # resume-across-preemptions behavior.
-        _wandb_run_id = os.environ.get("WANDB_RUN_ID")
-        wandb.init(
-            project=opts.wandb_project,
-            entity=opts.wandb_entity,
-            name=run_name,
-            id=_wandb_run_id,
-            resume="allow" if _wandb_run_id else None,
-            config={
-                "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
-                "training": vars(training_cfg),
-                "tokenizer": vars(tokenizer_cfg) if hasattr(tokenizer_cfg, '__dict__') else str(tokenizer_cfg),
-                "task": opts.task,
-                "dataset": opts.dataset,
-            },
-            mode=wandb_mode,
-        )
-    else:
-        wandb.init(mode="disabled")
+    # Only master initializes wandb. resume=True honors a stable WANDB_RUN_ID env
+    # var so restarts append to one continuous run (charts show continuous epoch /
+    # global_step progression instead of N fragmented runs); see wandb_utils.
+    init_wandb(
+        opts,
+        run_name_prefix=f"{opts.dataset}_{opts.task}",
+        config={
+            "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
+            "training": vars(training_cfg),
+            "tokenizer": vars(tokenizer_cfg) if hasattr(tokenizer_cfg, '__dict__') else str(tokenizer_cfg),
+            "task": opts.task,
+            "dataset": opts.dataset,
+        },
+        resume=True,
+    )
     # Short-sequence dataset (T₁) — used for most training steps
     dataset_cfg_short = replace(
         tokenizer_cfg,

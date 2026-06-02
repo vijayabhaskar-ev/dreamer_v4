@@ -24,7 +24,6 @@ import _env_setup  # noqa: F401  (side-effect import)
 
 import argparse
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +35,7 @@ from .trainer import DynamicsTrainer, DynamicsTrainingConfig
 from tokenizer.config import TokenizerConfig
 from tokenizer.dataset import DatasetFactory
 from device_utils import get_device, is_master
+from wandb_utils import init_wandb, add_wandb_args
 import wandb
 
 
@@ -114,11 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-steps-per-epoch", type=int, default=None)
 
     # WandB
-    parser.add_argument("--wandb-project", type=str, default="dreamer-v4-agent")
-    parser.add_argument("--wandb-entity", type=str, default=None)
-    parser.add_argument("--wandb-name", type=str, default=None)
-    parser.add_argument("--wandb-offline", action="store_true")
-    parser.add_argument("--wandb-disabled", action="store_true")
+    add_wandb_args(parser, default_project="dreamer-v4-agent")
 
     return parser
 
@@ -211,32 +207,21 @@ def _train_fn(index=0, args=None):
 
     # ── WandB ────────────────────────────────────────────────────────
 
-    if is_master():
-        if opts.wandb_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"phase2_{opts.task}_{timestamp}"
-        else:
-            run_name = opts.wandb_name
-        wandb_mode = "disabled" if opts.wandb_disabled else ("offline" if opts.wandb_offline else "online")
-        wandb.init(
-            project=opts.wandb_project,
-            entity=opts.wandb_entity,
-            name=run_name,
-            config={
-                "phase": 2,
-                "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
-                "training": vars(training_cfg),
-                "tokenizer": vars(tokenizer_cfg) if hasattr(tokenizer_cfg, '__dict__') else str(tokenizer_cfg),
-                "task": opts.task,
-                "dataset": opts.dataset,
-                "mtp_length": opts.mtp_length,
-                "num_tasks": opts.num_tasks,
-                "dynamics_ckpt": opts.dynamics_ckpt,
-            },
-            mode=wandb_mode,
-        )
-    else:
-        wandb.init(mode="disabled")
+    init_wandb(
+        opts,
+        run_name_prefix=f"phase2_{opts.task}",
+        config={
+            "phase": 2,
+            "dynamics": vars(dynamics_cfg) if hasattr(dynamics_cfg, '__dict__') else str(dynamics_cfg),
+            "training": vars(training_cfg),
+            "tokenizer": vars(tokenizer_cfg) if hasattr(tokenizer_cfg, '__dict__') else str(tokenizer_cfg),
+            "task": opts.task,
+            "dataset": opts.dataset,
+            "mtp_length": opts.mtp_length,
+            "num_tasks": opts.num_tasks,
+            "dynamics_ckpt": opts.dynamics_ckpt,
+        },
+    )
 
     # ── Datasets ─────────────────────────────────────────────────────
 
