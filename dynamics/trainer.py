@@ -152,7 +152,14 @@ class DynamicsTrainer:
         # `mode="default"` avoids CUDA Graphs (which would need static shapes).
         # `fullgraph=False` allows graph breaks at no_grad boundaries
         # (encode_frames + bootstrap forwards) without aborting.
-        if self.device.type == "cuda":
+        #
+        # Phase 2 (train_heads=True) is NOT compiled: the MTP head losses add
+        # dynamically-shaped reductions whose backward hits an Inductor
+        # symbolic-shape codegen bug (`s86*((s86*s86)//s86)` → wrong buffer
+        # view) on this torch build. Phase 2 is cheap (frozen-ish backbone,
+        # small heads), so eager mode costs little and is reliable. Phase 1's
+        # compiled graph never sees those head reductions, so it stays compiled.
+        if self.device.type == "cuda" and not self.training_cfg.train_heads:
             try:
                 self.model = torch.compile(
                     self.model,
@@ -199,36 +206,19 @@ class DynamicsTrainer:
 
         self.scaler = make_grad_scaler(self.device, enabled=training_cfg.amp)
         self.global_step = 0
-        self._last_lr_bucket = -1
         self._cached_clip_params: list[torch.nn.Parameter] | None = None
         self.metrics_buffer = MetricsBuffer(window=training_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
 
-        # Cached device tensors — avoids reallocating per step
+        # Cached device zero — reused as a no-op loss placeholder for terms
+        # that are inactive on a given step (avoids allocating a fresh scalar
+        # per step).
         self._zero = torch.tensor(0.0, device=self.device)
-        self._ramp_tensor = torch.tensor(0.0, device=self.device)
-
-        # Device-side step counter.  Incremented in-place each training step
-        # via .add_(1.0).  Used to compute curriculum ramp_frac without
-        # baking a Python float (which would vary per step) into the graph.
-        self._step_dev = torch.zeros((), device=self.device)
-
-        # Precomputed schedule constants as device tensors.  Built ONCE at
-        # init so their values never change after construction.
-        self._warmup_end_dev = torch.tensor(
-            float(self.training_cfg.curriculum_warmup_steps),
-            device=self.device,
-        )
-        self._ramp_range_dev = torch.tensor(
-            float(
-                self.training_cfg.curriculum_ramp_steps
-                - self.training_cfg.curriculum_warmup_steps
-            ),
-            device=self.device,
-        )
-        # Quantization: floor(ramp_frac * 3) / 3 produces 4 discrete values
-        # {0.0, 1/3, 2/3, 1.0}.
-        self._ramp_levels_dev = torch.tensor(3.0, device=self.device)
+        # NOTE: the curriculum ramp is computed eagerly from self.global_step
+        # in the step loop (see _run_epoch).  The former device-side step
+        # counter + schedule-constant tensors existed only to keep a Python
+        # float out of the XLA graph; on CUDA (eager trainer loop) they were
+        # inert, so they were removed.
 
     # ── Optimizer construction ──────────────────────────────────────────
 
@@ -243,8 +233,14 @@ class DynamicsTrainer:
         no_decay_params = []
         default_decay_params = []
 
-        # Dynamics model params (skip agent_embedding — added to head group in Phase 2)
-        for name, param in self.model.named_parameters():
+        # Dynamics model params (skip agent_embedding — added to head group in Phase 2).
+        # Iterate the UNDERLYING module so parameter names are bare. Under
+        # torch.compile, self.model.named_parameters() prefixes every name with
+        # `_orig_mod.`, so the `agent_embedding.` skip below would silently fail
+        # → agent_embedding lands in BOTH this group and the head group →
+        # "some parameters appear in more than one parameter group".
+        underlying_model = getattr(self.model, "_orig_mod", self.model)
+        for name, param in underlying_model.named_parameters():
             if not param.requires_grad:
                 continue
             if name.startswith('agent_embedding.'):
@@ -333,14 +329,18 @@ class DynamicsTrainer:
             if "bootstrap" in rms_state:
                 self.rms_bootstrap.load_state_dict(rms_state["bootstrap"])
 
-        if "global_step" in state:
-            self.global_step = state["global_step"]
-            # Resync the device step counter to match the restored
-            # Python step so the on-device ramp_frac computation
-            # produces the correct curriculum value.
-            self._step_dev.fill_(float(self.global_step))
-        if "scheduler_bucket" in state:
-            self._last_lr_bucket = state["scheduler_bucket"]
+        # Phase 2 starts a FRESH LR schedule (warmup + cosine over Phase 2's own
+        # total_steps, e.g. 10k). Do NOT inherit Phase 1's global_step (~160k):
+        # that pushes progress = (step - warmup)/(total - warmup) >> 1, collapsing
+        # the cosine to an erratic ~min_lr and starving the freshly-initialized
+        # heads of the 3x LR they need to learn. The RMS normalizers ARE restored
+        # above (loss-scale continuity); only the step counter resets to 0.
+        # (Resuming mid-Phase-2 goes through load_checkpoint, which correctly
+        # keeps global_step — this reset is only for the fresh Phase-1→2 jump.)
+        self.global_step = 0
+        # Legacy checkpoints may carry a "scheduler_bucket" key from the old LR
+        # quantization scheme; it is intentionally ignored now (LR is recomputed
+        # from the schedule each step).
 
         # Enable agent tokens — adds new parameters
         self.model.enable_agent_tokens(num_tasks=num_tasks)
@@ -367,18 +367,16 @@ class DynamicsTrainer:
         self._schedule_base_lr = self.training_cfg.lr
 
 
-    # Number of discrete LR values the schedule can take on.  200 gives an
-    # essentially smooth cosine schedule (0.5% LR resolution).
-    _LR_BUCKETS = 200
-
     def _set_lr_from_schedule(self) -> None:
-        """Set optimizer LR from schedule, quantized to discrete buckets.
-
-        The cosine + warmup schedule is quantized to ``_LR_BUCKETS + 1``
-        discrete values.
+        """Set optimizer LR from the warmup + cosine-decay schedule, every step.
 
         Phase 2: dynamics groups get lr * dynamics_lr_multiplier,
                  head groups get lr * head_lr_multiplier.
+
+        (Formerly quantized to discrete LR buckets — that was an XLA
+        recompilation-avoidance hack: on TPU each distinct LR value baked a new
+        graph.  On eager CUDA the LR lives in optimizer.param_groups and never
+        enters a compiled graph, so we write the true smooth cosine directly.)
         """
         step = self.global_step
         warmup = self._schedule_warmup
@@ -393,19 +391,9 @@ class DynamicsTrainer:
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             frac = max(min_lr / base_lr, cosine)
 
-        # Quantize the schedule to discrete LR values.
-        bucket = int(frac * self._LR_BUCKETS)
-        if bucket == self._last_lr_bucket:
-            return  # Same bucket, no LR change
-        self._last_lr_bucket = bucket
-
-        # Honor the paper's min_lr floor.  Without max(...), bucket=0
-        # would give lr=0 literally (integer quantization discards the
-        # min_lr/base_lr floor computed on `frac` above), which is NOT
-        # what the Dreamer V4 paper specifies — it specifies cosine
-        # decay to min_lr=1e-6, a near-zero fine-tune tail rather than
-        # a hard freeze.  Clamping here restores paper spec.
-        lr = max(min_lr, base_lr * (bucket / float(self._LR_BUCKETS)))
+        # Honor the paper's min_lr floor: cosine decay to min_lr=1e-6 (a
+        # near-zero fine-tune tail), never a hard freeze to 0.
+        lr = max(min_lr, base_lr * frac)
         cfg = self.training_cfg
         for group in self.optimizer.param_groups:
             if cfg.train_heads and group.get("lr_multiplier") == "head":
@@ -498,7 +486,6 @@ class DynamicsTrainer:
                     .state_dict()
                 ),
                 "optimizer": self.optimizer.state_dict(),
-                "scheduler_bucket": self._last_lr_bucket,
                 "train_heads": self.training_cfg.train_heads,
                 "rms_normalizers": {
                     "flow": self.rms_flow.state_dict(),
@@ -582,13 +569,9 @@ class DynamicsTrainer:
                 self.rms_bc.load_state_dict(rms_state["bc"])
         if "global_step" in state:
             self.global_step = state["global_step"]
-            # Resync the device step counter — see the matching comment
-            # in the Phase-2 load path above.  One-time specialization
-            # cost (single .fill_() with Python float) in exchange for
-            # a stable ramp_frac computation across the entire resumed run.
-            self._step_dev.fill_(float(self.global_step))
-        if "scheduler_bucket" in state:
-            self._last_lr_bucket = state["scheduler_bucket"]
+        # Legacy checkpoints may carry a "scheduler_bucket" key from the old LR
+        # quantization scheme; it is intentionally ignored now (LR is recomputed
+        # from the schedule each step).
 
         # Sanity-check the loaded weights — if the checkpoint was saved
         # during a divergent run, the NaN/Inf values will propagate forward.
@@ -606,7 +589,7 @@ class DynamicsTrainer:
                 )
             print(
                 f"[INFO] Checkpoint loaded: global_step={self.global_step}, "
-                f"lr_bucket={self._last_lr_bucket}, weights all finite."
+                f"weights all finite."
             )
 
         return state.get("epoch", 0) + 1
@@ -681,6 +664,7 @@ class DynamicsTrainer:
                     # a new one — _MultiProcessingDataLoaderIter holds refs to
                     # worker queues + prefetched batches that otherwise leak
                     # across long-loader epoch boundaries.
+                    #TODO Need to refactor this.
                     del long_iter
                     gc.collect()
                     long_iter = iter(loader_long)
@@ -709,37 +693,47 @@ class DynamicsTrainer:
             # Context frame: First frame always gets near-clean noise level
             tau[:, 0] = 1.0 - self.dynamics_cfg.tau_ctx
 
-            # Advance the device step counter FIRST so the ramp
-            # computation below reads the current step as a device
-            # tensor value (not a Python int).
-            self._step_dev.add_(1.0)
-
             # Unified curriculum d-override.  Two Python-level branches
             # (flow-only vs. bootstrap-with-ramp).  The ramp and full
-            # behaviors share a single code path because the on-device
-            # ramp_frac computation naturally saturates at 1.0 past
-            # ramp_end, making the mask all-True and producing
-            # d = natural (the old full-phase behavior).
+            # behaviors share a single code path because ramp_frac
+            # saturates at 1.0 past ramp_end, making the mask all-True and
+            # producing d = natural (the old full-phase behavior).
             if self.global_step < warmup_end:
                 # Flow-only warmup: all d_min, no bootstrap.
+                ramp_frac = 0.0  # in scope for logging on warmup-phase log steps
                 d = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
             else:
-                # Bootstrap path with on-device ramp.
-                step_offset = self._step_dev - self._warmup_end_dev
-                ramp_frac_dev = step_offset / self._ramp_range_dev
-                # Quantize to 4 discrete levels via torch.floor.
-                # torch.floor(x*3)/3 maps [0,1] → {0, 1/3, 2/3, 1.0}.
-                # Past ramp_end this overshoots (values > 1.0); clamp_(0,1)
-                # saturates it → mask all-True → d = natural (full-phase).
-                quantized = (
-                    torch.floor(ramp_frac_dev * self._ramp_levels_dev)
-                    / self._ramp_levels_dev
-                )
-                self._ramp_tensor.copy_(quantized)
-                self._ramp_tensor.clamp_(0.0, 1.0)
-                mask = torch.rand_like(d) < self._ramp_tensor
+                # Bootstrap path.  ramp_step uses global_step + 1 to match
+                # the pre-increment convention of the old device-side step
+                # counter (advanced before this block, while global_step is
+                # advanced at the end of the step), keeping the curriculum
+                # schedule bit-for-bit unchanged.
+                ramp_step = self.global_step + 1
+                ramp_window = ramp_end - warmup_end
+                if ramp_window <= 0:
+                    # Curriculum disabled (Phase 2 sets warmup=ramp=0): full
+                    # bootstrap immediately. Avoids div-by-zero and matches the
+                    # paper — Phase 2 reuses the pretraining (full shortcut)
+                    # objective alongside the head losses.
+                    ramp_frac = 1.0
+                else:
+                    ramp_frac = (ramp_step - warmup_end) / ramp_window
+                # Continuous ramp: linearly grow the bootstrap-admitted fraction
+                # 0 → 1 across the window.  The old floor(x*3)/3 4-level
+                # quantization was an XLA recompilation-avoidance hack — a Python
+                # float in `rand_like(d) < ramp_frac` specialized a new graph per
+                # value, so it was bucketed to 4.  Inert on eager CUDA, where it
+                # only added a flat 667-step ramp_frac=0 plateau that runs the
+                # (already-gated-on) bootstrap forward passes with zero bootstrap
+                # signal.  Past ramp_end this overshoots (>1.0); clamp to 1.0 →
+                # mask all-True → d = natural.
+                ramp_frac = min(max(ramp_frac, 0.0), 1.0)
+                mask = torch.rand_like(d) < ramp_frac
                 d_min = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
                 d = torch.where(mask, d, d_min)
+
+
+            d[:, 0] = 1.0 / self.dynamics_cfg.K_max
 
             z_noised, _ = add_noise(z_clean, tau)
             tau_for_log, d_for_log = tau, d
@@ -916,6 +910,7 @@ class DynamicsTrainer:
                         smoothed_metrics.update({
                             "train/lr": self.optimizer.param_groups[0]["lr"],
                             "train/scale": self.scaler.get_scale(),
+                            "train/ramp_frac": ramp_frac,
                             "epoch": epoch,
                             "global_step": self.global_step,
                         })
@@ -976,8 +971,17 @@ class DynamicsTrainer:
             total_steps += 1
 
             # Periodic GC to free Python-side refs to tensors and numpy copies.
-            # Without this, host memory grows linearly (~50MB/step from stale refs).
-            gc_interval = 50
+            # The "~50MB/step" growth this guarded against was almost certainly
+            # the torch_xla host-side leak (graph/IR retention + the
+            # MpDeviceLoader thread leak), which does not exist on eager CUDA
+            # where refcounting frees per-iteration tensors immediately (the
+            # accumulators are already .detach()'d, so no graph is retained).
+            #TODO MEASUREMENT PROBE (XLA->CUDA cleanup #9): interval raised
+            #     50 -> 500 to test whether host RSS stays flat on CUDA without
+            #     frequent forced GC.  Watch `host/rss_anon_gb` in wandb over a
+            #     few thousand steps: if flat, delete this gc.collect() block
+            #     entirely; if it climbs, restore gc_interval=50.
+            gc_interval = 500
             if total_steps % gc_interval == 0:
                 gc.collect()
 

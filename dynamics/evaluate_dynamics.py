@@ -116,8 +116,12 @@ def decode_latents_to_frames(tokenizer, z_latents_4d: torch.Tensor) -> torch.Ten
     z_latents = z_latents_4d.reshape(B, T * S_z, D_latent)
 
     z_expanded = tokenizer.latent_expand(z_latents)
-    decoder_queries = tokenizer.decoder_queries.expand(B, -1, -1)
-    decoder_queries = decoder_queries.unsqueeze(1).expand(-1, T, -1, -1).flatten(1, 2)
+    # Iter 45 refactor: the per-position learnable `decoder_queries` parameter
+    # was replaced by a single shared `decoder_mask_token` expanded across all
+    # T * N_patches decoder positions. Mirror the tokenizer's own forward()
+    # construction here so decode stays in sync with training.
+    N_patches = tokenizer.patch_embed.num_patches()
+    decoder_queries = tokenizer.decoder_mask_token.expand(B, T * N_patches, -1)
     decoder_sequence = torch.cat([z_expanded, decoder_queries], dim=1)
 
     temporal_causal_mask = tokenizer._build_temporal_causal_mask(T, z_latents.device)

@@ -73,7 +73,7 @@ class LatentTokenEmbedding(nn.Module):
 
     def forward(self, batch: int, num_frames:int) -> torch.Tensor:
         latents = self.latent_tokens.expand(batch, -1, -1)
-        latents = latents.unsqueeze(1).expand(-1, num_frames, -1, -1)  # (B, T, 32, D)
+        latents = latents.unsqueeze(1).expand(-1, num_frames, -1, -1)  # (B, T, num_latent_tokens, D)
         latents = latents.flatten(1, 2) 
         return latents
 

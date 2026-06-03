@@ -155,13 +155,6 @@ class DynamicsModel(nn.Module):
         with torch.no_grad():
             B, T = frames.shape[:2]
             z = self.tokenizer.encode_only(frames)  # (B, T*S_z, latent_dim)
-            #TODO revert this chnage in final refactor
-            # Rescale to paper-equivalent magnitude. Tokenizer with tanh_scale=k
-            # saturates each dim at ±k; dividing by k gives ±1 (paper §3.2 expectation
-            # for flow matching). Auto-adapts: k=1 (paper) is a no-op, k=10 (Iter 42)
-            # divides by 10. getattr fallback handles pre-Iter-41 checkpoints (Fix A).
-            k = getattr(self.tokenizer.config, "tanh_scale", 1.0)
-            z = z / k
             z = z.view(B, T, -1, z.shape[-1])
             return z
 
@@ -192,7 +185,7 @@ class DynamicsModel(nn.Module):
         if has_agent:
             agent_tok = self.agent_embedding(batch_size=B)  # (B, 1, D_embed)
 
-        # ── Vectorized token assembly (no Python loop over T) ──────────
+        #TODO Need to refactor this part
         # Action tokens: (B, T, 1, D_embed)
         # Frame 0 uses no_action_emb; frames 1..T-1 use projected actions + no_action_emb
         if actions is not None:
@@ -207,9 +200,6 @@ class DynamicsModel(nn.Module):
             a_tokens = self.action_embedding.no_action_emb.unsqueeze(0).expand(B, T, -1, -1)  # (B, T, 1, D)
 
         td_tokens = tau_d.unsqueeze(2)  # (B, T, 1, D_embed)
-
-        # z_up already (B, T, S_z, D_embed)
-
         registers = self.register_tokens.unsqueeze(0).expand(B, T, -1, -1)  # (B, T, S_r, D_embed)
 
         parts = [a_tokens, td_tokens, z_up, registers]
