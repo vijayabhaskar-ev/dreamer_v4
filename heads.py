@@ -23,6 +23,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ── MTP padding mask ─────────────────────────────────────────────────────
+
+def _mtp_valid_mean(per_pos_loss: torch.Tensor, offset: int) -> torch.Tensor:
+    """Mean of a (B, T) per-position loss over MTP-valid positions only.
+
+    Multi-token-prediction targets at offset `n` come from timestep t+n, so the
+    last `n` positions of a length-T sequence have no real target — they were
+    zero/terminal-padded by build_mtp_targets / build_mtp_action_targets
+    (reward→0, done→1, action→0). Averaging over them trains the heads toward the
+    padding value and blows up the high-offset losses. Exclude them so each
+    per-offset loss is averaged over valid positions only.
+    """
+    seq_len = per_pos_loss.shape[1]
+    pos = torch.arange(seq_len, device=per_pos_loss.device)
+    valid = (pos < (seq_len - offset)).to(per_pos_loss.dtype)   # (T,)  last `offset` are padding
+    valid = valid.unsqueeze(0).expand_as(per_pos_loss)          # (B, T)
+    denom = valid.sum().clamp(min=1.0)
+    return (per_pos_loss * valid).sum() / denom
+
+
 # ── Symlog / Symexp transforms ───────────────────────────────────────────
 
 def symlog(x: torch.Tensor) -> torch.Tensor:
@@ -195,7 +215,8 @@ class RewardHead(nn.Module):
             logits = self.output_heads[n](features)                # (B, T, num_bins)
             twohot_target = twohot_encode(targets_future[..., n], self.bins_symlog)
             log_probs = F.log_softmax(logits, dim=-1)
-            losses.append(-(twohot_target * log_probs).sum(dim=-1).mean())
+            ce = -(twohot_target * log_probs).sum(dim=-1)          # (B, T) per-position
+            losses.append(_mtp_valid_mean(ce, n))                  # exclude padded tail (t+n >= T)
         return torch.stack(losses).sum()
 
     def predict(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
@@ -283,7 +304,8 @@ class ContinueHead(nn.Module):
         for n in range(num_offsets):
             logits = self.output_heads[n](features).squeeze(-1)
             target = 1.0 - dones_future[..., n].float()
-            losses.append(F.binary_cross_entropy_with_logits(logits, target))
+            bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")  # (B, T)
+            losses.append(_mtp_valid_mean(bce, n))                 # exclude padded tail (t+n >= T)
         return torch.stack(losses).sum()
 
     def predict(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
@@ -394,7 +416,8 @@ class PolicyHead(nn.Module):
             raw = self.output_heads[n](features)
             mu, log_std = raw.split(self.action_dim, dim=-1)
             log_std = log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
-            losses.append(-self._log_prob(mu, log_std, actions_future[..., n, :]).mean())
+            nll = -self._log_prob(mu, log_std, actions_future[..., n, :])   # (B, T) per-position
+            losses.append(_mtp_valid_mean(nll, n))                          # exclude padded tail
         return torch.stack(losses).sum()
 
     def sample(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:

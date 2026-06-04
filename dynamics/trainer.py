@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import pickle
 from typing import Dict, Optional, Tuple
 import math
@@ -25,7 +25,9 @@ import wandb
 
 # ── MTP target preparation ──────────────────────────────────────────────
 
-#TODO need to mask the padded values in the rewards and dones in the loss calculation for future minecraft and other envs
+# NOTE padded MTP positions (reward=0, done=1, action=0 for t+n >= T) are now
+# excluded from the loss in heads.py loss_mtp via `_mtp_valid_mean` (offset n →
+# last n positions are padding). This matches the validity mask in evaluate_agent.
 def build_mtp_targets(
     rewards: torch.Tensor,
     dones: torch.Tensor,
@@ -214,11 +216,6 @@ class DynamicsTrainer:
         # that are inactive on a given step (avoids allocating a fresh scalar
         # per step).
         self._zero = torch.tensor(0.0, device=self.device)
-        # NOTE: the curriculum ramp is computed eagerly from self.global_step
-        # in the step loop (see _run_epoch).  The former device-side step
-        # counter + schedule-constant tensors existed only to keep a Python
-        # float out of the XLA graph; on CUDA (eager trainer loop) they were
-        # inert, so they were removed.
 
     # ── Optimizer construction ──────────────────────────────────────────
 
@@ -372,11 +369,6 @@ class DynamicsTrainer:
 
         Phase 2: dynamics groups get lr * dynamics_lr_multiplier,
                  head groups get lr * head_lr_multiplier.
-
-        (Formerly quantized to discrete LR buckets — that was an XLA
-        recompilation-avoidance hack: on TPU each distinct LR value baked a new
-        graph.  On eager CUDA the LR lives in optimizer.param_groups and never
-        enters a compiled graph, so we write the true smooth cosine directly.)
         """
         step = self.global_step
         warmup = self._schedule_warmup
@@ -703,11 +695,9 @@ class DynamicsTrainer:
                 ramp_frac = 0.0  # in scope for logging on warmup-phase log steps
                 d = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
             else:
-                # Bootstrap path.  ramp_step uses global_step + 1 to match
-                # the pre-increment convention of the old device-side step
-                # counter (advanced before this block, while global_step is
-                # advanced at the end of the step), keeping the curriculum
-                # schedule bit-for-bit unchanged.
+                # Bootstrap path.  ramp_step uses global_step + 1 because
+                # global_step is advanced at the END of the step; the +1 keeps
+                # the curriculum schedule bit-for-bit unchanged.  Don't drop it.
                 ramp_step = self.global_step + 1
                 ramp_window = ramp_end - warmup_end
                 if ramp_window <= 0:
@@ -719,14 +709,8 @@ class DynamicsTrainer:
                 else:
                     ramp_frac = (ramp_step - warmup_end) / ramp_window
                 # Continuous ramp: linearly grow the bootstrap-admitted fraction
-                # 0 → 1 across the window.  The old floor(x*3)/3 4-level
-                # quantization was an XLA recompilation-avoidance hack — a Python
-                # float in `rand_like(d) < ramp_frac` specialized a new graph per
-                # value, so it was bucketed to 4.  Inert on eager CUDA, where it
-                # only added a flat 667-step ramp_frac=0 plateau that runs the
-                # (already-gated-on) bootstrap forward passes with zero bootstrap
-                # signal.  Past ramp_end this overshoots (>1.0); clamp to 1.0 →
-                # mask all-True → d = natural.
+                # 0 → 1 across the window.  Past ramp_end this overshoots (>1.0);
+                # clamp to 1.0 → mask all-True → d = natural.
                 ramp_frac = min(max(ramp_frac, 0.0), 1.0)
                 mask = torch.rand_like(d) < ramp_frac
                 d_min = torch.full_like(d, 1.0 / self.dynamics_cfg.K_max)
@@ -1128,8 +1112,19 @@ class DynamicsTrainer:
         loss_bc = self._zero
 
         if self.training_cfg.train_heads and agent_out is not None:
-            # Phase 2: heads read from agent token transformer output
-            h = agent_out.detach()  # (B, T, D_embed)
+            # Phase 2: heads read from the agent-token transformer output.
+            # NO detach — head losses (Eq 9) backprop through the agent token into
+            # agent_embedding AND the shared backbone (paper §3.3 / Algorithm 1
+            # Phase 2 = full finetune of the world model with the head losses).
+            # Safe because the firewall against causal confusion is the *forward*
+            # spatial mask (no modality attends back to the agent token, so z_hat is
+            # value-independent of it within a pass); the retained flow/bootstrap
+            # loss keeps the world model honest across optimizer steps.
+            # (Was `agent_out.detach()`, which severed the only gradient path to
+            #  agent_embedding — freezing it at its randn*0.02 init, so the heads
+            #  decoded from a fixed *untrained* random query. Confirmed empirically:
+            #  exp_avg_sq==0 for agent_embedding in the e040 checkpoint.)
+            h = agent_out  # (B, T, D_embed)
 
             if rewards is not None:
                 if self.dynamics_cfg.mtp_length > 0 and rewards_future is not None:
