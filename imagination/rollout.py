@@ -89,14 +89,18 @@ def imagine_rollout(
 
     max_buf = C + horizon
     actions_buffer = torch.zeros(B, max_buf, action_dim, device=device)
-    actions_buffer[:, :C-1] = actions_context  
+    actions_buffer[:, :C-1] = actions_context  # slot C-1 stays zero → null first imagined action
     z_buffer   = torch.zeros(B, max_buf, S_z, D_lat, device=device)
     tau_buffer = torch.full((B, max_buf), tau_ctx_val, device=device)
     d_buffer   = torch.full((B, max_buf), 1.0 / K_max, device=device)
     z_buffer[:, :C] = z_ctx_noised
     buf_len = C
 
-
+    # Constant (B, 1) signal level for re-noising each new frame. A view of
+    # tau_buffer (permanently == tau_ctx_val), reused instead of allocating a
+    # fresh torch.full every step — the per-step alloc was XLA-era boilerplate.
+    tau_new_const = tau_buffer[:, :1]
+    v_bootstrap = None  # set each step; final value is the TD(λ) bootstrap
 
     for h in range(horizon):
       win_start = max(0, buf_len - context_window)
@@ -117,15 +121,15 @@ def imagine_rollout(
       rewards_buf[:, h]  = r_new
       continues_buf[:, h]= c_new
       values_buf[:, h]   = v_new
+      v_bootstrap = v_new  # last imagined value → TD(λ) bootstrap (values_buf has horizon+1 slots)
 
-      tau_new_vec = torch.full((B, 1), tau_ctx_val, device=device)
-      z_new_noised, _ = add_noise(z_new.detach(), tau_new_vec)
+      z_new_noised, _ = add_noise(z_new.detach(), tau_new_const)
       z_buffer[:, buf_len:buf_len + 1] = z_new_noised
-      actions_buffer[:, buf_len] = a_new 
+      actions_buffer[:, buf_len] = a_new
 
       buf_len = buf_len + 1
 
-    values_buf[:, horizon] = v_new
+    values_buf[:, horizon] = v_bootstrap
 
 
     return {
@@ -154,18 +158,22 @@ def denoise_one_frame(
     z_current = torch.randn(B, 1, S_z, D_lat, device=device)
     h_new = None
 
+    # k-invariant across the K Euler steps → build once (these were rebuilt every
+    # step as XLA static-shape boilerplate; inert on eager CUDA).
+    d_new = torch.full((B, 1), d_step, device=device)
+    d_seq = torch.cat([d_win, d_new], dim=1)        # (B, C+1), constant across k
+    tau_seq = torch.empty(B, C + 1, device=device)
+    tau_seq[:, :C] = tau_win                         # window tau is constant across k
+
     for k in range(K):
         tau_k = k / K
+        tau_seq[:, C] = tau_k                        # only the new-frame slot varies per k
 
-        z_seq = torch.cat([z_win, z_current], dim=1)
-        tau_new = torch.full((B, 1), tau_k, device=device)
-        d_new = torch.full((B, 1), d_step, device=device)
-        tau_seq = torch.cat([tau_win, tau_new], dim=1)
-        d_seq = torch.cat([d_win, d_new], dim=1)
+        z_seq = torch.cat([z_win, z_current], dim=1)  # z_current changes per k → rebuild
         is_last = (k == K - 1)
         output = model(z_seq, a_win, tau_seq, d_seq, use_agent_tokens=is_last)
         z_hat_new = output.z_hat[:, -1:]
-        if  is_last :
+        if is_last:
           h_new = output.agent_out[:, -1]         # (B, D_embed)
 
         v = (z_hat_new - z_current) / max(1.0 - tau_k, 1e-4)
