@@ -71,6 +71,10 @@ def imagine_rollout(
     gradients enabled inside pmpo_policy_loss; the rollout's only role is
     to produce the (states, actions, advantages) triple.
     """
+    assert horizon >= 1, (
+        "imagine_rollout requires horizon >= 1 (the TD(λ) bootstrap needs at "
+        "least one imagined step)"
+    )
     B, C, S_z, D_lat = z_context.shape
     action_dim = policy_head.action_dim
     D_embed = dynamics_model.config.embed_dim
@@ -103,42 +107,42 @@ def imagine_rollout(
     v_bootstrap = None  # set each step; final value is the TD(λ) bootstrap
 
     for h in range(horizon):
-      win_start = max(0, buf_len - context_window)
-      z_win = z_buffer[:, win_start:buf_len]
-      tau_win = tau_buffer[:, win_start:buf_len]
-      d_win   = d_buffer[:, win_start:buf_len]
-      a_win   = actions_buffer[:, win_start:buf_len]
+        win_start = max(0, buf_len - context_window)
+        z_win = z_buffer[:, win_start:buf_len]
+        tau_win = tau_buffer[:, win_start:buf_len]
+        d_win   = d_buffer[:, win_start:buf_len]
+        a_win   = actions_buffer[:, win_start:buf_len]
 
-      z_new, h_out = denoise_one_frame(dynamics_model, z_win, tau_win, d_win, a_win, K)
+        z_new, h_out = denoise_one_frame(dynamics_model, z_win, tau_win, d_win, a_win, K)
 
-      a_new  = policy_head.sample(h_out)      # (B, action_dim)
-      r_new  = reward_head.predict(h_out)     # (B,)
-      c_new  = continue_head.predict(h_out)   # (B,)
-      v_new  = value_head.predict(h_out)      # (B,)
+        a_new  = policy_head.sample(h_out)      # (B, action_dim)
+        r_new  = reward_head.predict(h_out)     # (B,)
+        c_new  = continue_head.predict(h_out)   # (B,)
+        v_new  = value_head.predict(h_out)      # (B,)
 
-      states_buf[:, h] = h_out
-      actions_buf[:, h]  = a_new
-      rewards_buf[:, h]  = r_new
-      continues_buf[:, h]= c_new
-      values_buf[:, h]   = v_new
-      v_bootstrap = v_new  # last imagined value → TD(λ) bootstrap (values_buf has horizon+1 slots)
+        states_buf[:, h] = h_out
+        actions_buf[:, h]  = a_new
+        rewards_buf[:, h]  = r_new
+        continues_buf[:, h]= c_new
+        values_buf[:, h]   = v_new
+        v_bootstrap = v_new  # last imagined value → TD(λ) bootstrap (values_buf has horizon+1 slots)
 
-      z_new_noised, _ = add_noise(z_new.detach(), tau_new_const)
-      z_buffer[:, buf_len:buf_len + 1] = z_new_noised
-      actions_buffer[:, buf_len] = a_new
+        z_new_noised, _ = add_noise(z_new.detach(), tau_new_const)
+        z_buffer[:, buf_len:buf_len + 1] = z_new_noised
+        actions_buffer[:, buf_len] = a_new
 
-      buf_len = buf_len + 1
+        buf_len = buf_len + 1
 
     values_buf[:, horizon] = v_bootstrap
 
 
     return {
-                 'states':    states_buf,
-                 'actions':   actions_buf,
-                 'rewards':   rewards_buf,
-                 'continues': continues_buf,
-                 'values':    values_buf,
-             }
+        'states':    states_buf,
+        'actions':   actions_buf,
+        'rewards':   rewards_buf,
+        'continues': continues_buf,
+        'values':    values_buf,
+    }
 
 
 @torch.no_grad()
@@ -149,8 +153,8 @@ def denoise_one_frame(
     d_win: torch.Tensor,
     a_win: torch.Tensor,
     K: int,
-) -> torch.Tensor:
-    """Generate one new frame via K-step Euler denoising."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate one new frame via K-step Euler denoising; returns (z_new, h_new)."""
     B, C, S_z, D_lat  = z_win.shape
     device = z_win.device
     d_step = 1.0 / K
@@ -158,8 +162,6 @@ def denoise_one_frame(
     z_current = torch.randn(B, 1, S_z, D_lat, device=device)
     h_new = None
 
-    # k-invariant across the K Euler steps → build once (these were rebuilt every
-    # step as XLA static-shape boilerplate; inert on eager CUDA).
     d_new = torch.full((B, 1), d_step, device=device)
     d_seq = torch.cat([d_win, d_new], dim=1)        # (B, C+1), constant across k
     tau_seq = torch.empty(B, C + 1, device=device)
@@ -174,7 +176,7 @@ def denoise_one_frame(
         output = model(z_seq, a_win, tau_seq, d_seq, use_agent_tokens=is_last)
         z_hat_new = output.z_hat[:, -1:]
         if is_last:
-          h_new = output.agent_out[:, -1]         # (B, D_embed)
+            h_new = output.agent_out[:, -1]         # (B, D_embed)
 
         v = (z_hat_new - z_current) / max(1.0 - tau_k, 1e-4)
         z_current = z_current + v * d_step

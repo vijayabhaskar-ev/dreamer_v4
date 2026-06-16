@@ -31,7 +31,6 @@ from tokenizer.metrics import MetricsBuffer, ThroughputTracker
 from heads import RewardHead, ContinueHead, PolicyHead
 from device_utils import (
     get_device,
-    make_grad_scaler,
     save_checkpoint as save_ckpt,
     is_master,
 )
@@ -146,7 +145,6 @@ class ImaginationTrainer:
         # ── Optimizer (policy_head + value_head only) ──────────────
         self._build_optimizer()
 
-        self.scaler = make_grad_scaler(self.device, enabled=imagination_cfg.amp)
         self.global_step = 0
         self.metrics_buffer = MetricsBuffer(window=imagination_cfg.log_smooth_window)
         self.throughput_tracker = ThroughputTracker()
@@ -255,7 +253,7 @@ class ImaginationTrainer:
         self.optimizer = torch.optim.AdamW(param_groups, lr=self.cfg.lr)
 
     def _set_lr_from_schedule(self, total_steps: int) -> None:
-        """Linear warmup + cosine decay, quantized to a few buckets."""
+        """Linear warmup + cosine decay (smooth — no LR quantization)."""
         step = self.global_step
         warmup = self.cfg.warmup_steps
         if step < warmup:
@@ -265,9 +263,7 @@ class ImaginationTrainer:
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             frac = max(self.cfg.min_lr / self.cfg.lr, cosine)
 
-        # Quantize to 2 buckets
-        bucket = round(frac * 2) / 2
-        lr = self.cfg.lr * bucket
+        lr = max(self.cfg.min_lr, self.cfg.lr * frac)
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
 
@@ -275,21 +271,24 @@ class ImaginationTrainer:
     # Training step
     # ──────────────────────────────────────────────────────────────
 
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def train_step(self, batch: tuple[torch.Tensor, ...]) -> Dict[str, torch.Tensor]:
         """One RL training step on imagined rollouts.
 
         Args:
-            batch: dict with at least:
-                'frames':  (B, C, C_img, H_img, W_img) real context frames
-                'actions': (B, C-1, A) real context actions
-            (rewards/dones from the dataset are NOT used — imagined rewards
-            come from the reward_head)
+            batch: 4-tuple (frames, actions, rewards, dones) from the dataset.
+                Only frames=batch[0] (B, C, C_img, H_img, W_img) and
+                actions=batch[1] (B, C-1, A) are used; the dataset's
+                rewards/dones are ignored — imagined rewards/dones come from
+                the reward_head/continue_head during the rollout.
 
         Returns:
             dict of scalar loss tensors (stays on device; no .item() calls).
         """
-        frames = batch["frames"].to(self.device, non_blocking=True)
-        actions_ctx = batch["actions"].to(self.device, non_blocking=True)
+        # DatasetFactory yields the 4-tuple (frames, actions, rewards, dones);
+        # imagination only needs context frames + actions — imagined rewards/dones
+        # come from the reward_head/continue_head during the rollout, not the data.
+        frames = batch[0].to(self.device, non_blocking=True)
+        actions_ctx = batch[1].to(self.device, non_blocking=True)
 
         # Encode real context frames → clean latents
         with torch.no_grad():
@@ -344,19 +343,32 @@ class ImaginationTrainer:
 
         self.optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             list(self.policy_head.parameters()) + list(self.value_head.parameters()),
             self.cfg.grad_clip,
         )
         self.optimizer.step()
 
+        # Policy spread — collapse detection (std -> 0 = deterministic policy).
+        # Cheap: one extra forward through the ~793K-param head, vs 60 frozen-WM
+        # forwards already spent on the rollout.
+        with torch.no_grad():
+            _, log_std_log = self.policy_head(states)
+            policy_std = log_std_log.exp().mean()
+
         return {
             "loss/total": total_loss.detach(),
             "loss/value": v_loss.detach(),
             "loss/policy": p_loss.detach(),
+            # The policy's actual objective — watch this RISE to confirm improvement.
+            "stats/imagined_return": lambda_returns.mean().detach(),
             "stats/mean_reward": rewards.mean().detach(),
             "stats/mean_value": values[:, :-1].mean().detach(),
             "stats/mean_advantage": advantages.mean().detach(),
+            "stats/frac_pos_adv": (advantages >= 0).float().mean().detach(),  # D+ balance
+            "stats/mean_continue": continues.mean().detach(),                 # imagined discount
+            "stats/policy_std": policy_std.detach(),                          # exploration / collapse
+            "stats/grad_norm": grad_norm.detach(),                            # stability
         }
 
     # ──────────────────────────────────────────────────────────────
@@ -372,7 +384,8 @@ class ImaginationTrainer:
         """Run Phase 3 imagination training.
 
         Args:
-            train_loader: yields batches with 'frames' and 'actions' keys
+            train_loader: yields (frames, actions, rewards, dones) tuples
+                (only frames and actions are used)
             checkpoint_dir: where to save intermediate checkpoints
             start_epoch: resume point (1-indexed)
         """
@@ -386,7 +399,6 @@ class ImaginationTrainer:
         self.value_head.train()
 
         for epoch in range(start_epoch, self.cfg.epochs + 1):
-            epoch_metrics: Dict[str, float] = {}
             step_in_epoch = 0
 
             for batch in train_loader:
@@ -409,7 +421,9 @@ class ImaginationTrainer:
                         f"[ep {epoch} step {self.global_step}] "
                         f"total={log_payload['loss/total']:.4f} "
                         f"value={log_payload['loss/value']:.4f} "
-                        f"policy={log_payload['loss/policy']:.4f}"
+                        f"policy={log_payload['loss/policy']:.4f} "
+                        f"return={log_payload['stats/imagined_return']:.4f} "
+                        f"pstd={log_payload['stats/policy_std']:.3f}"
                     )
 
             # Epoch-end checkpoint

@@ -50,7 +50,6 @@ class ImaginationConfig:
     epochs: int = 100
     batch_size: int = 16
     steps_per_epoch: int = 200
-    amp: bool = False
     device: str = "cuda"
 
     # ── Logging & checkpointing ────────────────────────────────────────

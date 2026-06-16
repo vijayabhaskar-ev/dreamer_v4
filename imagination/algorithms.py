@@ -8,6 +8,10 @@ import torch.nn as nn
 # 1. λ-returns (Paper Eq. 10)
 # ════════════════════════════════════════════════════════════════════════
 
+# λ-returns are pure targets: @torch.no_grad() keeps the whole computation
+# outside the autograd graph, so gradients can never flow back through the
+# rollout's rewards/values/continues (detach-at-source).
+@torch.no_grad()
 def compute_lambda_returns(
     rewards: torch.Tensor,      # (B, H)
     values: torch.Tensor,       # (B, H+1)  — values[:, -1] is bootstrap v_T
@@ -28,6 +32,13 @@ def compute_lambda_returns(
                             state (after the final imagination step).
         continues: (B, H)   continue probabilities c_t ∈ [0, 1]. If c_t = 0,
                             the return truncates at t (no future credit).
+                            c_t must share rewards' indexing convention: both
+                            are same-frame predictions (Phase-2 heads trained
+                            on same-row rewards[t]/dones[t]), so the gate
+                            zeroes exactly the future beyond r_t. Only a
+                            MIXED convention (rewards and dones indexed
+                            differently in the training data) would shift
+                            the gate by one step.
         gamma:     discount factor (paper: 0.997)
         lambda_:   TD(λ) mixing parameter (0 = 1-step TD, 1 = full MC)
 
@@ -35,6 +46,18 @@ def compute_lambda_returns(
         (B, H) tensor of λ-returns R^λ_t for t ∈ [0, H-1]
     """
     B, H = rewards.shape
+    # Full-tuple checks: dim-1-only checks would still let a (1, H+1) tensor
+    # broadcast silently across the batch. Too-short inputs IndexError loudly,
+    # but too-LONG values are the silent killer — the bootstrap (values[:, -1])
+    # and the recursion (values[:, t+1]) would read from inconsistent columns.
+    assert values.shape == (B, H + 1), (
+        f"values must be (B, H+1)=({B}, {H + 1}) with bootstrap v_T in the "
+        f"last column; got {tuple(values.shape)}"
+    )
+    assert continues.shape == rewards.shape, (
+        f"continues must match rewards shape ({B}, {H}); got {tuple(continues.shape)}"
+    )
+
     lambda_returns = torch.zeros_like(rewards)
     acc = values[:, -1]
 
@@ -42,15 +65,17 @@ def compute_lambda_returns(
         acc = rewards[:, t] + gamma * continues[:, t] * ((1 - lambda_) * values[:, t+1] + lambda_ * acc)
         lambda_returns[:, t] = acc
 
-    # Detached: λ-returns are targets for the value loss, so gradients must
-    # not flow back through the rollout's values/rewards/continues.
-    return lambda_returns.detach()
+    return lambda_returns
 
 
 # ════════════════════════════════════════════════════════════════════════
 # 2. Advantages (Paper Eq. 11 precursor)
 # ════════════════════════════════════════════════════════════════════════
 
+# Advantages are pure targets too — PMPO consumes only their sign, never
+# gradients. @torch.no_grad() enforces detach-at-source instead of relying
+# on caller discipline.
+@torch.no_grad()
 def compute_advantages(
     lambda_returns: torch.Tensor,  # (B, H)
     values: torch.Tensor,          # (B, H+1)
@@ -64,7 +89,10 @@ def compute_advantages(
     Returns:
         (B, H) advantages
     """
-    _, H = lambda_returns.shape
+    B, H = lambda_returns.shape
+    assert values.shape == (B, H + 1), (
+        f"values must be (B, H+1)=({B}, {H + 1}); got {tuple(values.shape)}"
+    )
     return lambda_returns - values[:, :H]
 
 

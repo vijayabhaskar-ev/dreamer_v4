@@ -72,7 +72,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--steps-per-epoch", type=int, default=200)
-    parser.add_argument("--amp", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
 
     # Dynamics config (needed to reconstruct the model; should match Phase 2)
@@ -166,7 +165,6 @@ def _train_fn(index=0, args=None):
         epochs=opts.epochs,
         batch_size=opts.batch_size,
         steps_per_epoch=opts.steps_per_epoch,
-        amp=opts.amp,
         device=opts.device,
         log_interval=opts.log_interval,
         checkpoint_interval=opts.checkpoint_interval,

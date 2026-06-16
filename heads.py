@@ -421,7 +421,15 @@ class PolicyHead(nn.Module):
         return torch.stack(losses).sum()
 
     def sample(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
-        """Reparameterized sample for Phase 3 imagination.
+        """Draw a stochastic action ~ N(μ, σ²) for Phase 3 imagination rollouts.
+
+        Plain sampling — NOT a pathwise/reparameterized gradient path. Every
+        call site runs under @torch.no_grad() (the rollout) or in eval, and
+        PMPO consumes the action as a fixed label for its score-function
+        gradient (the policy gradient flows only through _log_prob's μ/log_std
+        on a fresh forward). There is no action to backprop through: Dreamer V4
+        uses PMPO precisely to avoid the pathwise actor gradients that an
+        explicit μ + σ·ε reparameterization would enable.
 
         Args:
             h: (B, T, D) or (B, D)
@@ -429,8 +437,7 @@ class PolicyHead(nn.Module):
             (*batch, action_dim) sampled actions
         """
         mu, log_std = self.forward(h, mtp_offset)
-        std = log_std.exp()
-        return mu + std * torch.randn_like(std)
+        return torch.normal(mu, log_std.exp())
 
     def predict(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
         """Deterministic action prediction (mean of distribution).
