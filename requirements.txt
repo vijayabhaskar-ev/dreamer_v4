@@ -6,3 +6,5 @@ opencv-python>=4.8 ; extra == 'images'
 tensorboard>=2.14
 tyro>=0.8.5
 dataclasses-json>=0.6
+dm_control>=1.0.18 ; extra == 'env'   # real-environment evaluation (dynamics/evaluate_env.py)
+mujoco>=3.1 ; extra == 'env'
