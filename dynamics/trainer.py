@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from .config import DynamicsConfig
 from .dynamic_model import DynamicsModel, DynamicsOutput
 from .flow_matching import add_noise, sample_tau_and_d
-from heads import RewardHead, ContinueHead, PolicyHead
+from heads import RewardHead, ContinueHead, PolicyHead, CategoricalPolicyHead
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
 from tokenizer.metrics import MetricsBuffer, ModelStatistics, GPUMemoryTracker, ThroughputTracker
@@ -192,13 +192,23 @@ class DynamicsTrainer:
             num_layers=dynamics_cfg.head_num_layers,
             mtp_length=dynamics_cfg.mtp_length,
         ).to(self.device)
-        self.policy_head = PolicyHead(
-            latent_dim=head_input_dim,
-            action_dim=dynamics_cfg.action_dim,
-            hidden_dim=dynamics_cfg.head_hidden_dim,
-            num_layers=dynamics_cfg.head_num_layers,
-            mtp_length=dynamics_cfg.mtp_length,
-        ).to(self.device)
+        if dynamics_cfg.policy_type == "categorical":
+            self.policy_head = CategoricalPolicyHead(
+                latent_dim=head_input_dim,
+                action_dim=dynamics_cfg.action_dim,
+                hidden_dim=dynamics_cfg.head_hidden_dim,
+                num_layers=dynamics_cfg.head_num_layers,
+                mtp_length=dynamics_cfg.mtp_length,
+                num_bins=dynamics_cfg.policy_num_bins,
+            ).to(self.device)
+        else:
+            self.policy_head = PolicyHead(
+                latent_dim=head_input_dim,
+                action_dim=dynamics_cfg.action_dim,
+                hidden_dim=dynamics_cfg.head_hidden_dim,
+                num_layers=dynamics_cfg.head_num_layers,
+                mtp_length=dynamics_cfg.mtp_length,
+            ).to(self.device)
         self.rms_reward = RMSNormalizer(decay=0.99)
         self.rms_continue = RMSNormalizer(decay=0.99)
         self.rms_bc = RMSNormalizer(decay=0.99)

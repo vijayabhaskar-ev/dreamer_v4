@@ -146,8 +146,9 @@ def pmpo_policy_loss(
     the prior's support and preventing exploitation of world-model errors
     in low-probability regions.
 
-    For diagonal Gaussians N(μ₁, σ₁²) ‖ N(μ₂, σ₂²) per action dim:
-        KL = log(σ₂/σ₁) + (σ₁² + (μ₁ - μ₂)²) / (2 σ₂²) - 0.5
+    log_prob and the reverse KL are delegated to the policy head's head-agnostic
+    `log_prob(states, actions)` and `kl_to(prior, states)`, so PMPO works
+    unchanged for both the diagonal-Gaussian and the categorical policy heads.
 
     Args:
         policy_head:  trainable policy (produces π_θ)
@@ -161,12 +162,7 @@ def pmpo_policy_loss(
     Returns:
         scalar loss
     """
-    mu, log_std = policy_head(states)
-
-    with torch.no_grad():
-        mu_prior, log_std_prior = policy_prior(states)
-
-    log_prob = policy_head._log_prob(mu, log_std, actions)
+    log_prob = policy_head.log_prob(states, actions)   # head-agnostic (Gaussian or categorical)
 
     # Float masks (not boolean indexing) keep the tensor shapes static and avoid data-dependent control flow.
     pos_mask = (advantages >= 0).float()
@@ -174,10 +170,7 @@ def pmpo_policy_loss(
     pos_term = -(alpha * (pos_mask * log_prob).sum()) / pos_mask.sum().clamp(min=1.0)
     neg_term = (1 - alpha) * (neg_mask * log_prob).sum() / neg_mask.sum().clamp(min=1.0)
 
-    sigma = log_std.exp()
-    sigma_prior = log_std_prior.exp()
-    kl = (log_std_prior - log_std) + (sigma**2 + (mu - mu_prior)**2) / (2 * sigma_prior**2) - 0.5  #TODO May be avoid the square operation and save one exp per forward
-    kl = kl.sum(dim=-1)
+    kl = policy_head.kl_to(policy_prior, states)        # reverse KL[π_θ ‖ π_prior], per state
     kl_term = beta * kl.mean()
 
     return pos_term + neg_term + kl_term

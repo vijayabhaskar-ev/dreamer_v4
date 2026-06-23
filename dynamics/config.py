@@ -46,6 +46,8 @@ class DynamicsConfig:
     head_hidden_dim: int = 512        # MLP hidden dim for reward/continue heads
     head_num_layers: int = 4          # Number of MLP layers in heads
     num_reward_bins: int = 255        # Symexp twohot bins for reward head
+    policy_type: str = "gaussian"     # deserialization fallback for pre-field ckpts; new training defaults to "categorical" via the CLI. "categorical" = per-dim discretized (paper §3.3); "gaussian" = diagonal Gaussian
+    policy_num_bins: int = 41         # bins per action dim for the categorical policy head (unused for gaussian)
     mtp_length: int = 0              # Multi-token prediction horizon (0 = disabled, 8 for Phase 2)
     reward_loss_scale: float = 1.0    # Weight for reward head loss
     continue_loss_scale: float = 1.0  # Weight for continue head loss

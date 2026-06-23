@@ -28,7 +28,7 @@ from dynamics.dynamic_model import DynamicsModel
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
 from tokenizer.metrics import MetricsBuffer, ThroughputTracker
-from heads import RewardHead, ContinueHead, PolicyHead
+from heads import CategoricalPolicyHead, RewardHead, ContinueHead, PolicyHead
 from device_utils import (
     get_device,
     save_checkpoint as save_ckpt,
@@ -103,13 +103,23 @@ class ImaginationTrainer:
         ).to(self.device)
 
         # ── Policy head (trainable, loaded from Phase 2) ───────────
-        self.policy_head = PolicyHead(
-            latent_dim=head_input_dim,
-            action_dim=dynamics_cfg.action_dim,
-            hidden_dim=dynamics_cfg.head_hidden_dim,
-            num_layers=dynamics_cfg.head_num_layers,
-            mtp_length=0,
-        ).to(self.device)
+        if dynamics_cfg.policy_type == "categorical":
+            self.policy_head = CategoricalPolicyHead(
+                latent_dim=head_input_dim,
+                action_dim=dynamics_cfg.action_dim,
+                hidden_dim=dynamics_cfg.head_hidden_dim,
+                num_layers=dynamics_cfg.head_num_layers,
+                mtp_length=0,
+                num_bins=dynamics_cfg.policy_num_bins,
+            ).to(self.device)
+        else:
+            self.policy_head = PolicyHead(
+                latent_dim=head_input_dim,
+                action_dim=dynamics_cfg.action_dim,
+                hidden_dim=dynamics_cfg.head_hidden_dim,
+                num_layers=dynamics_cfg.head_num_layers,
+                mtp_length=0,
+            ).to(self.device)
 
         # ── Value head (trainable, NEW — not in Phase 2 ckpt) ──────
         # Architecturally identical to RewardHead: symexp twohot over 255 bins.
@@ -352,9 +362,9 @@ class ImaginationTrainer:
         # Policy spread — collapse detection (std -> 0 = deterministic policy).
         # Cheap: one extra forward through the ~793K-param head, vs 60 frozen-WM
         # forwards already spent on the rollout.
+        #TODO Remove this after successful training.
         with torch.no_grad():
-            _, log_std_log = self.policy_head(states)
-            policy_std = log_std_log.exp().mean()
+            policy_std = self.policy_head.action_std(states)
 
         return {
             "loss/total": total_loss.detach(),

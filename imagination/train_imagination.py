@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-register-tokens", type=int, default=4)
     parser.add_argument("--temporal-interval", type=int, default=4)
     parser.add_argument("--action-dim", type=int, default=6)
+    parser.add_argument("--policy-type", type=str, default="categorical", choices=["gaussian", "categorical"],
+                        help="Policy head type (default categorical); MUST match the Phase-2 checkpoint it loads")
+    parser.add_argument("--policy-num-bins", type=int, default=41,
+                        help="Bins per action dim for the categorical policy head")
 
     # Dataset
     parser.add_argument("--dataset", type=str, default="dm_control")
@@ -143,6 +147,8 @@ def _train_fn(index=0, args=None):
         num_register_tokens=opts.num_register_tokens,
         temporal_interval=opts.temporal_interval,
         action_dim=opts.action_dim,
+        policy_type=opts.policy_type,
+        policy_num_bins=opts.policy_num_bins,
         mtp_length=0,  # No MTP in Phase 3
     )
 

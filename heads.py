@@ -450,6 +450,186 @@ class PolicyHead(nn.Module):
         mu, _ = self.forward(h, mtp_offset)
         return mu
 
+    # ── head-agnostic interface (mirrored by CategoricalPolicyHead, for PMPO) ──
+    def log_prob(self, h: torch.Tensor, actions: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Σ_dims log π(a | h) — diagonal-Gaussian log-prob. (*batch).
+
+        Lets PMPO treat the Gaussian and categorical heads uniformly.
+        """
+        mu, log_std = self.forward(h, mtp_offset)
+        return self._log_prob(mu, log_std, actions)
+
+    def kl_to(self, prior: "PolicyHead", h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """KL[N_self(·|h) ‖ N_prior(·|h)] summed over action dims. (*batch).
+
+        Closed-form diagonal-Gaussian KL — the term previously inlined in
+        pmpo_policy_loss.
+        """
+        mu, log_std = self.forward(h, mtp_offset)
+        with torch.no_grad():
+            mu_prior, log_std_prior = prior.forward(h, mtp_offset)
+        sigma = log_std.exp()
+        sigma_prior = log_std_prior.exp()
+        kl = (log_std_prior - log_std) + (sigma**2 + (mu - mu_prior)**2) / (2 * sigma_prior**2) - 0.5  #TODO Maybe avoid the square operation and save one exp per forward
+        return kl.sum(dim=-1)
+
+    def action_std(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Mean per-dim action std σ — scalar collapse/exploration diagnostic.
+
+        Head-agnostic: the categorical head reports the same quantity (the std
+        of its bin distribution in action units), so `stats/policy_std` stays
+        comparable across head types. → 0 signals a collapsed/deterministic policy.
+        """
+        _, log_std = self.forward(h, mtp_offset)
+        return log_std.exp().mean()
+
+
+# ── Categorical Policy Head (Dreamer V4 §3.3 — paper-faithful discrete head) ──
+
+class CategoricalPolicyHead(nn.Module):
+    """Per-dimension categorical action head — Dreamer V4's policy parameterization.
+
+    The paper (§3.3) parameterizes the policy as a "categorical or vectorized
+    binary distribution"; for continuous control we port that by discretizing
+    each action dim into ``num_bins`` bins uniformly spaced in
+    [-action_bound, action_bound]. The joint policy is the product of these
+    independent per-dim categoricals (a "vectorized"/factored categorical).
+
+    Why this over a diagonal Gaussian: a categorical is inherently MULTIMODAL —
+    it can put mass on swing-left AND swing-right with ~0 between, the exact
+    bimodal target an MLE Gaussian collapses to its mean (μ→0, the documented
+    BC mode-averaging failure). It also models the action spread honestly (no
+    single σ) and needs no tanh/Jacobian machinery.
+
+    Drop-in for ``PolicyHead`` on the BC + eval paths (same constructor and
+    ``forward``/``loss``/``loss_mtp``/``sample``/``predict``). For Phase-3 it
+    exposes the HEAD-AGNOSTIC ``log_prob(h, a)`` and ``kl_to(prior, h)``;
+    ``pmpo_policy_loss`` must be refactored to call these instead of assuming
+    Gaussian (μ, log_σ) params + the inlined Gaussian KL.
+
+    NOTE: discretization snaps actions to the nearest bin (≤ bound/(num_bins-1)
+    error). num_bins=41 over [-1, 1] → ±0.025; raise num_bins for finer control.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int = 512,
+        action_dim: int = 6,
+        hidden_dim: int = 512,
+        num_layers: int = 4,
+        mtp_length: int = 0,
+        num_bins: int = 41,
+        action_bound: float = 1.0,
+    ):
+        super().__init__()
+        self.action_dim = action_dim
+        self.num_bins = num_bins
+        self.mtp_length = mtp_length
+        self.action_bound = float(action_bound)
+        num_outputs = mtp_length + 1 if mtp_length > 0 else 1
+
+        self.backbone = MLPBackbone(latent_dim, hidden_dim, num_layers)
+        # Each output head produces num_bins logits per action dim.
+        self.output_heads = nn.ModuleList([
+            nn.Linear(hidden_dim, action_dim * num_bins) for _ in range(num_outputs)
+        ])
+        for head in self.output_heads:
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+        # Uniform bin centers in [-bound, bound]; a buffer so .to(device) moves it.
+        self.register_buffer(
+            "bin_centers", torch.linspace(-self.action_bound, self.action_bound, num_bins)
+        )
+
+    # ── distribution params ──────────────────────────────────────────────
+    def _logits(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """(*batch, action_dim, num_bins) per-dim logits."""
+        raw = self.output_heads[mtp_offset](self.backbone(h))         # (*b, A*K)
+        return raw.unflatten(-1, (self.action_dim, self.num_bins))    # (*b, A, K)
+
+    def forward(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Per-dim logits (*batch, action_dim, num_bins).
+
+        Unlike the Gaussian PolicyHead (which returns (μ, log_σ)), this returns
+        logits — so PMPO must use ``log_prob``/``kl_to``, not (μ, log_σ).
+        """
+        return self._logits(h, mtp_offset)
+
+    def _nearest_bin(self, actions: torch.Tensor) -> torch.Tensor:
+        """Real actions → nearest bin index per dim. (*batch, action_dim)."""
+        a = actions.clamp(-self.action_bound, self.action_bound)
+        pos = (a + self.action_bound) / (2 * self.action_bound) * (self.num_bins - 1)
+        return pos.round().long().clamp(0, self.num_bins - 1)
+
+    # ── log-prob (head-agnostic interface) ───────────────────────────────
+    def log_prob(self, h: torch.Tensor, actions: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Σ_dims log π(a_d | h) — factored categorical log-prob. (*batch)."""
+        logp = self._logits(h, mtp_offset).log_softmax(dim=-1)        # (*b, A, K)
+        bins = self._nearest_bin(actions)                            # (*b, A)
+        lp = logp.gather(-1, bins.unsqueeze(-1)).squeeze(-1)         # (*b, A)
+        return lp.sum(-1)                                            # (*b)
+
+    # ── BC losses ────────────────────────────────────────────────────────
+    def loss(self, h: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Behavior-cloning NLL (single-step, offset 0)."""
+        return -self.log_prob(h, actions, mtp_offset=0).mean()
+
+    def loss_mtp(self, h: torch.Tensor, actions_future: torch.Tensor) -> torch.Tensor:
+        """MTP NLL: sum over offsets of masked per-position negative log-prob.
+
+        actions_future: (B, T, L+1, action_dim).
+        """
+        feats = self.backbone(h)
+        num_offsets = min(actions_future.shape[-2], len(self.output_heads))
+        losses = []
+        for n in range(num_offsets):
+            raw = self.output_heads[n](feats).unflatten(-1, (self.action_dim, self.num_bins))
+            logp = raw.log_softmax(dim=-1)
+            bins = self._nearest_bin(actions_future[..., n, :])
+            lp = logp.gather(-1, bins.unsqueeze(-1)).squeeze(-1).sum(-1)   # (B, T)
+            losses.append(_mtp_valid_mean(-lp, n))                         # exclude padded tail
+        return torch.stack(losses).sum()
+
+    # ── sampling / deterministic readout ─────────────────────────────────
+    def sample(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Sample one bin per dim ~ Categorical(softmax(logits)) → bin center.
+
+        Multimodal: split mass across bins yields genuinely different draws.
+        """
+        probs = self._logits(h, mtp_offset).softmax(dim=-1)          # (*b, A, K)
+        idx = torch.multinomial(probs.reshape(-1, self.num_bins), 1)
+        idx = idx.reshape(probs.shape[:-1])                          # (*b, A)
+        return self.bin_centers[idx]
+
+    def predict(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Deterministic action: argmax bin per dim → bin center. (*batch, A)."""
+        idx = self._logits(h, mtp_offset).argmax(dim=-1)             # (*b, A)
+        return self.bin_centers[idx]
+
+    # ── reverse KL to a prior (head-agnostic interface for PMPO) ──────────
+    def kl_to(self, prior: "CategoricalPolicyHead", h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """KL[π_self(·|h) ‖ π_prior(·|h)] summed over action dims. (*batch).
+
+        Exact closed form for factored categoricals — replaces the Gaussian KL
+        inlined in pmpo_policy_loss.
+        """
+        logp = self._logits(h, mtp_offset).log_softmax(dim=-1)       # (*b, A, K)
+        with torch.no_grad():
+            logq = prior._logits(h, mtp_offset).log_softmax(dim=-1)
+        kl = (logp.exp() * (logp - logq)).sum(-1)                    # (*b, A)
+        return kl.sum(-1)                                            # (*b)
+
+    def action_std(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Mean per-dim action std σ — analytic std of each per-dim categorical
+        over its bin centers, in action units (head-agnostic counterpart of the
+        Gaussian head's σ). → 0 as the policy collapses onto a single bin.
+        """
+        probs = self._logits(h, mtp_offset).softmax(dim=-1)          # (*b, A, K)
+        centers = self.bin_centers                                   # (K,)
+        mean = (probs * centers).sum(-1, keepdim=True)               # (*b, A, 1)
+        var = (probs * (centers - mean) ** 2).sum(-1)                # (*b, A)
+        return var.clamp_min(0).sqrt().mean()
+
 
 # ── Utility: mean-pool latent tokens ─────────────────────────────────────
 

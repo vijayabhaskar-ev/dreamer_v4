@@ -99,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-register-tokens", type=int, default=4)
     parser.add_argument("--temporal-interval", type=int, default=4)
     parser.add_argument("--action-dim", type=int, default=6)
+    parser.add_argument("--policy-type", type=str, default="categorical", choices=["gaussian", "categorical"],
+                        help="Policy head: 'categorical' (per-dim discretized, paper §3.3, default) or 'gaussian' (diagonal Gaussian)")
+    parser.add_argument("--policy-num-bins", type=int, default=41,
+                        help="Bins per action dim for the categorical policy head")
 
     # Logging
     parser.add_argument("--log-interval", type=int, default=10)
@@ -174,6 +178,8 @@ def _train_fn(index=0, args=None):
         num_register_tokens=opts.num_register_tokens,
         temporal_interval=opts.temporal_interval,
         action_dim=opts.action_dim,
+        policy_type=opts.policy_type,
+        policy_num_bins=opts.policy_num_bins,
         mtp_length=opts.mtp_length,
     )
 
