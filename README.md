@@ -84,7 +84,7 @@ python -m dynamics.evaluate_env \
   --tokenizer-ckpt checkpoints-hf/ball_in_cup/tokenizer.pt \
   --task ball_in_cup_catch --action-dim 2 \
   --num-episodes 50 --policies phase3,bc,random \
-  --device cuda --readout sample --output-dir eval-stoch     # use --readout argmax for the deterministic column
+  --device cuda --readout sample --wandb-disabled --output-dir eval-stoch    # --readout argmax → deterministic column
 ```
 
 Expected: `random` ≈ 0.10 ≪ `bc` ≈ 0.32 ≈ `phase3` ≈ 0.38 (catch rate). Outputs land in `eval-stoch/` (`summary.json`, per-episode CSV, rollout GIFs).
@@ -156,6 +156,8 @@ The three phases, in one line each:
 > python convert_hansen_to_npz.py --hansen-root hansen_data --out-path ball_in_cup_catch.npz
 > ```
 > Yields a 240-episode, **mixed-quality** buffer (mean ~0.57 normalized return — see [Results](#results--ball_in_cup_catch--real-env-closed-loop-n--50)). The data itself is not redistributed; only the conversion script is.
+
+The training commands log to Weights & Biases by default — append `--wandb-disabled` to any of them to skip it.
 
 ```bash
 # Phase 1 — tokenizer
