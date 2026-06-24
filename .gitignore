@@ -1,6 +1,42 @@
 __pycache__/
 src/tokenizer/__pycache__/
 wandb/
-checkpoints/
+**/wandb/
+wandb_from_tpu/
+*.wandb
+wandb-summary.json
+wandb-metadata.json
+checkpoint*
 eval/dynamics/
 evaluation/
+evaluation-dynamics-epoch*/
+evaluation-agent-epoch*/
+evaluation-*/
+
+# Large data & model weights — NEVER commit (datasets regenerate via convert_hansen_to_npz.py; weights live on the HF Hub)
+*.npz
+*.npz.zst
+*.zst
+*.pt
+release/
+
+# Logs & scratch
+*.log
+
+# Editor / tool / OS
+.vscode/
+.codex
+.codex/
+.claude/
+.DS_Store
+
+# Local debug / scratch (not part of the pipeline)
+frame_montage.png
+decoder_query_audit.py
+latent_diagnostic.py
+latent_diagnositc2.py
+latent_temporal_diagnostic.py
+pre_tanh_diagnostic.py
+sanity_untrained.py
+
+# NOTE: assets/ (the README's gifs) is intentionally tracked — do not ignore it.

@@ -13,7 +13,7 @@ the world model is used as a *belief-state encoder*, not a predictor. Per step::
     z = encode_frames(real_frame)            # one frame; tokenizer is per-frame
     z = add_noise(z, tau=1-tau_ctx)          # corrupt to the deployment signal level (~0.9)
     h = model(<=16-frame window, use_agent_tokens=True).agent_out[:, -1]
-    action = policy_head.predict(h)          # or .sample(h) with --stochastic
+    action = policy_head.act(h, readout)     # mean (default) | argmax | sample
 
 Setup (one-time):
     pip install dm_control mujoco            # already present in this repo's conda env
@@ -240,7 +240,7 @@ def restore_policy_head(trainer, sd: Dict[str, torch.Tensor]) -> None:
 # ─────────────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def run_episode(env: DMCEnvWrapper, trainer, dynamics_cfg, *, is_random: bool,
-                stochastic: bool, device: torch.device, max_steps: int,
+                readout: str, device: torch.device, max_steps: int,
                 success_threshold: float, rng: np.random.Generator,
                 collect_frames: bool) -> Tuple[EpisodeResult, Optional[List[np.ndarray]]]:
     """One closed-loop episode. Returns (EpisodeResult, optional rendered frames)."""
@@ -286,9 +286,8 @@ def run_episode(env: DMCEnvWrapper, trainer, dynamics_cfg, *, is_random: bool,
             h = out.agent_out[:, -1]                                   # (1, D_embed)
             pred_r = float(trainer.reward_head.predict(h).reshape(-1)[0].item())
             pred_c = float(trainer.continue_head.predict(h).reshape(-1)[0].item())
-            mu_or_sample = (trainer.policy_head.sample(h) if stochastic
-                            else trainer.policy_head.predict(h))       # (1,A)
-            action = mu_or_sample.reshape(-1).float().cpu().numpy()
+            act_t = trainer.policy_head.act(h, readout=readout)        # (1,A)
+            action = act_t.reshape(-1).float().cpu().numpy()
             act_taken.append(env.clip_action(action))                 # store the action actually applied
 
         pixels, reward, done = env.step(action)
@@ -326,7 +325,7 @@ def run_policy(name: str, trainer, dynamics_cfg, opts, device, *, is_random: boo
                             seed=seed)
         collect = i < opts.max_gifs
         res, frames = run_episode(
-            env, trainer, dynamics_cfg, is_random=is_random, stochastic=opts.stochastic,
+            env, trainer, dynamics_cfg, is_random=is_random, readout=opts.readout,
             device=device, max_steps=opts.max_steps, success_threshold=opts.success_threshold,
             rng=rng, collect_frames=collect)
         res.seed = seed
@@ -437,7 +436,7 @@ def write_outputs(out_dir: Path, opts, dynamics_cfg, per_policy: Dict[str, Dict]
             "image_size": opts.image_size,
             "camera_id": opts.camera_id,
             "action_repeat": opts.action_repeat,
-            "stochastic": opts.stochastic,
+            "readout": opts.readout,
             "success_threshold": opts.success_threshold,
             "tau_ctx_val": 1.0 - dynamics_cfg.tau_ctx,
             "K_max": dynamics_cfg.K_max,
@@ -504,7 +503,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-steps", type=int, default=0, help="0 = run to the env time limit.")
     p.add_argument("--success-threshold", type=float, default=1.0,
                    help="Episode 'success' if return >= this (sparse ball_in_cup).")
-    p.add_argument("--stochastic", action="store_true", help="Sample actions (default: deterministic mu).")
+    p.add_argument("--readout", choices=["mean", "argmax", "sample"], default="sample",
+                   help="Action decode at deployment. 'sample' (default): draw ~policy — "
+                        "paper-faithful and the empirical winner on cup-catch (47%% caught vs "
+                        "17%% for any deterministic readout); PMPO optimizes the SAMPLED policy, "
+                        "so its return lives in the distribution, not the mode. 'mean': "
+                        "probability-weighted bin centre — best DETERMINISTIC/reproducible "
+                        "readout (lower teacher-forced MSE than argmax) but ~argmax in closed "
+                        "loop. 'argmax': discrete mode (legacy baseline).")
+    p.add_argument("--stochastic", action="store_true",
+                   help="DEPRECATED alias for --readout sample (overrides --readout if set).")
     p.add_argument("--image-size", type=int, default=128)
     p.add_argument("--camera-id", type=int, default=0)
     p.add_argument("--action-repeat", type=int, default=2)
@@ -521,6 +529,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(args: Optional[List[str]] = None) -> None:
     opts = build_parser().parse_args(args)
+    if opts.stochastic:  # deprecated alias wins for back-compat with saved commands
+        opts.readout = "sample"
     _require_dmc()  # set MUJOCO_GL + assert importable BEFORE any heavy work
     out_dir = Path(opts.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -539,7 +549,7 @@ def main(args: Optional[List[str]] = None) -> None:
         trainer, dynamics_cfg, device, num_tasks = setup_world_model(opts)
         print(f"[setup] device={device} num_tasks={num_tasks} "
               f"tau_ctx_val={1.0 - dynamics_cfg.tau_ctx:.3f} context_length={dynamics_cfg.context_length} "
-              f"action_repeat={opts.action_repeat} stochastic={opts.stochastic}")
+              f"action_repeat={opts.action_repeat} readout={opts.readout}")
     else:
         device = resolve_device(opts.device)
 

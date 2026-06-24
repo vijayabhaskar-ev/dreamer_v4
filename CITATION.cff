@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both this reproduction and the original DreamerV4 paper (see references)."
+title: "Dreamer V4 — from-scratch PyTorch reproduction"
+abstract: >-
+  A faithful, from-scratch PyTorch implementation of DreamerV4 (Hafner, Yan &
+  Lillicrap, 2025): tokenizer → flow-matching world model → behavior-cloned
+  agent → imagination RL (PMPO), evaluated closed-loop on dm_control
+  ball_in_cup_catch with an honest analysis of where offline learning plateaus.
+type: software
+authors:
+  - family-names: Eswaran
+    given-names: Vijaya Bhaskar
+year: 2026
+date-released: "2026-06-24"
+license: MIT
+url: "https://github.com/vijayabhaskar-ev/dreamer_v4"
+repository-code: "https://github.com/vijayabhaskar-ev/dreamer_v4"
+keywords:
+  - reinforcement-learning
+  - model-based-rl
+  - world-models
+  - dreamer
+  - flow-matching
+  - pytorch
+references:
+  - type: article
+    title: "Training Agents Inside of Scalable World Models"
+    authors:
+      - family-names: Hafner
+        given-names: Danijar
+      - family-names: Yan
+        given-names: Wilson
+      - family-names: Lillicrap
+        given-names: Timothy
+    year: 2025
+    url: "https://arxiv.org/abs/2509.24527"
+    notes: "DreamerV4 — the paper this repository reproduces."

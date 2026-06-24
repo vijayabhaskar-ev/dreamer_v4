@@ -450,6 +450,19 @@ class PolicyHead(nn.Module):
         mu, _ = self.forward(h, mtp_offset)
         return mu
 
+    def act(self, h: torch.Tensor, readout: str = "sample",
+            mtp_offset: int = 0) -> torch.Tensor:
+        """Head-agnostic action readout (mirrored on ``CategoricalPolicyHead``).
+
+        For a diagonal Gaussian the mean *is* the mode, so "mean" and
+        "argmax"/"mode" both return μ; "sample" (default) draws ~N(μ, σ²).
+        """
+        if readout in ("mean", "argmax", "mode"):
+            return self.predict(h, mtp_offset)
+        if readout == "sample":
+            return self.sample(h, mtp_offset)
+        raise ValueError(f"unknown readout {readout!r}; expected mean|argmax|sample")
+
     # ── head-agnostic interface (mirrored by CategoricalPolicyHead, for PMPO) ──
     def log_prob(self, h: torch.Tensor, actions: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
         """Σ_dims log π(a | h) — diagonal-Gaussian log-prob. (*batch).
@@ -602,9 +615,54 @@ class CategoricalPolicyHead(nn.Module):
         return self.bin_centers[idx]
 
     def predict(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
-        """Deterministic action: argmax bin per dim → bin center. (*batch, A)."""
+        """Deterministic action: argmax bin per dim → bin center. (*batch, A).
+
+        WARNING — argmax reads the *mode*, not the mean. For continuous control
+        discretized into bins, a tall no-op spike at the 0-bin (the marginal
+        peak induced by held-still demo frames) captures the argmax even when
+        the per-state mass has shifted toward the true action (mode≠mean). That
+        collapses deployment to ~0. Deploy with ``sample()`` (the readout PMPO
+        optimizes; ~47% caught on cup-catch vs ~17% for argmax/mean). Kept for
+        the discrete readout and to reproduce the argmax baseline; see ``act()``.
+        """
         idx = self._logits(h, mtp_offset).argmax(dim=-1)             # (*b, A)
         return self.bin_centers[idx]
+
+    def mean(self, h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:
+        """Deterministic action = probability-weighted bin centre Σ_k p_k·c_k.
+
+        The continuous-control analogue of the reward head's expected-value
+        decode (``RewardHead.predict``). Integrates the whole per-dim
+        distribution, so it carries lower teacher-forced action MSE than
+        ``predict()``=argmax (the argmax snaps to the marginal 0-bin spike).
+        Use this for a REPRODUCIBLE deterministic readout.
+
+        Closed-loop caveat (measured on cup-catch): mean ≈ argmax in the live
+        env (~17% caught) and both lose badly to ``sample()`` (~47%). Per-step
+        accuracy does not drive closed-loop control here — PMPO optimizes the
+        SAMPLED policy, so deployment return lives in the distribution, not its
+        mode/mean. Deploy with ``sample()``; use ``mean()`` only when you need
+        determinism (debugging, reproducibility, ablations).
+        """
+        probs = self._logits(h, mtp_offset).softmax(dim=-1)          # (*b, A, K)
+        return (probs * self.bin_centers).sum(-1)                    # (*b, A)
+
+    def act(self, h: torch.Tensor, readout: str = "sample",
+            mtp_offset: int = 0) -> torch.Tensor:
+        """Head-agnostic action readout (mirrored on ``PolicyHead``).
+
+        readout ∈ {"sample", "mean", "argmax"/"mode"}. Lets deployment/eval pick
+        the decode without knowing the head type. Default "sample": the readout
+        PMPO optimizes and the empirical deployment winner (see ``mean`` for the
+        closed-loop comparison). Use "mean"/"argmax" only for deterministic eval.
+        """
+        if readout == "mean":
+            return self.mean(h, mtp_offset)
+        if readout in ("argmax", "mode"):
+            return self.predict(h, mtp_offset)
+        if readout == "sample":
+            return self.sample(h, mtp_offset)
+        raise ValueError(f"unknown readout {readout!r}; expected mean|argmax|sample")
 
     # ── reverse KL to a prior (head-agnostic interface for PMPO) ──────────
     def kl_to(self, prior: "CategoricalPolicyHead", h: torch.Tensor, mtp_offset: int = 0) -> torch.Tensor:

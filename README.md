@@ -1,41 +1,118 @@
-# Dreamer V4
+# Dreamer V4 — from-scratch PyTorch reproduction
 
-A from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025; [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)) — a model-based reinforcement learning agent that learns by *imagining* trajectories inside a learned world model. This repo covers all three training phases of the paper:
+[![arXiv](https://img.shields.io/badge/arXiv-2509.24527-b31b1b.svg)](https://arxiv.org/abs/2509.24527)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Weights on HF](https://img.shields.io/badge/🤗%20weights-dreamer--v4-blue)](https://huggingface.co/vijayabhaskarev/dreamer-v4)
 
-1. **Tokenizer** — a masked autoencoder that compresses 64×64 RGB frames into a small set of latent tokens.
-2. **Dynamics model** — a block-causal transformer trained with a flow-matching objective (with bootstrap loss and curriculum) to predict future latents.
-3. **Imagination + RL** — agent tokens, value/policy/reward/continue heads, λ-returns, and **PMPO** (preference-based MPO) policy optimization rolled out inside the frozen world model.
+A faithful, from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
 
-The implementation targets **CUDA**. See [What's noteworthy](#whats-noteworthy-in-this-implementation) for the design decisions that shape the codebase.
+<p align="center">
+  <img src="assets/policy_stochastic_catch.gif" width="320"><br>
+  <em>The trained agent catching and holding the ball (<code>ball_in_cup_catch</code>, stochastic policy).<br>It learns a real controller — this README is an honest teardown of where offline RL plateaus, and why.</em>
+</p>
+
+> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` and ran a rigorous real-env evaluation. The world model + agent learn a real controller (**3–4× a random policy**), but **offline imagination RL ≈ behavior cloning** (p = 0.63) — a clean negative result whose *cause* is an **out-of-distribution state-coverage gap**, not the policy head or mode-averaging. This is a faithful reproduction with honest nulls on a simple task — **not** a SOTA result. The interesting part is the teardown of *why* offline plateaus.
 
 ---
 
-## Status
+## Results — `ball_in_cup_catch` (real-env, closed-loop, n = 50)
 
-| Phase | Component | Status |
+50 fixed seeds in the live `dm_control` environment (action_repeat 2, 500 policy steps/episode). All three policies share one world model + reward/continue heads; **only the policy head differs.**
+
+**Catch rate** (fraction of 50 seeds that caught the ball):
+
+| policy | deterministic | stochastic | return (stoch., out of ~1000) |
+|---|:---:|:---:|:---:|
+| random | 0.10 | 0.10 | 41 |
+| behavior cloning (BC) | 0.14 | 0.32 | 162 |
+| imagination RL (PMPO) | 0.16 | **0.38** | 247 |
+
+> **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch, but with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor). A behavior-cloned policy cannot exceed its data, so the **offline ceiling here is ~0.58, not 0.96.** The catch rates above correspond to normalized return ~0.16 (BC) / ~0.25 (imagination-RL) — roughly **43% of the demo ceiling**, the rest lost to covariate shift. Reaching ~0.9 requires *online* interaction (DAgger / online RL), not more offline training.
+
+**Three findings:**
+
+1. **Trained ≫ random.** Stochastic BC 0.32 / imagination-RL 0.38 vs random 0.10 — the world model + BC learned a genuine controller (3–4× chance). 95% CI ≈ ±0.13 at n=50.
+2. **Imagination RL ≈ BC (the null).** Paired sign test, imagination-RL vs BC on the same seeds: **p = 0.63** (stochastic), **p = 1.0** (deterministic). Offline RL inside the world model adds nothing measurable over plain behavior cloning here.
+3. **Deterministic collapses, stochastic acts.** Any deterministic readout ≈ 0.15; sampling ≈ 0.38. The policy *knows* the behavior — sampling recovers it — but deterministic deployment freezes.
+
+### Why it plateaus — the diagnosis
+
+The bottleneck is an **OOD state-coverage gap**, *not* the policy head and *not* mode-averaging:
+- the belief state is healthy **in-distribution** (its action mean ≈ the demos), and collapses only on **out-of-distribution** states the offline demos never covered;
+- an advantage-weighted-BC probe found `corr(return, action-decisiveness) ≈ 0` — the expert is "always-on," so there is no decisive-vs-neutral structure for offline re-weighting to exploit.
+
+Closing that gap is **structurally an online-RL / DAgger problem** — no offline trick (advantage-weighting, longer RL, or a different readout) moved the number, and each of those is tested in the repo.
+
+### Readout ablation (zero-confound: one policy, read three ways; n = 30)
+
+| readout | caught | why |
+|---|:---:|---|
+| `mean` (Σ pₖ·cₖ) | 0.17 | distribution mean |
+| `argmax` (mode) | 0.17 | most-likely bin |
+| `sample` | **0.47** | on-policy draw |
+
+`mean ≈ argmax` to the decimal ⇒ the per-state conditionals are ~unimodal, so "deploy the mean, not the mode" **cannot** help. The collapse is the **deterministic-map / OOD-drift** effect — only sampling is robust to it, and the actor was *trained* on sampled actions, so sampling is the training-consistent deployment.
+
+---
+
+## The world model
+
+<p align="center">
+  <img src="assets/world_model_rollout.gif" width="420"><br>
+  <em>Learned flow-matching world model — ground truth (left) vs the model's autoregressive prediction (right), decoded to pixels.</em>
+</p>
+
+The dynamics model is a 12-layer block-causal transformer trained with a **flow-matching** objective (+ bootstrap loss + curriculum) to denoise future latents given past latents, actions, and the (τ, d) flow parameters. Agent tokens read the world-model state through an asymmetric attention mask so the policy can be trained without contaminating the frozen world model.
+
+---
+
+## Quickstart — reproduce the result
+
+```bash
+git clone https://github.com/vijayabhaskar-ev/dreamer_v4.git && cd dreamer_v4
+pip install -r requirements.txt
+pip install dm_control mujoco            # for the real-env eval
+export MUJOCO_GL=egl                     # headless render (osmesa on CPU-only hosts)
+
+# pull the pretrained checkpoints (~814 MB) from the Hugging Face Hub
+hf download vijayabhaskarev/dreamer-v4 --include "ball_in_cup/*" --local-dir checkpoints-hf
+
+# reproduce the headline table (random vs BC vs imagination-RL)
+python -m dynamics.evaluate_env \
+  --phase2-ckpt    checkpoints-hf/ball_in_cup/agent_bc.pt \
+  --phase3-ckpt    checkpoints-hf/ball_in_cup/agent_imagination_rl.pt \
+  --tokenizer-ckpt checkpoints-hf/ball_in_cup/tokenizer.pt \
+  --task ball_in_cup_catch --action-dim 2 \
+  --num-episodes 50 --policies phase3,bc,random \
+  --device cuda --readout sample --output-dir eval-stoch     # use --readout argmax for the deterministic column
+```
+
+Expected: `random` ≈ 0.10 ≪ `bc` ≈ 0.32 ≈ `phase3` ≈ 0.38 (catch rate). Outputs land in `eval-stoch/` (`summary.json`, per-episode CSV, rollout GIFs).
+
+### Pretrained checkpoints
+
+Hosted on the Hub at [`vijayabhaskarev/dreamer-v4`](https://huggingface.co/vijayabhaskarev/dreamer-v4) — inference-only (optimizer state stripped).
+
+| file | what it is | size |
 |---|---|---|
-| 1 | Tokenizer model + losses + masking | Complete |
-| 1 | Tokenizer trainer + entrypoint + eval | Complete |
-| 2 | Dynamics transformer + flow matching + embeddings | Complete |
-| 2 | Bootstrap loss + warmup→ramp→full curriculum | Complete |
-| 2 | Agent tokens + MTP heads (reward / continue / policy) | Complete |
-| 2 | Trainer + entrypoint + autoregressive eval | Complete |
-| 3 | `imagine_rollout` (Euler denoise + sliding context) | Complete |
-| 3 | λ-returns, advantages, value loss, **PMPO** policy loss | Complete |
-| 3 | End-to-end imagination trainer + entrypoint | **In progress** |
-| — | CUDA distributed-training | Not implemented |
+| `ball_in_cup/tokenizer.pt` | masked-autoencoder tokenizer (128×128) | 300 MB |
+| `ball_in_cup/agent_bc.pt` | BC agent — world model + categorical policy + reward/continue heads | 507 MB |
+| `ball_in_cup/agent_imagination_rl.pt` | imagination-RL policy + value heads (loads **on top of** `agent_bc`) | 7 MB |
+| `ball_in_cup/world_model.pt` | world-model base, before agent finetuning — optional, only to retrain the agent | 491 MB |
+
+> Dataset: derived from expert demos in [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4); the data itself is not redistributed — regenerate it with `convert_hansen_to_npz.py`.
 
 ---
 
 ## Architecture at a glance
 
 ```
-   raw frames (B,T,3,64,64)
+   raw frames (B, T, 3, H, W)            H = W = 128  (ball_in_cup_catch)
             │
             ▼
    ┌──────────────────────┐
    │  Tokenizer  (MAE)    │   spatial 8×8 patches → 32 latent tokens / frame
-   │  encoder ─► z_clean  │   bottleneck: latent_dim = 128, tanh
+   │  encoder ─► z_clean  │   bottleneck latent_dim, tanh
    │  decoder ─► recon    │   loss = masked MSE + 0.2 · masked LPIPS
    └──────────┬───────────┘
               │ frozen after Phase 1
@@ -43,25 +120,65 @@ The implementation targets **CUDA**. See [What's noteworthy](#whats-noteworthy-i
    ┌──────────────────────┐
    │  Dynamics            │   12-layer transformer, embed_dim 512, GQA
    │  (flow matching)     │   spatial attn every layer, temporal every 4
-   │  z_noised, τ, d, a   │   block-causal across time, sliding window C=16
+   │  z_noised, τ, d, a   │   block-causal across time, sliding window C = 16
    │  ─► ẑ                │   loss = flow MSE + bootstrap (curriculum-mixed)
    │  + agent tokens ─► h │   asymmetric mask: agent sees all, world ignores agent
    └──────────┬───────────┘
-              │ frozen after Phase 2
+              │
               ▼
    ┌──────────────────────┐
-   │  Heads (on h)        │   reward: 255 symexp twohot bins
+   │  Heads (on h)        │   reward:   255 symexp-twohot bins
    │                      │   continue: Bernoulli
-   │                      │   value: 255 symexp twohot bins  (Phase 3)
-   │                      │   policy: diagonal Gaussian       (Phase 3)
+   │                      │   value:    255 symexp-twohot bins  (Phase 3)
+   │                      │   policy:   categorical (per-dim, 41 bins)  ← multimodal,
+   │                      │             a drop-in for the paper's diagonal Gaussian
    └──────────┬───────────┘
               │
               ▼
    ┌──────────────────────┐
    │  Imagination loop    │   H = 15 steps, K = 4 Euler denoise sub-steps
-   │  (Phase 3)           │   λ-returns (γ=0.997, λ=0.95)
-   │                      │   PMPO policy loss (α=0.5, β=0.3, reverse KL)
+   │  (Phase 3)           │   λ-returns (γ = 0.997, λ = 0.95)
+   │                      │   PMPO policy loss (α = 0.5, β = 0.3, reverse KL)
    └──────────────────────┘
+```
+
+The three phases, in one line each:
+- **Phase 1 — Tokenizer.** Spatio-temporal masked autoencoder; 8×8 patches → 32 latent tokens/frame; loss = masked MSE + 0.2·LPIPS; tube masking for temporal consistency.
+- **Phase 2 — Dynamics + agent.** Block-causal flow-matching transformer with bootstrap-loss curriculum; agent tokens + multi-token-prediction heads (reward/continue/policy) are finetuned on top, **behavior-cloning** the demos.
+- **Phase 3 — Imagination RL.** Freeze the world model; roll out H steps inside it; train policy + value heads with λ-returns and **PMPO** (preference-based MPO, reverse-KL to a frozen prior).
+
+---
+
+## Training from scratch
+
+> **Dataset.** The eval above needs no data (it uses the checkpoints). To train from scratch, build the offline buffer from Hansen's cup-catch demos: get them from [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), arrange as `hansen_data/{expert,mixed-small,mixed-large}/` (each with `cup-catch-*.png` + `cup-catch.pt`), then convert to the project's `.npz`:
+> ```bash
+> python convert_hansen_to_npz.py --hansen-root hansen_data --out-path ball_in_cup_catch.npz
+> ```
+> Yields a 240-episode, **mixed-quality** buffer (mean ~0.57 normalized return — see [Results](#results--ball_in_cup_catch--real-env-closed-loop-n--50)). The data itself is not redistributed; only the conversion script is.
+
+```bash
+# Phase 1 — tokenizer
+python -m tokenizer.train_tokenizer --dataset offline --dataset-path data/episodes.npz --epochs 100 --batch-size 32
+
+# Phase 2 — world model + BC agent (categorical policy head)
+python -m dynamics.train_agent \
+  --dynamics-ckpt checkpoints/dynamics/base.pt --tokenizer-ckpt checkpoints/tokenizer/final.pt \
+  --dataset offline --dataset-path ball_in_cup_catch.npz --task ball_in_cup_catch --action-dim 2 \
+  --policy-type categorical --policy-num-bins 41 --mtp-length 8 \
+  --epochs 40 --steps-per-epoch 500 --batch-size 32 --amp
+
+# Phase 3 — imagination RL
+python -m imagination.train_imagination \
+  --phase2-ckpt checkpoints/agent/final.pt --tokenizer-ckpt checkpoints/tokenizer/final.pt \
+  --dataset offline --dataset-path ball_in_cup_catch.npz --action-dim 2 \
+  --policy-type categorical --epochs 15 --batch-size 48 --horizon 15
+```
+
+Unit tests for the imagination algebra and the agent-token gradient firewall:
+```bash
+python test_imagination_algorithms.py    # λ-returns / advantage / PMPO loss
+python test_gradient_isolation.py         # agent tokens don't leak into the world model
 ```
 
 ---
@@ -70,165 +187,67 @@ The implementation targets **CUDA**. See [What's noteworthy](#whats-noteworthy-i
 
 ```
 dreamer_v4/
-├── tokenizer/                 Phase 1 — masked autoencoder
-│   ├── tokenizer.py           encoder + decoder + latent bottleneck
-│   ├── layers.py              RoPE, GQA, QK-norm, soft-capped flex_attention
-│   ├── masking.py             tube masking (spatial mask shared across T)
-│   ├── losses.py              MSE + optional LPIPS
-│   ├── trainer.py             training loop, metrics, checkpointing
-│   ├── train_tokenizer.py     CLI entrypoint
-│   └── config.py
-├── dynamics/                  Phase 2 — flow-matching world model
-│   ├── dynamic_model.py       transformer + register tokens + agent tokens
-│   ├── dynamic_block.py       spatial + (periodic) temporal + FF block
-│   ├── flow_matching.py       add_noise, sample_tau_and_d (on-device RNG)
-│   ├── embedding.py           action / agent / (τ,d) embeddings
-│   ├── trainer.py             curriculum, MTP, on-device grad clip
-│   ├── train_dynamics.py      CLI entrypoint
-│   ├── evaluate_dynamics.py   K-step denoise + autoregressive rollout + GIFs
-│   └── config.py
-├── imagination/               Phase 3 — RL inside the world model
-│   ├── rollout.py             imagine_rollout: H-step Euler + sliding buffer
-│   ├── algorithms.py          λ-returns, advantages, value loss, PMPO
-│   ├── trainer.py             (WIP) imagination training loop
-│   ├── train_imagination.py   (WIP) CLI entrypoint
-│   └── config.py
-├── heads.py                   reward / continue / policy heads + symlog twohot
-├── device_utils.py            CUDA / CPU device abstraction
-├── _env_setup.py              must-be-first import: env vars for inductor / wandb / tmp
-├── generate_dataset.py        dm_control → .npz episodes
-├── mock_data.py               synthetic moving-square videos (for smoke tests)
-├── test_imagination_algorithms.py   λ-returns / advantage / loss unit tests
-├── test_gradient_isolation.py       proves agent_out detach blocks dynamics grads
+├── tokenizer/         Phase 1 — masked-autoencoder tokenizer (model, masking, losses, trainer)
+├── dynamics/          Phase 2 — flow-matching world model + agent finetuning + real-env eval
+│   ├── dynamic_model.py    transformer + register/agent tokens
+│   ├── flow_matching.py    add_noise, on-device (τ, d) sampling
+│   ├── trainer.py          curriculum, MTP, behavior cloning
+│   ├── evaluate_dynamics.py   world-model rollout GIFs + per-τ metrics
+│   └── evaluate_env.py        ← closed-loop real-env eval (the results above)
+├── imagination/       Phase 3 — imagine_rollout, λ-returns, PMPO, trainer
+├── heads.py           reward / continue / value / policy heads (Gaussian + categorical)
+├── convert_hansen_to_npz.py    build the offline dataset from Hansen's demos
 └── requirements.txt
-```
-
----
-
-## Phase 1 — Tokenizer
-
-A spatio-temporal **masked autoencoder** that compresses video frames into a small set of latent tokens used by the dynamics model.
-
-- **Patch embedding** (`tokenizer/layers.py`): 8×8 spatial patches projected to `embed_dim = 512`.
-- **Latent tokens** (`tokenizer/tokenizer.py`): 32 learnable tokens per frame cross-attend to patches under a **block-causal mask** (latent at time *t* may not see future patches).
-- **Encoder / decoder**: 8 transformer layers each, GQA with 2 KV heads, RMSNorm pre-norm, RoPE, QK-norm, optional soft-capped attention (paper §3.4 spec, tanh at 30; off by default to match Hansen's verified reference), drop-path.
-- **Periodic temporal attention**: every 4 layers, to keep compute bounded.
-- **Bottleneck**: `latent_dim = 128`, tanh activation.
-- **Masking** (`tokenizer/masking.py`): per-sample mask probability ∼ Uniform[0, 0.9] with **tube consistency** — the same spatial pattern is masked across all frames in a clip, which prevents temporal flickering in reconstructions.
-- **Loss** (`tokenizer/losses.py`): masked-only MSE + 0.2 × masked LPIPS via hybrid recon (prediction at masked positions, target at unmasked). Both terms are RMS-EMA-normalized per paper §3.1 before weighting; LPIPS auto-disabled if weights unavailable.
-- **Encode-only path** (`tokenizer/tokenizer.py`): skips the decoder during dynamics training (~50 % less compute).
-
-Training:
-
-```bash
-python -m tokenizer.train_tokenizer \
-  --dataset offline --data-path data/episodes.npz \
-  --epochs 100 --batch-size 32
-```
-
----
-
-## Phase 2 — Dynamics (flow matching)
-
-A **block-causal latent transformer** trained to denoise corrupted latents, given previous latents, actions, and the (τ, d) flow-matching parameters.
-
-- **Model** (`dynamics/dynamic_model.py`): 12 transformer blocks, embed_dim 512, 8 heads, GQA (2 KV heads), 4 register tokens, sliding-window causal mask of length C = 16.
-- **Flow matching** (`dynamics/flow_matching.py`):
-  - `z_noised = (1 - τ) · noise + τ · z_clean`
-  - τ and `d = 1 / 2^k` sampled **on-device** to keep the training step on the accelerator.
-  - Inference uses a small fixed step count `K_inference = 4` for fast rollouts.
-- **Bootstrap loss + curriculum** (`dynamics/trainer.py`): warmup (flow-only) → ramp (gradually mix bootstrap, 0 → 1) → full. The curriculum mix is a persistent on-device tensor updated via `.fill_()` so it does **not** create a new graph each step under `torch.compile`.
-- **Sequence-length alternation**: 85 % short batches (T₁) and 15 % long (T₂) — implemented with a single fixed-shape graph plus a per-frame loss mask, so the trainer compiles one graph variant instead of two.
-- **Agent tokens** (Phase 2 finetuning): per-frame learnable tokens with an **asymmetric** spatial mask — agent tokens attend to everything; world-model tokens cannot attend to agent tokens. This is what lets Phase 3 train the policy without contaminating the frozen world model.
-- **Multi-token prediction (MTP) heads**: reward / continue / policy share a backbone but emit one output layer per temporal offset.
-
-Training:
-
-```bash
-python -m dynamics.train_dynamics \
-  --tokenizer-ckpt checkpoints/tokenizer/final.pt \
-  --dataset offline --data-path data/episodes.npz \
-  --curriculum-warmup-steps 5000 --curriculum-ramp-steps 15000
-```
-
-Evaluation produces autoregressive rollout GIFs and per-τ-bin reconstruction metrics:
-
-```bash
-python -m dynamics.evaluate_dynamics \
-  --dynamics-ckpt checkpoints/dynamics/final.pt \
-  --tokenizer-ckpt checkpoints/tokenizer/final.pt
-```
-
----
-
-## Phase 3 — Imagination + PMPO RL
-
-Algorithms and the rollout primitive are **complete and unit-tested**; the end-to-end trainer is in progress.
-
-- **`imagine_rollout`** (`imagination/rollout.py`):
-  1. Denoise `z_{t+1}` with K = 4 Euler steps using a context buffer corrupted to `τ_ctx = 0.1`.
-  2. Run dynamics with `use_agent_tokens=True` to obtain the agent hidden state `h_{t+1}`.
-  3. Sample `a_{t+1} ∼ policy_head(h_{t+1})` (reparameterized).
-  4. Predict reward, continue, value from `h_{t+1}`.
-  5. Slide the context buffer; **detach** before storing so the autograd graph stays compact.
-
-- **`compute_lambda_returns`** (`imagination/algorithms.py`): TD(λ) with γ = 0.997, λ = 0.95, returns are **detached at the source** so a misuse downstream cannot leak gradients into the value targets.
-
-- **`compute_advantages`** = λ_returns − values[:, :H].
-
-- **`value_loss`**: reuses the reward head's symexp twohot encoding (255 bins) and categorical cross-entropy.
-
-- **`pmpo_policy_loss`** — the paper's preference-based MPO objective:
-  - Partition the batch by `sign(advantage)` into D⁺ (good) and D⁻ (bad).
-  - Loss = `(1 - α)/|D⁻| · Σ ln π(a|s)_bad − α/|D⁺| · Σ ln π(a|s)_good + β · KL(π_θ ‖ π_prior)` (reverse KL).
-  - α = 0.5, β = 0.3.
-
-Tests live at the repo root:
-
-```bash
-python test_imagination_algorithms.py   # λ-returns / advantage / loss algebra
-python test_gradient_isolation.py       # confirms detach(agent_out) blocks grads
-```
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/vijayabhaskar-ev/dreamer_v4.git
-cd dreamer_v4
-pip install -r requirements.txt
-# optional, for dm_control envs and LPIPS:
-pip install dm_control lpips
-```
-
-Generate a dataset (or skip and use `mock_data.py` for smoke tests):
-
-```bash
-python generate_dataset.py --domain cheetah --task run --episodes 2000 --seq-len 50
 ```
 
 ---
 
 ## What's noteworthy in this implementation
 
-- **Asymmetric agent-token mask** in `dynamics/dynamic_model.py` — the cleanest way to add an agent stream to a pretrained world model without leaking agent state into world-model predictions.
-- **On-device flow-matching RNG** in `dynamics/flow_matching.py` — keeps the training step on the accelerator with no per-step host sync.
-- **Fixed-shape, mask-everything training path** in `dynamics/trainer.py` — the 70/30 short/long batch split is collapsed into a single graph plus a loss mask, keeping `torch.compile` warm.
-- **PMPO** in `imagination/algorithms.py` — preference-based MPO with reverse KL toward a frozen prior, partitioned by advantage sign rather than via softmax weights.
-- **Operational hardening**: `_env_setup.py` redirects `/tmp` and caps inductor compile workers.
+- **Categorical policy head** (`heads.py`) — a per-dim discretized (41-bin) head, a multimodal drop-in for the paper's diagonal Gaussian, with a head-agnostic `act(readout=mean|argmax|sample)` deployment interface. The readout ablation above is run through it.
+- **Asymmetric agent-token mask** (`dynamics/dynamic_model.py`) — adds an agent stream to a pretrained world model without leaking agent state into world-model predictions (the gradient firewall, unit-tested).
+- **On-device flow-matching RNG** (`dynamics/flow_matching.py`) — keeps the training step on the accelerator, no per-step host sync.
+- **PMPO** (`imagination/algorithms.py`) — preference-based MPO with reverse KL to a frozen prior, partitioned by advantage sign rather than softmax weights; λ-returns detached at the source.
+- **Closed-loop real-env evaluator** (`dynamics/evaluate_env.py`) — the world model acts as a belief encoder (no denoising loop); three policies compared on identical seeds; full calibration + GIFs.
+
+---
+
+## Honest limitations
+
+- This is a **reproduction on a single, simple task** (`ball_in_cup_catch`) with **honest negative results** — not a state-of-the-art agent. It is trained **fully offline** from a fixed, mixed-quality demo set, so the relevant ceiling is the demos (~0.58 normalized return), **not** online DreamerV3's ~0.96 (see the note under [Results](#results--ball_in_cup_catch--real-env-closed-loop-n--50)).
+- The headline metric is **noisy** (95% CI ≈ ±0.13 at n=50); the robust claims are "trained ≫ random" and "imagination-RL ≈ BC," which survive the noise — the exact catch rate does not.
+- Distributed/multi-GPU training is not implemented; the code targets single-GPU CUDA.
+- Checkpoints embed `dynamics_cfg`/`imagination_cfg` dataclasses — load them with the repo importable (run from the repo root, as the commands above do).
 
 ---
 
 ## References
 
-- Hafner, D., Yan, W., Lillicrap, T. — *Training Agents Inside of Scalable World Models* (DreamerV4). [arXiv:2509.24527](https://arxiv.org/abs/2509.24527), Sep 29 2025.
-- Hafner, D., Pasukonis, J., Ba, J., Lillicrap, T. — *Mastering Diverse Domains through World Models* (DreamerV3). [arXiv:2301.04104](https://arxiv.org/abs/2301.04104), Jan 2023; published as *Mastering Diverse Control Tasks Through World Models*, *Nature*, Apr 2 2025, [DOI:10.1038/s41586-025-08744-2](https://doi.org/10.1038/s41586-025-08744-2).
-- Lipman, Y. et al. — *Flow Matching for Generative Modeling* (2023).
-- Abdolmaleki, A. et al. — *Maximum a Posteriori Policy Optimization* (2018).
+- Hafner, Yan, Lillicrap — *Training Agents Inside of Scalable World Models* (DreamerV4). [arXiv:2509.24527](https://arxiv.org/abs/2509.24527), 2025.
+- Hafner et al. — *Mastering Diverse Domains through World Models* (DreamerV3). [arXiv:2301.04104](https://arxiv.org/abs/2301.04104), 2023.
+- Lipman et al. — *Flow Matching for Generative Modeling*, 2023.
+- Abdolmaleki et al. — *Maximum a Posteriori Policy Optimization* (MPO), 2018.
 
----
+## Citation
+
+Independent reproduction — please cite the original DreamerV4 paper; optionally cite this repo:
+
+```bibtex
+@article{hafner2025dreamerv4,
+  title   = {Training Agents Inside of Scalable World Models},
+  author  = {Hafner, Danijar and Yan, Wilson and Lillicrap, Timothy},
+  journal = {arXiv preprint arXiv:2509.24527},
+  year    = {2025}
+}
+
+@software{eswaran2026dreamerv4,
+  title  = {Dreamer V4 --- from-scratch PyTorch reproduction},
+  author = {Eswaran, Vijaya Bhaskar},
+  year   = {2026},
+  url    = {https://github.com/vijayabhaskar-ev/dreamer_v4}
+}
+```
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).
