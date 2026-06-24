@@ -1,7 +1,7 @@
 """Smoke test for imagination/rollout.py — plain runnable script.
 
 Run from project root:
-    python test_imagination_rollout.py
+    python -m tests.test_imagination_rollout
 
 Builds a tiny but real DynamicsModel + tokenizer + heads, runs
 `imagine_rollout`, and checks the output contract end-to-end:

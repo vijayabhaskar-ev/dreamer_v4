@@ -1,7 +1,7 @@
 """Unit tests for imagination/algorithms.py — plain runnable script.
 
 Run from project root:
-    python test_imagination_algorithms.py
+    python -m tests.test_imagination_algorithms
 
 Prints PASS/FAIL per test. Exits 1 if any test fails.
 """

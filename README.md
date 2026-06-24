@@ -175,10 +175,11 @@ python -m imagination.train_imagination \
   --policy-type categorical --epochs 15 --batch-size 48 --horizon 15
 ```
 
-Unit tests for the imagination algebra and the agent-token gradient firewall:
+Unit tests (run from the project root):
 ```bash
-python test_imagination_algorithms.py    # λ-returns / advantage / PMPO loss
-python test_gradient_isolation.py         # agent tokens don't leak into the world model
+python -m tests.test_imagination_algorithms   # λ-returns / advantages / value loss / PMPO
+python -m tests.test_imagination_rollout       # imagine_rollout output contract + grad isolation
+python -m tests.test_gradient_isolation        # forward-mask firewall: z_hat ⊥ agent token
 ```
 
 ---
@@ -197,6 +198,7 @@ dreamer_v4/
 ├── imagination/       Phase 3 — imagine_rollout, λ-returns, PMPO, trainer
 ├── heads.py           reward / continue / value / policy heads (Gaussian + categorical)
 ├── convert_hansen_to_npz.py    build the offline dataset from Hansen's demos
+├── tests/             imagination algebra, rollout contract, mask-firewall checks
 └── requirements.txt
 ```
 
@@ -205,7 +207,7 @@ dreamer_v4/
 ## What's noteworthy in this implementation
 
 - **Categorical policy head** (`heads.py`) — a per-dim discretized (41-bin) head, a multimodal drop-in for the paper's diagonal Gaussian, with a head-agnostic `act(readout=mean|argmax|sample)` deployment interface. The readout ablation above is run through it.
-- **Asymmetric agent-token mask** (`dynamics/dynamic_model.py`) — adds an agent stream to a pretrained world model without leaking agent state into world-model predictions (the gradient firewall, unit-tested).
+- **Asymmetric agent-token mask** (`dynamics/dynamic_model.py`) — adds an agent stream to a pretrained world model without leaking agent state into world-model predictions. This forward-mask firewall is unit-tested: `tests/test_gradient_isolation.py` confirms `∂z_hat/∂agent_token = 0` exactly, while the agent stream still reads the world.
 - **On-device flow-matching RNG** (`dynamics/flow_matching.py`) — keeps the training step on the accelerator, no per-step host sync.
 - **PMPO** (`imagination/algorithms.py`) — preference-based MPO with reverse KL to a frozen prior, partitioned by advantage sign rather than softmax weights; λ-returns detached at the source.
 - **Closed-loop real-env evaluator** (`dynamics/evaluate_env.py`) — the world model acts as a belief encoder (no denoising loop); three policies compared on identical seeds; full calibration + GIFs.
