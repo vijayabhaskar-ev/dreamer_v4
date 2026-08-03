@@ -101,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--checkpoint-interval", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed torch/numpy/python RNGs for the training-seed study. "
+                             "Default None preserves the original unseeded behavior.")
 
     # WandB
     add_wandb_args(parser, default_project="dreamer-v4-imagination")
@@ -120,6 +123,18 @@ def _load_tokenizer_config(ckpt_path: str) -> Optional[TokenizerConfig]:
 
 def _train_fn(index=0, args=None):
     opts = args if args is not None else build_parser().parse_args()
+
+    # Seed BEFORE any stochastic construction (value-head init, DataLoader
+    # shuffling, imagination rollout sampling all draw from these RNGs).
+    if opts.seed is not None:
+        import random
+        import numpy as np
+        random.seed(opts.seed)
+        np.random.seed(opts.seed)
+        torch.manual_seed(opts.seed)
+        torch.cuda.manual_seed_all(opts.seed)
+        if is_master():
+            print(f"[seed] all RNGs seeded with {opts.seed}")
 
     ckpt_dir = Path(opts.checkpoint_dir)
     if is_master():
