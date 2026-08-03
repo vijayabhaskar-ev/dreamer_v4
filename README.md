@@ -11,37 +11,43 @@ A faithful, from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & 
   <em>The trained agent catching and holding the ball (<code>ball_in_cup_catch</code>, stochastic policy).<br>It learns a real controller — this README is an honest teardown of where offline RL plateaus, and why.</em>
 </p>
 
-> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` and ran a rigorous real-env evaluation. The world model + agent learn a real controller (**3–4× a random policy**), but **offline imagination RL ≈ behavior cloning** (p = 0.63) — a clean negative result whose *cause* is an **out-of-distribution state-coverage gap**, not the policy head or mode-averaging. This is a faithful reproduction with honest nulls on a simple task — **not** a SOTA result. The interesting part is the teardown of *why* offline plateaus.
+> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` and ran a rigorous real-env evaluation — then re-ran it properly: **six independent imagination-RL training runs, each evaluated on the same 500 seeded episodes.** Averaged over runs, **imagination RL beats behavior cloning by +5.9 points of catch rate** (95% CI [+1.5, +10.4], t(5)=3.40, 6/6 runs positive) and **+64 return**, split roughly evenly between *succeeding more often* and *succeeding sooner/holding longer*. The twist: **our own first single run showed no effect** (p=0.56 at n=500 episodes) — training-seed variance (±3.2 pts) is comparable to the effect itself, so single-run RL comparisons mislead *even with large eval budgets*. Coverage still caps the ceiling (best run 0.46 vs ~0.58 demo ceiling). Not SOTA — a small, verified, honestly-measured study.
 
 ---
 
-## Results — `ball_in_cup_catch` (real-env, closed-loop, n = 50)
+## Results — `ball_in_cup_catch` (real-env, closed-loop; 6 training runs × 500 episodes)
 
-50 fixed seeds in the live `dm_control` environment (action_repeat 2, 500 policy steps/episode). All three policies share one world model + reward/continue heads; **only the policy head differs.**
+Six independent Phase-3 (imagination-RL) training runs — identical recipe, different training seeds — each evaluated on the **same 500 fixed environment seeds** in live `dm_control` (action_repeat 2, ~500 policy decisions/episode, stochastic readout). All runs share one world model + reward/continue heads and initialize from the same BC checkpoint; **only Phase-3 training differs.** Every number below reproduces via `python -m analysis.paper_stats`.
 
-**Catch rate** (fraction of 50 seeds that caught the ball):
+**Catch rate** (fraction of 500 episodes that caught the ball; BC baseline **0.356**, random **0.094**):
 
-| policy | deterministic | stochastic | return (stoch., out of ~1000) |
+| imagination-RL run | catch | Δ vs BC [95% CI] | paired sign-test p |
 |---|:---:|:---:|:---:|
-| random | 0.10 | 0.10 | 41 |
-| behavior cloning (BC) | 0.14 | 0.32 | 162 |
-| imagination RL (PMPO) | 0.16 | **0.38** | 247 |
+| run 1 (original) | 0.374 | +1.8 [−3.6, +7.2] | 0.56 |
+| run 2 | 0.446 | +9.0 [+3.6, +14.4] | 0.002 |
+| run 3 | 0.460 | +10.4 [+4.8, +16.0] | 0.001 |
+| run 4 | 0.366 | +1.0 [−4.4, +6.4] | 0.77 |
+| run 5 | 0.392 | +3.6 [−2.0, +9.0] | 0.23 |
+| run 6 | 0.454 | +9.8 [+4.4, +15.4] | 0.001 |
+| **mean of runs** | **0.415** | **+5.9 [+1.5, +10.4]**, t(5)=3.40 | p ≈ 0.02 |
 
-> **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch, but with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor). A behavior-cloned policy cannot exceed its data, so the **offline ceiling here is ~0.58, not 0.96.** The catch rates above correspond to normalized return ~0.16 (BC) / ~0.25 (imagination-RL) — roughly **43% of the demo ceiling**, the rest lost to covariate shift. Reaching ~0.9 requires *online* interaction (DAgger / online RL), not more offline training.
+**Return**: +63.6 on average (95% CI [+45.6, +81.7], 6/6 runs positive), decomposing into ~54% *catching more often* and ~46% *catching sooner / holding longer* (return per successful episode 501 → 582).
+
+> **⚠️ Supersedes the earlier single-run result.** Previous versions of this README (and an accompanying Reddit/X write-up) reported a **single-run** n=50 comparison — BC 0.32 vs imagination-RL 0.38, paired p=0.63 — and concluded "imagination RL ≈ BC." That conclusion did not survive replication: the original training run turned out to be a below-average draw from a training distribution whose seed-to-seed spread (**±3.2 pts**) is comparable to the mean effect (+5.9). Three of six runs individually look like nothing (p ≥ 0.23) while the six-run average is decisively positive — **the training run, not the evaluation episode, is the unit of inference** for RL comparisons. We keep this note here deliberately: it is the project's most transferable lesson.
+
+> **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor), so the **offline ceiling here is ~0.58, not 0.96.** Even the best run (0.46) sits below that ceiling; closing the remaining gap is structurally an *online* (DAgger / online-RL) problem.
 
 **Three findings:**
 
-1. **Trained ≫ random.** Stochastic BC 0.32 / imagination-RL 0.38 vs random 0.10 — the world model + BC learned a genuine controller (3–4× chance). 95% CI ≈ ±0.13 at n=50.
-2. **Imagination RL ≈ BC (the null).** Paired sign test, imagination-RL vs BC on the same seeds: **p = 0.63** (stochastic), **p = 1.0** (deterministic). Offline RL inside the world model adds nothing measurable over plain behavior cloning here.
-3. **Deterministic collapses, stochastic acts.** Any deterministic readout ≈ 0.15; sampling ≈ 0.38. The policy *knows* the behavior — sampling recovers it — but deterministic deployment freezes.
+1. **Trained ≫ random.** BC 0.356 vs random 0.094 (paired sign test p ≈ 4×10⁻²⁸) — the world model + BC learn a genuine controller.
+2. **Imagination RL improves on BC — on average, with real seed variance.** +5.9 pts catch / +64 return averaged over six runs, 6/6 positive; but per-run outcomes range from null (+1.0) to +10.4, so any *single* run can mislead.
+3. **Deterministic collapses, stochastic acts.** Any deterministic readout ≈ 0.15–0.17; sampling ≈ 0.37–0.46. PMPO optimizes the *sampled* policy, so sampling is the training-consistent deployment — and a still agent drifts off the always-active expert's state distribution.
 
-### Why it plateaus — the diagnosis
+### The diagnosis — what limits and what varies
 
-The bottleneck is an **OOD state-coverage gap**, *not* the policy head and *not* mode-averaging:
-- the belief state is healthy **in-distribution** (its action mean ≈ the demos), and collapses only on **out-of-distribution** states the offline demos never covered;
-- an advantage-weighted-BC probe found `corr(return, action-decisiveness) ≈ 0` — the expert is "always-on," so there is no decisive-vs-neutral structure for offline re-weighting to exploit.
-
-Closing that gap is **structurally an online-RL / DAgger problem** — no offline trick (advantage-weighting, longer RL, or a different readout) moved the number, and each of those is tested in the repo.
+- **Coverage caps the ceiling.** The belief state is healthy **in-distribution** (its action mean ≈ the demos) and degrades only on **out-of-distribution** states the demos never covered; an advantage-weighted-BC probe found `corr(return, action-decisiveness) ≈ 0` (the expert is "always-on"), so offline re-weighting has nothing to exploit.
+- **Training-seed variance is first-order.** Across-run spread of the catch-rate gain (sd 4.3 pts) exceeds what per-run evaluation noise alone predicts at n=500 (±2.8 pts) — implied genuine seed-to-seed sd ≈ **3.2 pts**, comparable to the mean effect.
+- **Imagination compresses what reality separates.** Final *imagined* returns of the six runs span a narrow 74–78 band while their *real* catch rates span 0.366–0.460 — even after training, the world model cannot reliably tell you which policy is the strong one. Closed-loop evaluation is not optional.
 
 ### Readout ablation (zero-confound: one policy, read three ways; n = 30)
 
@@ -87,7 +93,7 @@ python -m dynamics.evaluate_env \
   --device cuda --readout sample --wandb-disabled --output-dir eval-stoch    # --readout argmax → deterministic column
 ```
 
-Expected: `random` ≈ 0.10 ≪ `bc` ≈ 0.32 ≈ `phase3` ≈ 0.38 (catch rate). Outputs land in `eval-stoch/` (`summary.json`, per-episode CSV, rollout GIFs).
+Expected: `random` ≈ 0.10 ≪ `bc` ≈ 0.32, `phase3` ≈ 0.38 (catch rate; exact on same hardware — the eval is seed-deterministic). Note this reproduces the **released checkpoint** (training run 1 of 6); the headline result averages six runs — see the Results table, and `run_seed_study.sh` + `analysis/paper_stats.py` to reproduce the full study. Outputs land in `eval-stoch/`.
 
 ### Pretrained checkpoints
 
@@ -218,8 +224,9 @@ dreamer_v4/
 
 ## Honest limitations
 
-- This is a **reproduction on a single, simple task** (`ball_in_cup_catch`) with **honest negative results** — not a state-of-the-art agent. It is trained **fully offline** from a fixed, mixed-quality demo set, so the relevant ceiling is the demos (~0.58 normalized return), **not** online DreamerV3's ~0.96 (see the note under [Results](#results--ball_in_cup_catch--real-env-closed-loop-n--50)).
-- The headline metric is **noisy** (95% CI ≈ ±0.13 at n=50); the robust claims are "trained ≫ random" and "imagination-RL ≈ BC," which survive the noise — the exact catch rate does not.
+- This is a **single, simple task** (`ball_in_cup_catch`), trained **fully offline** from a fixed, mixed-quality demo set — the relevant ceiling is the demos (~0.58 normalized return), **not** online DreamerV3's ~0.96. Not a state-of-the-art agent.
+- The headline (+5.9 pts, 95% CI [+1.5, +10.4]) averages **six training runs against one BC training run**; BC's own seed variance is unmeasured, and per-run outcomes range from null to +10.4 pts. Claims are about *this recipe on this task*, not offline MBRL in general.
+- Earlier versions of this README reported a single-run null ("imagination-RL ≈ BC, p=0.63"); it is superseded by the six-run study above — kept visible as the project's main methodological lesson.
 - Distributed/multi-GPU training is not implemented; the code targets single-GPU CUDA.
 - Checkpoints embed `dynamics_cfg`/`imagination_cfg` dataclasses — load them with the repo importable (run from the repo root, as the commands above do).
 
