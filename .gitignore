@@ -8,7 +8,11 @@ wandb-summary.json
 wandb-metadata.json
 checkpoint*
 eval/dynamics/
-evaluation/
+evaluation/*
+!evaluation/tmlr-*/
+evaluation/tmlr-*/*
+!evaluation/tmlr-*/episodes.csv
+!evaluation/tmlr-*/summary.json
 evaluation-dynamics-epoch*/
 evaluation-agent-epoch*/
 evaluation-*/
@@ -40,3 +44,6 @@ pre_tanh_diagnostic.py
 sanity_untrained.py
 
 # NOTE: assets/ (the README's gifs) is intentionally tracked — do not ignore it.
+
+# TMLR draft — keep out of the public repo until camera-ready (anonymity hygiene)
+paper/
