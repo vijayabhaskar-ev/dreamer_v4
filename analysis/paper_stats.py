@@ -115,6 +115,50 @@ def main():
     print(f"  6 paired tests vs one baseline; Bonferroni alpha = {0.05/6:.4f}; "
           f"runs at p<=0.002 remain significant after correction.")
 
+    print("\n== BC vs random (whole-stack integration check) ==")
+    rnd = load("evaluation/tmlr-n500-categorical/episodes.csv", "random")
+    rn_c = np.array([rnd[s][1] for s in boards], float)
+    b = int(((bc_c == 1) & (rn_c == 0)).sum())
+    e = int(((bc_c == 0) & (rn_c == 1)).sum())
+    print(f"  BC {bc_c.mean():.3f} vs random {rn_c.mean():.3f}; "
+          f"paired sign test p = {sign_test(b, e):.2e}")
+
+    print("\n== Readout ablation (run 1, n=500 each, shared eval seeds) ==")
+    for r_ in ("mean", "argmax"):
+        d = load(f"evaluation/tmlr-readout-{r_}-n500/episodes.csv", "phase3")
+        c = np.array([d[s][1] for s in boards], float)
+        ret = np.array([d[s][0] for s in boards], float)
+        se = math.sqrt(c.mean() * (1 - c.mean()) / n)
+        print(f"  {r_:7s} catch {c.mean():.3f} +-{1.96*se:.3f}  return {ret.mean():.1f}"
+              f"  (return|catch {ret.sum()/max(c.sum(),1):.0f})")
+    r1c = np.array([runs['original'][s][1] for s in boards], float)
+    r1r = np.array([runs['original'][s][0] for s in boards], float)
+    print(f"  sample  catch {r1c.mean():.3f}         return {r1r.mean():.1f}"
+          f"  (return|catch {r1r.sum()/r1c.sum():.0f})")
+    print(f"  random floor for comparison: {rn_c.mean():.3f}")
+
+    print("\n== Gaussian pipeline variant (appendix; single run per arm — CONFOUNDED, "
+          "no run-level inference) ==")
+    g_bc = load("evaluation/tmlr-n500-stoch/episodes.csv", "bc")
+    g_p3 = load("evaluation/tmlr-n500-stoch/episodes.csv", "phase3")
+    gb = np.array([g_bc[s][1] for s in boards], float)
+    gp = np.array([g_p3[s][1] for s in boards], float)
+    print(f"  Gaussian pipeline:    BC {gb.mean():.3f}  imagination-RL {gp.mean():.3f}")
+    print(f"  categorical pipeline: BC {bc_c.mean():.3f}  imagination-RL {r1c.mean():.3f}")
+    print(f"  pipeline-level gaps (BC arms {bc_c.mean()-gb.mean():+.3f}, "
+          f"RL arms {r1c.mean()-gp.mean():+.3f}) — one Phase-2 finetune per arm; "
+          f"head type confounded with Phase-2 training variance.")
+
+    print("\n== Closed-loop calibration (from summary.json of the categorical n=500 eval) ==")
+    import json
+    with open(ROOT / "evaluation/tmlr-n500-categorical/summary.json") as f:
+        summ = json.load(f)
+    p3s = summ["policies"]["phase3"]
+    rc, cc = p3s["reward_calibration"], p3s["continue_calibration"]
+    print(f"  reward: Pearson {rc['reward_pearson']:.3f}, event-AUC {rc['reward_event_auc']:.4f}"
+          f" (n={rc['n']})")
+    print(f"  continue: Brier {cc['brier']:.4f} ({cc['done_positive_count']} real terminations)")
+
 
 if __name__ == "__main__":
     main()
