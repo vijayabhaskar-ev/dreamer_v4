@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed torch/numpy/python RNGs (BC seed study). "
+                             "Default None preserves the original unseeded behavior.")
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--weight-decay-heavy", type=float, default=0.1)
     parser.add_argument("--grad-clip", type=float, default=5.0)
@@ -136,6 +139,18 @@ def _load_tokenizer_config(ckpt_path: str) -> Optional[TokenizerConfig]:
 def _train_fn(index=0, args=None):
     """Per-device Phase 2 training function."""
     opts = args if args is not None else build_parser().parse_args()
+
+    # Seed BEFORE any stochastic construction (head init, DataLoader shuffling,
+    # MAE masking draws). Mirrors imagination/train_imagination.py.
+    if getattr(opts, "seed", None) is not None:
+        import random
+        import numpy as np
+        random.seed(opts.seed)
+        np.random.seed(opts.seed)
+        torch.manual_seed(opts.seed)
+        torch.cuda.manual_seed_all(opts.seed)
+        if is_master():
+            print(f"[seed] all RNGs seeded with {opts.seed}")
 
     ckpt_dir = Path(opts.checkpoint_dir)
     if is_master():
