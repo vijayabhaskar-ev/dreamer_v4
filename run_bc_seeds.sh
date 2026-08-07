@@ -4,6 +4,10 @@
 # at stage granularity; safe to relaunch after interruption.
 # Usage:  nohup ./run_bc_seeds.sh > bc_seeds.log 2>&1 &
 set -u
+# Allocator-only fix: at batch 32 + amp the run needs ~24GB and fragments just past
+# a 24GB card's limit. expandable_segments changes ONLY memory allocation strategy —
+# recipe, batch size, and numerics are untouched, so seed replication stays exact.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 PY=${PY:-$HOME/.conda/envs/dreamer_v4/bin/python}
 # Overridable for pod runs (HF-downloaded paths). Weight-identical to local files
 # (verified: tokenizer weights md5 d1c70f9a... in both stripped and full checkpoints).
