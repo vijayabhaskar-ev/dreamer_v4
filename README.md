@@ -11,7 +11,7 @@ A faithful, from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & 
   <em>The trained agent catching and holding the ball (<code>ball_in_cup_catch</code>, stochastic policy).<br>It learns a real controller — this README is an honest teardown of where offline RL plateaus, and why.</em>
 </p>
 
-> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` and ran a rigorous real-env evaluation — then re-ran it properly: **six independent imagination-RL training runs, each evaluated on the same 500 seeded episodes.** Averaged over runs, **imagination RL beats behavior cloning by +5.9 points of catch rate** (95% CI [+1.5, +10.4], t(5)=3.40, 6/6 runs positive) and **+64 return**, split roughly evenly between *succeeding more often* and *succeeding sooner/holding longer*. The twist: **our own first single run showed no effect** (p=0.56 at n=500 episodes) — training-seed variance (±3.2 pts) is comparable to the effect itself, so single-run RL comparisons mislead *even with large eval budgets*. Coverage still caps the ceiling (best run 0.46 vs ~0.58 demo ceiling). Not SOTA — a small, verified, honestly-measured study.
+> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` and ran a rigorous real-env evaluation — then re-ran it properly: **six independent imagination-RL training runs, each evaluated on the same 500 seeded episodes.** Averaged over runs, **imagination RL beats behavior cloning by +5.9 points of catch rate** (95% CI [+1.5, +10.4], t(5)=3.40, 6/6 runs positive) and **+64 return**, split roughly evenly between *succeeding more often* and *succeeding sooner/holding longer*. The twist: **our own first single run showed no effect** (p=0.56 at n=500 episodes) — run-to-run spread (sd **4.3 pts**, the observed spread behind that CI) is comparable to the effect itself, so single-run RL comparisons mislead *even with large eval budgets*. Follow-up studies went further: **the Phase-2 checkpoint you start from matters far more than the RL seed.** Coverage still caps the ceiling (best run 0.46 catch vs a **0.84 demo catch rate**). Not SOTA — a small, verified, honestly-measured study.
 
 ---
 
@@ -33,7 +33,7 @@ Six independent Phase-3 (imagination-RL) training runs — identical recipe, dif
 
 **Return**: +63.6 on average (95% CI [+45.6, +81.7], 6/6 runs positive), decomposing into ~54% *catching more often* and ~46% *catching sooner / holding longer* (return per successful episode 501 → 582).
 
-> **⚠️ Supersedes the earlier single-run result.** Previous versions of this README (and an accompanying Reddit/X write-up) reported a **single-run** n=50 comparison — BC 0.32 vs imagination-RL 0.38, paired p=0.63 — and concluded "imagination RL ≈ BC." That conclusion did not survive replication: the original training run turned out to be a below-average draw from a training distribution whose seed-to-seed spread (**±3.2 pts**) is comparable to the mean effect (+5.9). Three of six runs individually look like nothing (p ≥ 0.23) while the six-run average is decisively positive — **the training run, not the evaluation episode, is the unit of inference** for RL comparisons. We keep this note here deliberately: it is the project's most transferable lesson.
+> **⚠️ Supersedes the earlier single-run result.** Previous versions of this README (and an accompanying Reddit/X write-up) reported a **single-run** n=50 comparison — BC 0.32 vs imagination-RL 0.38, paired p=0.63 — and concluded "imagination RL ≈ BC." That conclusion did not survive replication: run-to-run spread (observed sd **4.3 pts**) is comparable to the mean effect (+5.9), and that first run landed at the low end. Later work located the variance more precisely — the **BC checkpoint** those six runs all started from is itself the lowest of four BC draws we subsequently trained (0.356 vs 0.374 / 0.434 / 0.448), and the Phase-2 draw, not the RL seed, dominates the outcome. Three of six runs individually look like nothing (p ≥ 0.23) while the six-run average is decisively positive — **the training run, not the evaluation episode, is the unit of inference** for RL comparisons. We keep this note here deliberately: it is the project's most transferable lesson.
 
 > **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor), so the **offline ceiling here is ~0.58, not 0.96.** Even the best run (0.46) sits below that ceiling; closing the remaining gap is structurally an *online* (DAgger / online-RL) problem.
 
@@ -41,21 +41,25 @@ Six independent Phase-3 (imagination-RL) training runs — identical recipe, dif
 
 1. **Trained ≫ random.** BC 0.356 vs random 0.094 (paired sign test p ≈ 4×10⁻²⁸) — the world model + BC learn a genuine controller.
 2. **Imagination RL improves on BC — on average, with real seed variance.** +5.9 pts catch / +64 return averaged over six runs, 6/6 positive; but per-run outcomes range from null (+1.0) to +10.4, so any *single* run can mislead.
-3. **Deterministic collapses, stochastic acts.** Any deterministic readout ≈ 0.15–0.17; sampling ≈ 0.37–0.46. PMPO optimizes the *sampled* policy, so sampling is the training-consistent deployment — and a still agent drifts off the always-active expert's state distribution.
+3. **Deterministic collapses to the random floor.** At n=500, deterministic readouts catch 0.104 (mean) / 0.102 (argmax) — error bars overlapping the 0.094 random floor — versus 0.374 when sampling. PMPO optimizes the *sampled* policy, so sampling is the training-consistent deployment — and a still agent drifts off the always-active expert's state distribution.
 
 ### The diagnosis — what limits and what varies
 
 - **Coverage caps the ceiling.** The belief state is healthy **in-distribution** (its action mean ≈ the demos) and degrades only on **out-of-distribution** states the demos never covered; an advantage-weighted-BC probe found `corr(return, action-decisiveness) ≈ 0` (the expert is "always-on"), so offline re-weighting has nothing to exploit.
-- **Training-seed variance is first-order.** Across-run spread of the catch-rate gain (sd 4.3 pts) exceeds what per-run evaluation noise alone predicts at n=500 (±2.8 pts) — implied genuine seed-to-seed sd ≈ **3.2 pts**, comparable to the mean effect.
+- **Training-seed variance is first-order.** Across-run spread of the catch-rate gain (observed sd **4.3 pts** — the number behind the CI) exceeds what per-run evaluation noise alone predicts at n=500 (±2.8 pts); subtracting that noise implies a genuine RL-seed sd of ≈**3.2 pts**, comparable to the mean effect. *(Quote 4.3 to reconstruct the interval; 3.2 only with this derivation attached.)*
+- **But the Phase-2 draw dominates the RL seed.** Retraining Phase-2 three times (identical recipe and data, different seed) gives BC catch 0.448 / 0.434 / 0.374 — and running the same imagination-RL recipe twice on top of *each* gives outcomes of **−32.6 / +24.2 / −8.3** points. Between-draw spread is ≈28 points versus ≈2 points for the RL seed: two runs sharing a Phase-2 draw agree within 0.6–5.6 points, while different draws disagree in sign. Everything above is measured **inside one Phase-2 realization** and should be read that way. Raw per-episode data for every run is in `evaluation/tmlr-*/`.
 - **Imagination compresses what reality separates.** Final *imagined* returns of the six runs span a narrow 74–78 band while their *real* catch rates span 0.366–0.460 — even after training, the world model cannot reliably tell you which policy is the strong one. Closed-loop evaluation is not optional.
 
-### Readout ablation (zero-confound: one policy, read three ways; n = 30)
+### Readout ablation (zero-confound: one policy, read three ways; n = 500)
 
-| readout | caught | why |
-|---|:---:|---|
-| `mean` (Σ pₖ·cₖ) | 0.17 | distribution mean |
-| `argmax` (mode) | 0.17 | most-likely bin |
-| `sample` | **0.47** | on-policy draw |
+| readout | caught | 95% CI | why |
+|---|:---:|:---:|---|
+| `mean` (Σ pₖ·cₖ) | 0.104 | [0.077, 0.131] | distribution mean |
+| `argmax` (mode) | 0.102 | [0.075, 0.129] | most-likely bin |
+| `sample` | **0.374** | — | on-policy draw |
+| *random floor* | *0.094* | *[0.068, 0.120]* | *reference* |
+
+Both deterministic intervals cover the random floor: the collapse is **total, not partial**. (An earlier n=30 estimate of 0.17 was small-sample noise — superseded.)
 
 `mean ≈ argmax` to the decimal ⇒ the per-state conditionals are ~unimodal, so "deploy the mean, not the mode" **cannot** help. The collapse is the **deterministic-map / OOD-drift** effect — only sampling is robust to it, and the actor was *trained* on sampled actions, so sampling is the training-consistent deployment.
 
@@ -93,7 +97,7 @@ python -m dynamics.evaluate_env \
   --device cuda --readout sample --wandb-disabled --output-dir eval-stoch    # --readout argmax → deterministic column
 ```
 
-Expected: `random` ≈ 0.10 ≪ `bc` ≈ 0.32, `phase3` ≈ 0.38 (catch rate; exact on same hardware — the eval is seed-deterministic). Note this reproduces the **released checkpoint** (training run 1 of 6); the headline result averages six runs — see the Results table, and `run_seed_study.sh` + `analysis/paper_stats.py` to reproduce the full study. Outputs land in `eval-stoch/`.
+Expected at n=500: `random` 0.094 ≪ `bc` 0.356, `phase3` 0.374 (catch rate; exact on same hardware — the eval is seed-deterministic). Short runs differ: at n=50 these read ≈0.10 / 0.32 / 0.38 — sampling noise, not a broken pipeline. Note this reproduces the **released checkpoint** (training run 1 of 6); the headline result averages six runs — see the Results table, and `run_seed_study.sh` + `analysis/paper_stats.py` to reproduce the full study. Outputs land in `eval-stoch/`.
 
 ### Pretrained checkpoints
 
