@@ -7,11 +7,12 @@ Prints PASS/FAIL per test. Exits 1 if any test fails.
 """
 
 import copy
+import math
 import sys
 
 import torch
 
-from heads import RewardHead, PolicyHead
+from heads import CategoricalPolicyHead, RewardHead, PolicyHead
 from imagination.algorithms import (
     compute_lambda_returns,
     compute_advantages,
@@ -231,6 +232,84 @@ check(
     "4d prior gradient isolation (no_grad works)",
     prior_clean,
     "some policy_prior parameter received a non-zero gradient",
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Stage 5 — CategoricalPolicyHead (the shipped head behind the published
+# numbers). Same PMPO algebra as Stage 4 via the head-agnostic interface,
+# plus hand-computable log_prob / kl_to cases. Output-head weight AND bias
+# are zero-initialized, so logits == bias, state-independent — every
+# expected value below is exact pencil-and-paper math.
+# ═══════════════════════════════════════════════════════════════════════
+
+B, H, D, A = 2, 3, 512, 6
+states = torch.randn(B, H, D)
+
+# 5a — zero-init ⇒ uniform per-dim categorical ⇒ log_prob = -A·ln(K) exactly,
+# for ANY state and any action in [-1, 1].
+cat_uniform = CategoricalPolicyHead(latent_dim=D, action_dim=A)
+K = cat_uniform.num_bins  # 41 (default)
+actions_any = torch.empty(B, H, A).uniform_(-1, 1)
+got_lp = cat_uniform.log_prob(states, actions_any)
+expected_scalar = -A * math.log(K)
+check(
+    "5a categorical log_prob uniform identity (-A·ln K)",
+    torch.allclose(got_lp, torch.full((B, H), expected_scalar), atol=1e-4),
+    f"got={got_lp.flatten().tolist()}, expected={expected_scalar:.6f}",
+)
+
+# 5b — hand-computed non-uniform log_prob: put logit ln(3) on bin 0 of every
+# dim (bias.view(A, K) matches _logits' unflatten layout). Then
+# p(bin 0) = 3 / (3 + (K-1)) = 3/(K+2), and actions at exactly -1.0 (the
+# center of bin 0) give log_prob = A·ln(3/(K+2)).
+cat_spike = CategoricalPolicyHead(latent_dim=D, action_dim=A)
+with torch.no_grad():
+    cat_spike.output_heads[0].bias.view(A, K)[:, 0] = math.log(3.0)
+actions_bin0 = -torch.ones(B, H, A)
+got_lp = cat_spike.log_prob(states, actions_bin0)
+expected_scalar = A * math.log(3.0 / (K + 2))
+check(
+    "5b categorical log_prob hand-computed (spiked bin 0)",
+    torch.allclose(got_lp, torch.full((B, H), expected_scalar), atol=1e-4),
+    f"got={got_lp.flatten().tolist()}, expected={expected_scalar:.6f}",
+)
+
+# 5c — categorical analogue of 4c: identical non-uniform policies ⇒ KL = 0
+# exactly, so PMPO at α=1, β=1, all-pos adv reduces to -mean(log_prob).
+cat_prior = copy.deepcopy(cat_spike)
+kl_self = cat_spike.kl_to(cat_prior, states)
+check(
+    "5c-i categorical kl_to(self-copy) == 0",
+    torch.allclose(kl_self, torch.zeros(B, H), atol=1e-6),
+    f"max |KL| = {kl_self.abs().max().item():.3e}",
+)
+with torch.no_grad():
+    lp_spike = cat_spike.log_prob(states, actions_bin0)
+advantages = torch.ones(B, H)
+loss = pmpo_policy_loss(
+    cat_spike, cat_prior, states, actions_bin0, advantages,
+    alpha=1.0, beta=1.0,
+)
+expected = -lp_spike.mean()
+check(
+    "5c-ii categorical PMPO identical-policies KL=0 (non-uniform)",
+    torch.allclose(loss, expected, atol=1e-5),
+    f"loss={loss.item():.6f}, expected={expected.item():.6f}, "
+    f"diff={abs(loss.item() - expected.item()):.6e} (should be ≈0)",
+)
+
+# 5d — hand-computed KL value + direction. KL[uniform ‖ spiked] per dim:
+#   Σ_k (1/K)·(ln(1/K) − ln q_k), with q_0 = 3/(K+2), q_{k≠0} = 1/(K+2)
+#   = ln((K+2)/K) − ln(3)/K            (≈ 0.02084/dim at K=41; × A total)
+# The opposite direction KL[spiked ‖ uniform] ≈ 0.02902/dim, so this also
+# pins kl_to's convention as KL[self ‖ prior] (reverse KL to the prior).
+kl_ud = cat_uniform.kl_to(cat_spike, states)
+per_dim = math.log((K + 2) / K) - math.log(3.0) / K
+check(
+    "5d categorical kl_to hand-computed (uniform ‖ spiked)",
+    torch.allclose(kl_ud, torch.full((B, H), A * per_dim), atol=1e-4),
+    f"got={kl_ud.flatten().tolist()}, expected={A * per_dim:.6f}",
 )
 
 

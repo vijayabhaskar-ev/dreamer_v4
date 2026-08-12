@@ -13,13 +13,30 @@ losses finetune the backbone jointly; the mask, not a gradient stop, is what
 prevents the agent stream from contaminating the world model's predictions).
 
 Run from project root:  python -m tests.test_gradient_isolation
+
+Prints PASS/FAIL per test. Exits 1 if any test fails.
 """
+import sys
+
 import torch
 
 from dynamics.config import DynamicsConfig
 from dynamics.dynamic_model import DynamicsModel
 from tokenizer.config import TokenizerConfig
 from tokenizer.tokenizer import MaskedAutoencoderTokenizer
+
+torch.manual_seed(0)
+
+failures: list[str] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    if cond:
+        print(f"PASS: {name}")
+    else:
+        print(f"FAIL: {name} — {detail}")
+        failures.append(name)
+
 
 # ── minimal model with agent tokens enabled ───────────────────────────────
 tok_cfg = TokenizerConfig(image_size=(64, 64), patch_size=(8, 8),
@@ -49,16 +66,16 @@ model.zero_grad(set_to_none=True)
 out = model(z_noised, actions, tau, d, use_agent_tokens=True)
 out.z_hat.sum().backward()
 leak = _agent_grad_magnitude()
-print(f"{'PASS' if leak == 0 else 'FAIL'}: z_hat is value-independent of the agent token "
-      f"(|∂z_hat/∂agent_embedding| = {leak:.6f}, expect 0)")
+check(f"z_hat is value-independent of the agent token "
+      f"(|∂z_hat/∂agent_embedding| = {leak:.6f}, expect 0)", leak == 0.0)
 
 # ── Test 2: agent_out MUST depend on the agent token (it has to, to be useful) ──
 model.zero_grad(set_to_none=True)
 out = model(z_noised, actions, tau, d, use_agent_tokens=True)
 out.agent_out.sum().backward()
 signal = _agent_grad_magnitude()
-print(f"{'PASS' if signal > 0 else 'FAIL'}: agent_out depends on the agent token "
-      f"(|∂agent_out/∂agent_embedding| = {signal:.4f}, expect > 0)")
+check(f"agent_out depends on the agent token "
+      f"(|∂agent_out/∂agent_embedding| = {signal:.4f}, expect > 0)", signal > 0)
 
 # ── Test 3: the flow loss still trains the world-model backbone (Option-A) ──
 model.zero_grad(set_to_none=True)
@@ -70,5 +87,10 @@ backbone_trains = any(
     for n, p in model.named_parameters()
     if "agent_embedding" not in n and "proj" in n
 )
-print(f"{'PASS' if backbone_trains else 'FAIL'}: world-model backbone (proj_in/proj_out) "
-      f"trains under the flow loss")
+check("world-model backbone (proj_in/proj_out) trains under the flow loss",
+      backbone_trains, "no proj parameter received a non-zero flow-loss gradient")
+
+if failures:
+    print(f"\n{len(failures)} FAILED: {failures}")
+    sys.exit(1)
+print("\nALL PASS")
