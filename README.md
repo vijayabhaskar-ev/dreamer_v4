@@ -35,7 +35,7 @@ Six independent Phase-3 (imagination-RL) training runs — identical recipe, dif
 
 > **⚠️ Supersedes the earlier single-run result.** Previous versions of this README (and an accompanying Reddit/X write-up) reported a **single-run** n=50 comparison — BC 0.32 vs imagination-RL 0.38, paired p=0.63 — and concluded "imagination RL ≈ BC." That conclusion did not survive replication: run-to-run spread (observed sd **4.3 pts**) is comparable to the mean effect (+5.9), and that first run landed at the low end. Later work located the variance more precisely — the **BC checkpoint** those six runs all started from is itself the lowest of four BC draws we subsequently trained (0.356 vs 0.374 / 0.434 / 0.448), and the Phase-2 draw, not the RL seed, dominates the outcome. Three of six runs individually look like nothing (p ≥ 0.23) while the six-run average is decisively positive — **the training run, not the evaluation episode, is the unit of inference** for RL comparisons. We keep this note here deliberately: it is the project's most transferable lesson.
 
-> **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor), so the **offline ceiling here is ~0.58, not 0.96.** Even the best run (0.46) sits below that ceiling; closing the remaining gap is structurally an *online* (DAgger / online-RL) problem.
+> **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor), so the **offline ceiling here is ~0.57, not 0.96.** Our runs sit well below it on matched units — best run 0.26 normalized return vs the demos' 0.57, and 0.46 catch rate vs the demos' 0.84 — and closing the remaining gap is structurally an *online* (DAgger / online-RL) problem.
 
 **Three findings:**
 
@@ -228,7 +228,7 @@ dreamer_v4/
 
 ## Honest limitations
 
-- This is a **single, simple task** (`ball_in_cup_catch`), trained **fully offline** from a fixed, mixed-quality demo set — the relevant ceiling is the demos (~0.58 normalized return), **not** online DreamerV3's ~0.96. Not a state-of-the-art agent.
+- This is a **single, simple task** (`ball_in_cup_catch`), trained **fully offline** from a fixed, mixed-quality demo set — the relevant ceiling is the demos (0.57 normalized return / 0.84 catch rate — compare like with like), **not** online DreamerV3's ~0.96. Not a state-of-the-art agent.
 - The headline (+5.9 pts, 95% CI [+1.5, +10.4]) averages **six training runs against one BC training run**; BC's own seed variance is unmeasured, and per-run outcomes range from null to +10.4 pts. Claims are about *this recipe on this task*, not offline MBRL in general.
 - Earlier versions of this README reported a single-run null ("imagination-RL ≈ BC, p=0.63"); it is superseded by the six-run study above — kept visible as the project's main methodological lesson.
 - Distributed/multi-GPU training is not implemented; the code targets single-GPU CUDA.
