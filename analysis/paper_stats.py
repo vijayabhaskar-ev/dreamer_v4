@@ -64,7 +64,12 @@ def main():
     bc_c = np.array([bc[s][1] for s in boards], float)
     bc_r = np.array([bc[s][0] for s in boards], float)
 
-    print(f"BC baseline: catch {bc_c.mean():.3f}, return {bc_r.mean():.1f}  (n={n})")
+    print(f"BC baseline: catch {bc_c.mean():.3f}, return {bc_r.mean():.1f}, "
+          f"zero-return episodes {(bc_r == 0).mean():.1%}  (n={n})")
+    rnd0 = load("evaluation/tmlr-n500-categorical/episodes.csv", "random")
+    rr = np.array([rnd0[s_][0] for s_ in boards], float)
+    print(f"random floor: catch {np.array([rnd0[s_][1] for s_ in boards]).mean():.3f}, "
+          f"return {rr.mean():.1f}")
     print("\n== Table: per-run paired comparison vs BC ==")
     d_catch, d_ret, per_run_evalvar = [], [], []
     Cs, Rs = [], []
@@ -88,6 +93,10 @@ def main():
         se = sd / math.sqrt(k)
         t = m_ / se
         tcrit = 2.571  # t_{0.975, df=5}
+        u = np.linspace(abs(t), abs(t) + 60, 400_000)
+        dens = 2 / (math.sqrt(5 * math.pi) * 1.329340388) * (1 + u**2 / 5) ** -3
+        p_t = 2 * np.trapezoid(dens, u)
+        print(f"  {label}: p = {p_t:.3f} (two-sided, df={k-1})")
         print(f"  {label}: mean {m_:+.4f}  sd {sd:.4f}  t({k-1})={t:.2f}  "
               f"95% CI [{m_ - tcrit * se:+.4f}, {m_ + tcrit * se:+.4f}]  ({sum(x > 0 for x in v)}/{k} positive)")
 
@@ -156,6 +165,12 @@ def main():
         print(f"  {cell}: catch {c_.mean():.3f} vs parent {pc.mean():.3f} -> "
               f"{100*dc:+.1f}pp  CI [{100*lo:+.1f},{100*hi:+.1f}]  "
               f"McNemar p={sign_test(b_, e_):.1e}")
+    cell_ses = []
+    for cell, par in cells:
+        d = load(f"evaluation/tmlr-fact-{cell}-n500/episodes.csv", "phase3")
+        dc_b = np.array([d[s_][1] for s_ in boards], float) - bc_runs[f"seed{par}"][0]
+        cell_ses.append(dc_b.std(ddof=1) / math.sqrt(n))
+    print(f"  per-cell eval noise floor: {100*float(np.mean(cell_ses)):.1f}pp")
     draw_means = np.array([np.mean(v) for v in by_draw.values()])
     grand = float(np.mean(deltas))
     ms_b = 2 * float(np.sum((draw_means - grand) ** 2)) / 2      # k-1 = 2
