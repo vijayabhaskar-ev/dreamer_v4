@@ -233,15 +233,28 @@ def main():
           f"RL arms {r1c.mean()-gp.mean():+.3f}) — one Phase-2 finetune per arm; "
           f"head type confounded with Phase-2 training variance.")
 
-    print("\n== Closed-loop calibration (from summary.json of the categorical n=500 eval) ==")
+    print("\n== Closed-loop calibration echo (every released summary.json) ==")
     import json
-    with open(ROOT / "evaluation/tmlr-n500-categorical/summary.json") as f:
-        summ = json.load(f)
-    p3s = summ["policies"]["phase3"]
-    rc, cc = p3s["reward_calibration"], p3s["continue_calibration"]
-    print(f"  reward: Pearson {rc['reward_pearson']:.3f}, event-AUC {rc['reward_event_auc']:.4f}"
-          f" (n={rc['n']})")
-    print(f"  continue: Brier {cc['brier']:.4f} ({cc['done_positive_count']} real terminations)")
+    import glob
+    rows = []
+    for sj in sorted(glob.glob(str(ROOT / "evaluation/tmlr-*/summary.json"))):
+        with open(sj) as f:
+            summ = json.load(f)
+        for pol, ps in summ.get("policies", {}).items():
+            rc = ps.get("reward_calibration")
+            if not rc:
+                continue  # random floor never queries the model
+            cc = ps.get("continue_calibration", {})
+            rows.append((sj.split("evaluation/")[-1].split("/")[0], pol,
+                         rc.get("reward_mae"), rc["reward_pearson"],
+                         rc["reward_event_auc"], cc.get("brier")))
+            print(f"  {rows[-1][0]:32s} {pol:7s} MAE {rows[-1][2]:.4f}  "
+                  f"pearson {rows[-1][3]:.3f}  AUC {rows[-1][4]:.3f}  brier {rows[-1][5]:.4f}")
+    p3 = [r for r in rows if r[1] == "phase3" and "fact-" not in r[0] and "readout" not in r[0]
+          and "stoch" not in r[0] and "mj337" not in r[0]]
+    print(f"  six-run spread (anchor-study phase3): MAE {min(r[2] for r in p3):.4f}-"
+          f"{max(r[2] for r in p3):.4f}, pearson {min(r[3] for r in p3):.4f}-"
+          f"{max(r[3] for r in p3):.4f}")
 
 
 if __name__ == "__main__":
