@@ -102,6 +102,8 @@ def main():
 
     print("\n== Committee estimate (per-board mean of runs, paired vs BC, board bootstrap) ==")
     Cbar, Rbar = np.mean(Cs, axis=0), np.mean(Rs, axis=0)
+    print(f"  committee catch {Cbar.mean():.4f} (vs BC {bc_c.mean():.4f}); "
+          f"committee return {Rbar.mean():.1f} (vs BC {bc_r.mean():.1f})")
     Dc, Dr = Cbar - bc_c, Rbar - bc_r
     lo, hi = boot_ci(Dc, rng)
     print(f"  d_catch  = {Dc.mean():+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]")
