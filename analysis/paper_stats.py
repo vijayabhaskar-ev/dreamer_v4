@@ -117,13 +117,19 @@ def main():
     print(f"  rate channel        (dp * mu_p): {(pp - pb) * mu_p:+.1f}  ({(pp - pb) * mu_p / tot:.0%})")
     print(f"  conditional channel (p_b * dmu): {pb * (mu_p - mu_b):+.1f}  ({pb * (mu_p - mu_b) / tot:.0%})")
     print(f"  return-per-success: {mu_b:.0f} -> {mu_p:.0f}")
+    a2, b2 = (pp - pb) * mu_b, pp * (mu_p - mu_b)
+    print(f"  alternative attribution (interaction to conditional channel): "
+          f"{a2/tot:.0%}/{b2/tot:.0%}")
 
-    print("\n== Training-seed variance decomposition ==")
+    print("\n== Training-seed variance decomposition (sec 6.2 convention) ==")
     obs_sd = float(np.std(d_catch, ddof=1))
-    eval_se = math.sqrt(float(np.mean(per_run_evalvar)))
-    train_sd = math.sqrt(max(obs_sd ** 2 - eval_se ** 2, 0.0))
-    print(f"  across-run sd {obs_sd:.4f} | per-run eval SE {eval_se:.4f} "
-          f"| implied training-seed sd {train_sd:.4f}")
+    # binomial-only correction: the shared baseline's eval noise is constant
+    # across the six deltas and cancels in their spread (paper footnote 1)
+    rl_rates = [float(np.array([d[s][1] for s in boards]).mean()) for d in runs.values()]
+    binom_se = math.sqrt(float(np.mean([p_ * (1 - p_) / n for p_ in rl_rates])))
+    train_sd = math.sqrt(max(obs_sd ** 2 - binom_se ** 2, 0.0))
+    print(f"  across-run sd {obs_sd:.4f} | per-run binomial se {binom_se:.4f} "
+          f"| deconvolved training-seed sd {train_sd:.4f}")
 
     # ── §6.3: the baseline is itself a draw ─────────────────────────────
     print("\n== BC seed study (sec 6.3) ==")
@@ -189,7 +195,30 @@ def main():
           f"(sd of draw means {100*s_draw:.1f}, chi2 CI "
           f"[{100*s_draw*math.sqrt(2/7.3778):.1f}, {100*s_draw*math.sqrt(2/0.050636):.1f}]), "
           f"sigma_within {100*math.sqrt(ms_w):.1f}pp")
-    print(f"  ICC {icc:.3f}, F(2,3) = {F:.1f}, p = {p_F:.1e}")
+    print(f"  ICC {icc:.4f}, F(2,3) = {F:.1f}  (parametric p = {p_F:.1e}; "
+          f"NOT quoted in the paper)")
+    # Searle F-based CI for the ICC (n=2 per group): F crits from closed forms
+    # are not available for (2,3)/(3,2); use scipy-free constants
+    Fc23, Fc32 = 16.0441, 39.1655   # F_{0.975}(2,3), F_{0.975}(3,2)
+    FL, FU = F / Fc23, F * Fc32
+    print(f"  ICC 95% CI (Searle): [{(FL-1)/(FL+1):.4f}, {(FU-1)/(FU+1):.5f}]")
+    # exact enumeration: all 15 ways to pair the six cell deltas
+    import itertools
+    def F_of(groups):
+        gm = np.array([np.mean(g) for g in groups])
+        msb_ = 2 * float(((gm - gm.mean()) ** 2).sum()) / 2
+        msw_ = float(sum((g[0] - g[1]) ** 2 / 2 for g in groups)) / 3
+        return msb_ / msw_ if msw_ > 0 else float("inf")
+    seen, Fs = set(), []
+    for perm in itertools.permutations(range(6)):
+        key = tuple(sorted(tuple(sorted(perm[i:i+2])) for i in (0, 2, 4)))
+        if key not in seen:
+            seen.add(key)
+            Fs.append(F_of([[deltas[i] * 100 for i in pr] for pr in key]))
+    Fs.sort(reverse=True)
+    print(f"  enumeration: {len(Fs)} possible pairings; max F {Fs[0]:.1f} "
+          f"(the by-draw grouping), runner-up {Fs[1]:.1f} "
+          f"(ratio {Fs[0]/Fs[1]:.1f}x); exact permutation p = 1/{len(Fs)}")
     print(f"  draw-level mean {100*grand:+.1f}pp, 95% CI "
           f"[{100*(grand - tcrit2*se_d):+.1f}, {100*(grand + tcrit2*se_d):+.1f}] "
           f"(not estimable at n=3)")
