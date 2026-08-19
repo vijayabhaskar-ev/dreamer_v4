@@ -341,6 +341,15 @@ def sec7_block():
         bc = e["bc_pearson_nbc"]
         print(f"      BC parent: MAE {bc['mae']:.4f} over n_eps={bc['n_eps']} "
               f"(pearson {bc['pearson']})")
+    # hallucinated-success contrast: 13/50 (exploiting) vs 0/25 and 0/15
+    def _fisher(a, b, c, d):
+        n, r1, c1 = a + b + c + d, a + b, a + c
+        return sum(comb(r1, x) * comb(n - r1, c1 - x)
+                   for x in range(a, min(r1, c1) + 1)) / comb(n, c1)
+    print(f"  hallucinated-success 13/50 vs 0/25 p={_fisher(13, 37, 0, 25):.4f}, "
+          f"vs 0/15 p={_fisher(13, 37, 0, 15):.4f}, vs pooled 0/40 "
+          f"p={_fisher(13, 37, 0, 40):.5f}  (0/40 exact 95% upper bound "
+          f"{1 - 0.05 ** (1/40):.3f})")
     maes = {"exploit": 0.29305, "record": 0.02783, "declining": 0.02402,
             "bc11": 0.02534, "bc12": 0.03895}
     print(f"  separation: exploiting 0.293 vs worst healthy 0.039 -> "
