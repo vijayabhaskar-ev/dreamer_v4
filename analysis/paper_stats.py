@@ -288,5 +288,105 @@ def main():
           f"{max(r[3] for r in p3):.4f}")
 
 
+def sec7_block():
+    """Section 7 twins: every number quoted in sec7 that is not already
+    printed above. Sources: paper/probe_artifacts/{kl_probe_results,
+    training_finals,weight_forensics}.json + evaluation/*/episodes.csv."""
+    import csv
+    import itertools
+    import json
+    from math import comb, sqrt
+
+    pa = ROOT / "paper/probe_artifacts"
+    finals = json.load(open(pa / "training_finals.json"))
+    probe = json.load(open(pa / "kl_probe_results.json"))
+    wf = json.load(open(pa / "weight_forensics.json"))
+
+    print("\n== sec7.1: training-side blindness (factorial) ==")
+    for k, v in finals["factorial"].items():
+        print(f"  {k}: imagined {v['imagined_return']:7.2f}  per-step reward "
+              f"{v['mean_reward']:.3f}  mean_continue {v['mean_continue']:.5f}  "
+              f"real catch {v['real_catch']:.3f}")
+    ds = finals["expert_dataset"]["per_step_reward"]
+    print(f"  expert npz per-step reward mean {ds['mean']} on [{ds['min']}, {ds['max']}]")
+    lo = [finals["factorial"][k]["real_catch"] for k in ("bc11-rl21", "bc11-rl22")]
+    hi = [finals["factorial"][k]["real_catch"] for k in ("bc12-rl23", "bc12-rl24")]
+    print(f"  real-catch factor (midpoints): {(sum(hi)/2)/(sum(lo)/2):.2f}")
+    print("  within-draw pair diffs vs binomial noise (n=500/cell):")
+    cells = {"bc11": (0.126, 0.118), "bc12": (0.648, 0.704), "bc13": (0.288, 0.294)}
+    for k, (a, b) in cells.items():
+        se = sqrt(a * (1 - a) / 500 + b * (1 - b) / 500)
+        print(f"    {k}: diff {a-b:+.3f}  se_diff {se:.4f}  ({abs(a-b)/se:.2f} sigma)")
+
+    print("\n== sec7.1/7.5: anchor within-draw ranking, 6 runs -> 15 pairs ==")
+    a6 = [(v["imagined_return"], v["real_catch"]) for v in finals["anchor"].values()]
+    agree = sum((x[0] > y[0]) == (x[1] > y[1]) for x, y in itertools.combinations(a6, 2))
+    p = sum(comb(15, k) for k in range(agree, 16)) / 2 ** 15
+    imag = [x[0] for x in a6]
+    real = [x[1] for x in a6]
+    print(f"  concordant {agree}/15, exact one-sided p = {p:.4f}")
+    print(f"  imagined band {min(imag):.2f}-{max(imag):.2f} "
+          f"(relative {100*(max(imag)-min(imag))/min(imag):.1f}%)  real band "
+          f"{min(real):.3f}-{max(real):.3f} (relative "
+          f"{100*(max(real)-min(real))/min(real):.1f}%, {100*(max(real)-min(real)):.1f} points)")
+
+    print("\n== sec7.1/7.2: closed-loop probe (kl_probe_results.json) ==")
+    for e in probe:
+        pe = e["per_ep"]
+        n10 = e["prefix_pearson"].get("10", {})
+        print(f"  {e['tag']}: probe n={e['repro']['n']}  MAE@10 {n10.get('mae', float('nan')):.4f}  "
+              f"pred {pe['pred_return_mean']:.1f} vs actual {pe['actual_return_mean']:.1f} "
+              f"(gap {pe['pred_minus_actual_mean']:+.1f})  frac(pred>100 & actual=0) "
+              f"{pe['frac_eps_pred_gt_100_actual_0']:.2f}")
+        bc = e["bc_pearson_nbc"]
+        print(f"      BC parent: MAE {bc['mae']:.4f} over n_eps={bc['n_eps']} "
+              f"(pearson {bc['pearson']})")
+    maes = {"exploit": 0.29305, "record": 0.02783, "declining": 0.02402,
+            "bc11": 0.02534, "bc12": 0.03895}
+    print(f"  separation: exploiting 0.293 vs worst healthy 0.039 -> "
+          f"{0.29305/0.03895:.1f}x at the closest point (no overlap)")
+
+    print("\n== sec7.3: KL + weight forensics ==")
+    for e in probe:
+        own = e["kl"]["p3_states"]["kl_p3_to_bc_mean"]
+        par = e["kl"]["bc_states"]["kl_p3_to_bc_mean"]
+        print(f"  {e['tag']}: KL own-route {own:.4f}  parent-route {par:.4f}  "
+              f"ratio {own/par:.2f}")
+    print(f"  compounding: 0.3186*500 = {0.3186*500:.0f} nats (exploit), "
+          f"0.1112*500 = {0.1112*500:.0f} nats (record)")
+    for k, v in wf["children"].items():
+        own = v["own_parent"].replace("seed", "")
+        print(f"  {k}: L2 own {v['l2_vs_seed' + own]:.3f} (norm {v['norm']:.1f}, "
+              f"{100*v['l2_vs_seed' + own]/v['norm']:.1f}%)  cos own "
+              f"{v['cos_vs_seed' + own]:.6f}")
+
+    print("\n== sec7.4: same-board readout comparison (episodes.csv) ==")
+
+    def _load(p):
+        return {int(r["seed"]): (float(r["return"]), int(r["success"]))
+                for r in csv.DictReader(open(p)) if r["policy"] == "phase3"}
+
+    det = _load(ROOT / "evaluation/tmlr-readout-mean-n500/episodes.csv")
+    samp = _load(ROOT / "evaluation/tmlr-n500-categorical/episodes.csv")
+    wins = sorted(s for s in det if det[s][1] == 1)
+    rets = sorted(det[s][0] for s in wins)
+    mid = rets[len(rets)//2 - 1:len(rets)//2 + 1]
+    print(f"  mean-readout catches {len(wins)}: return|catch mean "
+          f"{sum(rets)/len(rets):.1f}  median {sum(mid)/2:.0f}  "
+          f">=900: {sum(r >= 900 for r in rets)}/{len(rets)}")
+    sw = [samp[s] for s in wins]
+    print(f"  sampling on those boards: return {sum(r for r, _ in sw)/len(sw):.1f}  "
+          f"caught {sum(c for _, c in sw)}/{len(sw)} "
+          f"({100*sum(c for _, c in sw)/len(sw):.0f}% vs "
+          f"{100*sum(c for _, c in samp.values())/len(samp):.0f}% overall)")
+
+    print("\n== sec7.5: BC parents' training-side metrics ==")
+    for k, v in finals["bc_parents"].items():
+        print(f"  {k}: train {v['train_loss']}  val {v['val_loss']}  BC catch {v['bc_catch']}")
+    ds = finals["expert_dataset"]
+    print(f"  dataset: {ds['file']}  {ds['bytes']} bytes  md5 {ds['md5']}")
+
+
 if __name__ == "__main__":
     main()
+    sec7_block()
