@@ -7,11 +7,13 @@
 A faithful, from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
 
 <p align="center">
-  <img src="assets/policy_stochastic_catch.gif" width="320"><br>
-  <em>The trained agent catching and holding the ball (<code>ball_in_cup_catch</code>, stochastic policy).<br>It learns a real controller — this README is an honest teardown of where offline RL plateaus, and why.</em>
+  <img src="assets/hero_static.png" width="920"><br>
+  <em>Two runs of the <b>identical</b> pipeline. Top: a policy whose frozen reward model accumulates a belief of <b>574 reward</b> on an episode where the ball never lands in the cup (true catch rate 0.126). Bottom: a different Phase-2 draw — belief tracks reality (0.704). Both episodes are re-renders of <b>stored, released evaluation episodes</b>, verified bit-for-bit against <code>evaluation/tmlr-*/episodes.csv</code> (<code>analysis/render_hero.py</code>).</em>
 </p>
 
-> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` and ran a rigorous real-env evaluation — then re-ran it properly: **six independent imagination-RL training runs, each evaluated on the same 500 seeded episodes.** Averaged over runs, **imagination RL beats behavior cloning by +5.9 points of catch rate** (95% CI [+1.5, +10.4], t(5)=3.40, 6/6 runs positive) and **+64 return**, split roughly evenly between *succeeding more often* and *succeeding sooner/holding longer*. The twist: **our own first single run showed no effect** (p=0.56 at n=500 episodes) — run-to-run spread (sd **4.3 pts**, the observed spread behind that CI) is comparable to the effect itself, so single-run RL comparisons mislead *even with large eval budgets*. Follow-up studies went further: **the Phase-2 checkpoint you start from matters far more than the RL seed.** Coverage still caps the ceiling (best run 0.46 catch vs a **0.84 demo catch rate**). Not SOTA — a small, verified, honestly-measured study.
+> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` — and found that **the finetune stage is a lottery ticket**. Re-running *only* Phase-2 (identical recipe, bitwise-identical data and pretrained base, different seed) flips imagination-RL's effect from **+24 to −33 points of catch rate**; which draw you start from explains **≈99% of the variance** in deployed outcome. One draw's policy learns to **reward-hack its own frozen reward model** — imagined returns look healthy while real success collapses (the image above) — and **no offline metric we measured reliably flags it in advance**, including properly held-out validation error, which actually *prefers* the exploiting checkpoint. Ten real episodes expose it instantly via the reward model's calibration error.
+>
+> Beneath that headline sits the study that found it: **six imagination-RL training runs from one checkpoint, each evaluated on the same 500 seeded episodes.** Averaged over runs, **imagination RL beats behavior cloning by +5.9 points of catch rate** (95% CI [+1.5, +10.4], t(5)=3.40, 6/6 runs positive) and **+64 return**, split roughly evenly between *succeeding more often* and *succeeding sooner/holding longer*. The twist: **our own first single run showed no effect** (p=0.56 at n=500 episodes) — run-to-run spread (sd **4.3 pts**, the observed spread behind that CI) is comparable to the effect itself, so single-run RL comparisons mislead *even with large eval budgets*. Follow-up studies went further: **the Phase-2 checkpoint you start from matters far more than the RL seed.** Coverage still caps the ceiling (best run 0.46 catch vs a **0.84 demo catch rate**). Not SOTA — a small, verified, honestly-measured study.
 
 ---
 
@@ -50,6 +52,16 @@ Six independent Phase-3 (imagination-RL) training runs — identical recipe, dif
 - **But the Phase-2 draw dominates the RL seed.** Retraining Phase-2 three times (identical recipe and data, different seed) gives BC catch 0.448 / 0.434 / 0.374 — and running the same imagination-RL recipe twice on top of *each* gives outcomes of **−32.6 / +24.2 / −8.3** points. Between-draw spread is ≈28 points versus ≈2 points for the RL seed: two runs sharing a Phase-2 draw agree within 0.6–5.6 points, while different draws disagree in sign. Everything above is measured **inside one Phase-2 realization** and should be read that way. Raw per-episode data for every run is in `evaluation/tmlr-*/`.
 - **Imagination compresses what reality separates.** Final *imagined* returns of the six runs span a narrow 74–78 band while their *real* catch rates span 0.366–0.460 — even after training, the world model cannot reliably tell you which policy is the strong one. Closed-loop evaluation is not optional.
 
+### Hallucinated success, on camera
+
+<p align="center">
+  <img src="assets/hero_exploiting.gif" width="760"><br>
+  <img src="assets/hero_healthy.gif" width="760"><br>
+  <em>Left: the real episode (480px re-render of the same physics; the model itself sees 128px). Right: the frozen reward model's cumulative predicted reward vs. what the environment actually paid. Top — exploiting run, board 29: belief ends at <b>+574</b>, reality at <b>0</b>. Bottom — healthy run, board 0: belief tracks reality to <b>920</b>. Board outcomes match the released per-episode logs exactly; on the exploiting run, 50/50 re-run boards reproduce their stored (return, caught) pairs.</em>
+</p>
+
+This is the model-based analogue of reward-model overoptimization: the policy improves against a frozen learned reward while true performance collapses — and the KL-to-prior safeguard cannot prevent it, because the KL is evaluated on *imagined* states while the drift happens on *real* ones. Regenerate with `python -m analysis.render_hero render && python -m analysis.render_hero compose` (needs the factorial checkpoints; every episode is verified against the stored eval before use).
+
 ### Readout ablation (zero-confound: one policy, read three ways; n = 500)
 
 | readout | caught | 95% CI | why |
@@ -68,8 +80,9 @@ Both deterministic intervals cover the random floor: the collapse is **total, no
 ## The world model
 
 <p align="center">
+  <img src="assets/policy_stochastic_catch.gif" width="300">
   <img src="assets/world_model_rollout.gif" width="420"><br>
-  <em>Learned flow-matching world model — ground truth (left) vs the model's autoregressive prediction (right), decoded to pixels.</em>
+  <em>Left: the trained agent catching and holding the ball (stochastic policy). Right: the learned flow-matching world model — ground truth vs. autoregressive prediction, decoded to pixels.</em>
 </p>
 
 The dynamics model is a 12-layer block-causal transformer trained with a **flow-matching** objective (+ bootstrap loss + curriculum) to denoise future latents given past latents, actions, and the (τ, d) flow parameters. Agent tokens read the world-model state through an asymmetric attention mask so the policy can be trained without contaminating the frozen world model.
