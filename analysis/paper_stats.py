@@ -396,6 +396,135 @@ def sec7_block():
     print(f"  dataset: {ds['file']}  {ds['bytes']} bytes  md5 {ds['md5']}")
 
 
+def sec64_reml4_block():
+    """sec6.4 'Including the anchor as a fourth draw' + sec7.2 tab:probe10 twins.
+
+    REML fit of the one-way random-effects model over all four draws
+    (anchor 6 children + three retrains x 2), profile-likelihood CI for
+    sigma_draw, exact 6/2/2/2 permutation test, and first-10-board catches.
+    Pure numpy + stdlib (pocket-calculator tier: released CSVs only).
+    """
+    from itertools import combinations
+
+    def rate(d):
+        return sum(v[1] for v in d.values()) / len(d)
+
+    # anchor draw: same files and assembly as main()
+    anchor_bc = rate(load("evaluation/tmlr-n500-categorical/episodes.csv", "bc"))
+    anchor = [rate(load("evaluation/tmlr-n500-categorical/episodes.csv", "phase3"))]
+    for s_ in (1, 2, 3):
+        m = load(f"evaluation/tmlr-cat-seed{s_}-n200/episodes.csv", "phase3")
+        m.update(load(f"evaluation/tmlr-cat-seed{s_}-ext300/episodes.csv", "phase3"))
+        anchor.append(rate(m))
+    for s_ in (4, 5):
+        anchor.append(rate(load(f"evaluation/tmlr-cat-seed{s_}-n500/episodes.csv", "phase3")))
+    y = [np.array([100 * (a - anchor_bc) for a in anchor])]
+    # the three retrained draws
+    for p, kids in [("11", ["rl21", "rl22"]), ("12", ["rl23", "rl24"]), ("13", ["rl25", "rl26"])]:
+        bc = rate(load(f"evaluation/tmlr-bc-seed{p}-n500/episodes.csv", "bc"))
+        y.append(np.array([100 * (rate(load(f"evaluation/tmlr-fact-bc{p}-{c}-n500/episodes.csv", "phase3")) - bc)
+                           for c in kids]))
+    n = np.array([len(g) for g in y])
+
+    def reml_nll(s2b, s2w):
+        ll = XtVX = XtVy = 0.0
+        for gi, ni in zip(y, n):
+            d = s2w + ni * s2b
+            ll += (ni - 1) * math.log(s2w) + math.log(d)
+            XtVX += ni / d
+            XtVy += gi.sum() / d
+        mu = XtVy / XtVX
+        quad = 0.0
+        for gi, ni in zip(y, n):
+            d = s2w + ni * s2b
+            e = gi - mu
+            quad += (e ** 2).sum() / s2w - (s2b / (s2w * d)) * e.sum() ** 2
+        return ll + math.log(XtVX) + quad, mu
+
+    def golden(f, lo, hi, it=200):
+        g = (math.sqrt(5) - 1) / 2
+        a, b = lo, hi
+        c, d = b - g * (b - a), a + g * (b - a)
+        for _ in range(it):
+            if f(c) < f(d):
+                b, d = d, c
+                c = b - g * (b - a)
+            else:
+                a, c = c, d
+                d = a + g * (b - a)
+        return (a + b) / 2
+
+    def profile_w(s2b):
+        lw = golden(lambda lw: reml_nll(s2b, math.exp(lw))[0], math.log(1e-4), math.log(1e5))
+        return reml_nll(s2b, math.exp(lw))[0], math.exp(lw)
+
+    lb = golden(lambda lb: profile_w(math.exp(lb))[0], math.log(1e-2), math.log(1e6))
+    s2b = math.exp(lb)
+    nll0, s2w = profile_w(s2b)
+    _, mu = reml_nll(s2b, s2w)
+
+    def bisect(f, a, b, it=100):
+        fa = f(a)
+        for _ in range(it):
+            m = (a + b) / 2
+            if (f(m) > 0) == (fa > 0):
+                a = m
+            else:
+                b = m
+        return (a + b) / 2
+
+    dev = lambda x: profile_w(x)[0] - nll0 - 3.84
+    lo = bisect(dev, 1e-2, s2b)
+    hi = bisect(dev, s2b, 1e8)
+    XtVX = sum(ni / (s2w + ni * s2b) for ni in n)
+    se = 1 / math.sqrt(XtVX)
+    tcrit = 3.182  # t(0.975, df=3)
+
+    print("\n== sec6.4 secondary analysis: anchor as a fourth draw (REML, 12 runs) ==")
+    for name, g in zip(["anchor", "bc11", "bc12", "bc13"], y):
+        print(f"  {name}: deltas {[float(round(v, 1)) for v in g]}  mean {g.mean():+.2f}")
+    print(f"  sigma_draw {math.sqrt(s2b):.1f}  profile 95% CI [{math.sqrt(lo):.1f}, {math.sqrt(hi):.1f}]")
+    print(f"  sigma_within {math.sqrt(s2w):.2f}")
+    print(f"  mean over draws {mu:+.1f}  95% CI [{mu - tcrit * se:+.1f}, {mu + tcrit * se:+.1f}]  (t, df=3)")
+
+    vals = np.concatenate(y)
+    idx = list(range(12))
+
+    def msb(groups):
+        gm = vals.mean()
+        return sum(len(g) * (vals[list(g)].mean() - gm) ** 2 for g in groups) / 3
+
+    obs = msb([range(0, 6), range(6, 8), range(8, 10), range(10, 12)])
+    cnt = ge = 0
+    seen = set()
+    for six in combinations(idx, 6):
+        rest = [i for i in idx if i not in six]
+        for two1 in combinations(rest, 2):
+            r2 = [i for i in rest if i not in two1]
+            for two2 in combinations(r2, 2):
+                two3 = tuple(i for i in r2 if i not in two2)
+                key = (six, tuple(sorted([two1, two2, two3])))
+                if key in seen:
+                    continue
+                seen.add(key)
+                cnt += 1
+                if msb([six, two1, two2, two3]) >= obs - 1e-9:
+                    ge += 1
+    print(f"  permutation: {cnt:,} distinct 6/2/2/2 groupings; #>=observed {ge}; exact p = {ge}/{cnt:,}")
+
+    print("\n== sec7.2 / tab:probe10: first-10-board catches (boards 0-9) ==")
+    for tag, path, pol in [
+            ("bc11 parent", "tmlr-bc-seed11-n500", "bc"), ("rl21", "tmlr-fact-bc11-rl21-n500", "phase3"),
+            ("rl22", "tmlr-fact-bc11-rl22-n500", "phase3"), ("bc12 parent", "tmlr-bc-seed12-n500", "bc"),
+            ("rl23", "tmlr-fact-bc12-rl23-n500", "phase3"), ("rl24", "tmlr-fact-bc12-rl24-n500", "phase3"),
+            ("bc13 parent", "tmlr-bc-seed13-n500", "bc"), ("rl25", "tmlr-fact-bc13-rl25-n500", "phase3"),
+            ("rl26", "tmlr-fact-bc13-rl26-n500", "phase3")]:
+        d = load(f"evaluation/{path}/episodes.csv", pol)
+        first10 = sum(d[s_][1] for s_ in sorted(d)[:10])
+        print(f"  {tag:12s} first10 {first10}/10   true {rate(d):.3f}")
+
+
 if __name__ == "__main__":
     main()
     sec7_block()
+    sec64_reml4_block()
