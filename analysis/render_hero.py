@@ -335,12 +335,16 @@ def site_panel():
 
     def two_row(P, out_name, figsize=(11.0, 7.6), hdr=(0.935, 0.455), fs=0):
         FS[0] = fs
+        narrow = fs > 0
         rows = [("Exploiting run", "0 catches this episode  ·  true catch rate 0.126", fe[len(fe) - 1], pe, ae, 0),
-                ("Healthy run, different finetune draw", "caught and held  ·  true catch rate 0.704",
+                ("Healthy run" if narrow else "Healthy run, different finetune draw",
+                 ("different finetune draw  ·  caught and held  ·  catch rate 0.704" if narrow
+                  else "caught and held  ·  true catch rate 0.704"),
                  fh[int(rewarded[-1])], ph, ah, 1)]
         fig = plt.figure(figsize=figsize, dpi=150); fig.patch.set_facecolor(P["bg"])
-        gs = fig.add_gridspec(2, 3, width_ratios=[1, 0.10, 2.05], wspace=0.04, hspace=0.62,
-                              left=0.008, right=0.975, top=0.90, bottom=0.085)
+        gs = fig.add_gridspec(2, 3, width_ratios=[1, 0.30 if narrow else 0.10, 2.05], wspace=0.04,
+                              hspace=0.72 if narrow else 0.62,
+                              left=0.008, right=0.975, top=0.90 if not narrow else 0.885, bottom=0.085)
         for name, chip, st, pred, act, r in rows:
             still(fig.add_subplot(gs[r, 0]), prep(st), "t = 500" if r == 0 else f"t = {int(rewarded[-1])}", P)
             ax = fig.add_subplot(gs[r, 2]); chart(ax, P, bottom=(r == 1), ymax_=ymax)
@@ -355,8 +359,12 @@ def site_panel():
                             textcoords="offset points", ha="right", va="center", fontsize=10 + fs, color=P["grey"])
                 ax.annotate("reward model's belief", xy=(0.27, 0.40), xycoords="axes fraction",
                             color=P["belief"], fontsize=12.5 + fs, fontweight="bold")
-                ax.annotate("reality — never caught", xy=(0.97, 0.07), xycoords="axes fraction",
-                            ha="right", color=P["reality"], fontsize=12.5 + fs, fontweight="bold")
+                if narrow:
+                    ax.annotate("reality — never caught", xy=(0.03, 0.10), xycoords="axes fraction",
+                                ha="left", color=P["reality"], fontsize=12.5 + fs, fontweight="bold")
+                else:
+                    ax.annotate("reality — never caught", xy=(0.97, 0.07), xycoords="axes fraction",
+                                ha="right", color=P["reality"], fontsize=12.5 + fs, fontweight="bold")
                 for y, txt, c in ((pred[-1], f"{pred[-1]:.0f}", P["belief"]), (0, "0", P["reality"])):
                     ax.annotate(txt, xy=(n - 1, y), xytext=(7, 0), textcoords="offset points",
                                 va="center", color=c, fontsize=14 + fs, fontweight="bold")
@@ -367,7 +375,10 @@ def site_panel():
                             va="center", color=P["reality"], fontsize=14 + fs, fontweight="bold")
             y_hdr = hdr[0] if r == 0 else hdr[1]
             fig.text(0.008, y_hdr, name, fontsize=15 + fs, fontweight="bold", color=P["ink"], va="bottom")
-            fig.text(0.975, y_hdr, chip, fontsize=11.5 + fs, color=P["grey"], va="bottom", ha="right")
+            if narrow:   # chip on its own line under the title
+                fig.text(0.008, y_hdr - 0.028, chip, fontsize=10 + fs, color=P["grey"], va="top")
+            else:
+                fig.text(0.975, y_hdr, chip, fontsize=11.5 + fs, color=P["grey"], va="bottom", ha="right")
         fig.savefig(OUT / out_name, bbox_inches="tight", facecolor=P["bg"], dpi=150)
         plt.close(fig); print(f"{out_name} saved")
 
@@ -396,8 +407,8 @@ def site_panel():
 
     two_row(LIGHT, "hero_site.png")
     two_row(DARK, "hero_site_dark.png")
-    two_row(LIGHT, "hero_site_mobile.png", figsize=(6.67, 8.8), hdr=(0.945, 0.47), fs=2)
-    two_row(DARK, "hero_site_mobile_dark.png", figsize=(6.67, 8.8), hdr=(0.945, 0.47), fs=2)
+    two_row(LIGHT, "hero_site_mobile.png", figsize=(6.67, 9.2), hdr=(0.965, 0.485), fs=2)
+    two_row(DARK, "hero_site_mobile_dark.png", figsize=(6.67, 9.2), hdr=(0.965, 0.485), fs=2)
     one_row(LIGHT, "og_image.png", (8.0, 4.2), 10.5, 14)
 
 
