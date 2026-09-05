@@ -302,7 +302,7 @@ def site_panel():
     import matplotlib.pyplot as plt
     plt.rcParams.update({"font.family": "DejaVu Sans"})
 
-    LIGHT = dict(bg="white", ink="#1b1b19", ink2="#3a3a37", grey="#706f69", edge="#d4d3ce",
+    LIGHT = dict(bg="#fcfcfb", ink="#1b1b19", ink2="#3a3a37", grey="#706f69", edge="#d4d3ce",
                  grid="#ececea", axis="#a3a199", belief=BLUE, reality=ORANGE)
     DARK = dict(bg="#141413", ink="#e8e6df", ink2="#c9c7bf", grey="#a3a199", edge="#3a3a37",
                 grid="#262624", axis="#6f6e68", belief="#56B4E9", reality="#E69F00")
@@ -316,10 +316,11 @@ def site_panel():
     n = len(pe); ymax = max(pe.max(), ph.max(), ah.max()) * 1.08
     rewarded = np.nonzero(np.diff(ah, prepend=0.0) > 0)[0]
 
+    FS = [0]
     def still(ax, img, label, P):
         ax.imshow(img); ax.set_xticks([]); ax.set_yticks([])
         for sp in ax.spines.values(): sp.set_color(P["edge"]); sp.set_linewidth(1.0)
-        ax.set_xlabel(label, fontsize=11, color=P["grey"], labelpad=5)
+        ax.set_xlabel(label, fontsize=11 + FS[0], color=P["grey"], labelpad=5)
 
     def chart(ax, P, bottom, ymax_):
         ax.set_facecolor(P["bg"])
@@ -332,38 +333,41 @@ def site_panel():
         if bottom: ax.set_xlabel("decision step", fontsize=11, color=P["ink2"])
         else: ax.tick_params(labelbottom=False)
 
-    def two_row(P, out_name):
+    def two_row(P, out_name, figsize=(11.0, 7.6), hdr=(0.935, 0.455), fs=0):
+        FS[0] = fs
         rows = [("Exploiting run", "0 catches this episode  ·  true catch rate 0.126", fe[len(fe) - 1], pe, ae, 0),
                 ("Healthy run, different finetune draw", "caught and held  ·  true catch rate 0.704",
                  fh[int(rewarded[-1])], ph, ah, 1)]
-        fig = plt.figure(figsize=(11.0, 7.6), dpi=150); fig.patch.set_facecolor(P["bg"])
+        fig = plt.figure(figsize=figsize, dpi=150); fig.patch.set_facecolor(P["bg"])
         gs = fig.add_gridspec(2, 3, width_ratios=[1, 0.10, 2.05], wspace=0.04, hspace=0.62,
                               left=0.008, right=0.975, top=0.90, bottom=0.085)
         for name, chip, st, pred, act, r in rows:
             still(fig.add_subplot(gs[r, 0]), prep(st), "t = 500" if r == 0 else f"t = {int(rewarded[-1])}", P)
             ax = fig.add_subplot(gs[r, 2]); chart(ax, P, bottom=(r == 1), ymax_=ymax)
-            ax.plot(np.arange(n), pred, color=P["belief"], lw=3.0, solid_capstyle="round")
-            ax.plot(np.arange(n), act, color=P["reality"], lw=3.0, solid_capstyle="round")
+            ax.plot(np.arange(n), pred, color=P["belief"], lw=3.0 + fs * 0.2, solid_capstyle="round")
+            ax.plot(np.arange(n), act, color=P["reality"], lw=3.0 + fs * 0.2, solid_capstyle="round")
+            ax.tick_params(labelsize=10.5 + fs); ax.yaxis.label.set_size(11 + fs); ax.xaxis.label.set_size(11 + fs)
+            for t_ in ax.texts: t_.set_fontsize(t_.get_fontsize() + fs)
             if r == 0:
                 t0 = int(np.argmax(pred > 1.0))
                 ax.axvline(t0, color=P["grey"], lw=0.9, ls=(0, (2, 3)))
                 ax.annotate(f"belief starts accruing, t = {t0}", xy=(t0, ymax * 0.92), xytext=(-7, 0),
-                            textcoords="offset points", ha="right", va="center", fontsize=10, color=P["grey"])
+                            textcoords="offset points", ha="right", va="center", fontsize=10 + fs, color=P["grey"])
                 ax.annotate("reward model's belief", xy=(0.27, 0.40), xycoords="axes fraction",
-                            color=P["belief"], fontsize=12.5, fontweight="bold")
+                            color=P["belief"], fontsize=12.5 + fs, fontweight="bold")
                 ax.annotate("reality — never caught", xy=(0.97, 0.07), xycoords="axes fraction",
-                            ha="right", color=P["reality"], fontsize=12.5, fontweight="bold")
+                            ha="right", color=P["reality"], fontsize=12.5 + fs, fontweight="bold")
                 for y, txt, c in ((pred[-1], f"{pred[-1]:.0f}", P["belief"]), (0, "0", P["reality"])):
                     ax.annotate(txt, xy=(n - 1, y), xytext=(7, 0), textcoords="offset points",
-                                va="center", color=c, fontsize=14, fontweight="bold")
+                                va="center", color=c, fontsize=14 + fs, fontweight="bold")
             else:
                 ax.annotate("belief ≈ reality", xy=(0.30, 0.68), xycoords="axes fraction",
-                            color=P["ink"], fontsize=12.5, fontweight="bold")
+                            color=P["ink"], fontsize=12.5 + fs, fontweight="bold")
                 ax.annotate(f"{act[-1]:.0f}", xy=(n - 1, act[-1]), xytext=(7, 0), textcoords="offset points",
-                            va="center", color=P["reality"], fontsize=14, fontweight="bold")
-            y_hdr = 0.935 if r == 0 else 0.455
-            fig.text(0.008, y_hdr, name, fontsize=15, fontweight="bold", color=P["ink"], va="bottom")
-            fig.text(0.975, y_hdr, chip, fontsize=11.5, color=P["grey"], va="bottom", ha="right")
+                            va="center", color=P["reality"], fontsize=14 + fs, fontweight="bold")
+            y_hdr = hdr[0] if r == 0 else hdr[1]
+            fig.text(0.008, y_hdr, name, fontsize=15 + fs, fontweight="bold", color=P["ink"], va="bottom")
+            fig.text(0.975, y_hdr, chip, fontsize=11.5 + fs, color=P["grey"], va="bottom", ha="right")
         fig.savefig(OUT / out_name, bbox_inches="tight", facecolor=P["bg"], dpi=150)
         plt.close(fig); print(f"{out_name} saved")
 
@@ -392,8 +396,8 @@ def site_panel():
 
     two_row(LIGHT, "hero_site.png")
     two_row(DARK, "hero_site_dark.png")
-    one_row(LIGHT, "hero_site_mobile.png", (6.67, 4.27), 9.5, 13)
-    one_row(DARK, "hero_site_mobile_dark.png", (6.67, 4.27), 9.5, 13)
+    two_row(LIGHT, "hero_site_mobile.png", figsize=(6.67, 8.8), hdr=(0.945, 0.47), fs=2)
+    two_row(DARK, "hero_site_mobile_dark.png", figsize=(6.67, 8.8), hdr=(0.945, 0.47), fs=2)
     one_row(LIGHT, "og_image.png", (8.0, 4.2), 10.5, 14)
 
 
