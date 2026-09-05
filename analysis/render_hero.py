@@ -359,7 +359,7 @@ def site_panel():
                                                   ("og_image.png", (8.0, 4.2), 10.5, 14)):
         fig = plt.figure(figsize=figsize, dpi=150); fig.patch.set_facecolor("white")
         gs = fig.add_gridspec(1, 3, width_ratios=[1, 0.08, 2.0], wspace=0.04,
-                              left=0.015, right=0.975, top=0.80, bottom=0.16)
+                              left=0.015, right=0.905, top=0.775, bottom=0.16)
         ax = fig.add_subplot(gs[0, 0]); ax.imshow(prep(fe[len(fe) - 1])); ax.set_xticks([]); ax.set_yticks([])
         for sp in ax.spines.values(): sp.set_color(EDGE); sp.set_linewidth(1.0)
         ax.set_xlabel("t = 500", fontsize=10, color=GREY2, labelpad=4)
@@ -379,10 +379,10 @@ def site_panel():
         for y, txt, c in ((pe[-1], f"{pe[-1]:.0f}", BLUE), (0, "0", ORANGE)):
             ax.annotate(txt, xy=(n - 1, y), xytext=(7, 0), textcoords="offset points",
                         va="center", color=c, fontsize=15, fontweight="bold")
-        fig.text(0.015, 0.90, "The policy its own reward model prefers", fontsize=title_fs,
-                 fontweight="bold", color=INK, va="center")
-        fig.text(0.975, 0.90, "0 catches this episode  ·  true catch rate 0.126", fontsize=chip_fs,
-                 color=GREY2, va="center", ha="right")
+        fig.text(0.015, 0.935, "Hallucinated success: the policy its own reward model prefers",
+                 fontsize=title_fs, fontweight="bold", color=INK, va="center")
+        fig.text(0.015, 0.865, "0 catches this episode  ·  true catch rate 0.126  ·  dm_control ball-in-cup",
+                 fontsize=chip_fs, color=GREY2, va="center")
         fig.savefig(OUT / out_name, facecolor="white", dpi=150)   # exact pixel size, no tight-crop
         plt.close(fig); print(f"{out_name} saved")
 
