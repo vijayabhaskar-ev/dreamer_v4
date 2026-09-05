@@ -149,35 +149,133 @@ def compose():
     import matplotlib.pyplot as plt
     from PIL import Image
 
+    INK, INK2, GREY2, EDGE, GRID = "#18181b", "#3f3f46", "#71717a", "#d4d4d8", "#ececef"
+    plt.rcParams.update({"font.family": "DejaVu Sans", "axes.titlepad": 6})
+
+    def prep(frame):
+        """Display prep only: trim empty margins (never the top, where the cup rides
+        when carrying) and apply a mild uniform brightness lift for a white page."""
+        f = frame[6:442, 24:456].astype(np.float32) * 1.15
+        return np.clip(f, 0, 255).astype(np.uint8)
+
+    def still(ax, img, label):
+        ax.imshow(img)
+        ax.set_xticks([]); ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_color(EDGE); sp.set_linewidth(0.9)
+        ax.set_xlabel(label, fontsize=9, color=GREY2, labelpad=4)
+
+    def chart(ax, n, ymax, bottom_axis):
+        ax.set_xlim(0, n); ax.set_ylim(-20, ymax)
+        ax.set_yticks(np.arange(0, ymax, 200))
+        ax.grid(axis="y", color=GRID, lw=0.8); ax.set_axisbelow(True)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        for sp in ("left", "bottom"):
+            ax.spines[sp].set_color("#a1a1aa")
+        ax.tick_params(colors=INK2, labelsize=8.5, length=3)
+        ax.set_ylabel("cumulative reward", fontsize=9, color=INK2, labelpad=4)
+        if bottom_axis:
+            ax.set_xlabel("decision step", fontsize=9, color=INK2)
+        else:
+            ax.tick_params(labelbottom=False)
+
+    def end_value(ax, x, y, text, color):
+        ax.annotate(text, xy=(x, y), xytext=(6, 0), textcoords="offset points",
+                    va="center", ha="left", color=color, fontsize=12, fontweight="bold")
+
+    def row_header(fig, y, name, sub, chip):
+        t = fig.text(0.010, y, name, fontsize=13, fontweight="bold", color=INK, va="bottom")
+        fig.canvas.draw()
+        bb = t.get_window_extent().transformed(fig.transFigure.inverted())
+        fig.text(bb.x1 + 0.006, y, "— " + sub, fontsize=11, color=INK2, va="bottom")
+        fig.text(0.985, y, chip, fontsize=10, color=GREY2, va="bottom", ha="right")
+
+    def make_static():
+        fe, pe, ae, _, _ = _load("exploiting_rl21_seed*.npz")
+        fh, ph, ah, _, _ = _load("healthy_rl24_seed*.npz")
+        n = len(pe)
+        ymax = max(pe.max(), ph.max(), ah.max()) * 1.08
+        fig = plt.figure(figsize=(13.0, 7.4), dpi=150)
+        fig.patch.set_facecolor("white")
+        gs = fig.add_gridspec(2, 5, width_ratios=[1, 1, 1, 0.14, 1.75], wspace=0.08,
+                              hspace=0.55, left=0.010, right=0.985, top=0.835, bottom=0.08)
+
+        # --- row 0: exploiting -------------------------------------------------
+        times = [0, (len(fe) - 1) // 2, len(fe) - 1]
+        for c, t in enumerate(times):
+            still(fig.add_subplot(gs[0, c]), prep(fe[t]), f"t = {t}")
+        ax = fig.add_subplot(gs[0, 4]); chart(ax, n, ymax, bottom_axis=False)
+        ax.plot(np.arange(n), pe, color=BLUE, lw=2.6, solid_capstyle="round")
+        ax.plot(np.arange(n), ae, color=ORANGE, lw=2.6, solid_capstyle="round")
+        t0 = int(np.argmax(pe > 1.0))
+        ax.axvline(t0, color=GREY2, lw=0.8, ls=(0, (2, 3)))
+        ax.annotate(f"belief starts accruing, t = {t0}", xy=(t0, ymax * 0.93),
+                    xytext=(-6, 0), textcoords="offset points", ha="right", va="center",
+                    fontsize=8.5, color=GREY2)
+        ax.annotate("reward model's belief", xy=(0.27, 0.36), xycoords="axes fraction",
+                    color=BLUE, fontsize=10.5, fontweight="bold")
+        ax.annotate("reality — never caught", xy=(0.97, 0.07), xycoords="axes fraction",
+                    ha="right", color=ORANGE, fontsize=10.5, fontweight="bold")
+        end_value(ax, n - 1, pe[-1], f"{pe[-1]:.0f}", BLUE)
+        end_value(ax, n - 1, 0, "0", ORANGE)
+        row_header(fig, 0.868, "Exploiting run", "the policy its own reward model prefers",
+                   "0 catches this episode · true catch rate 0.126")
+
+        # --- row 1: healthy ------------------------------------------------------
+        rewarded = np.nonzero(np.diff(ah, prepend=0.0) > 0)[0]   # ball in cup at these t
+        times = [0, int(rewarded[len(rewarded) // 2]), int(rewarded[-1])]
+        for c, t in enumerate(times):
+            still(fig.add_subplot(gs[1, c]), prep(fh[t]), f"t = {t}")
+        ax = fig.add_subplot(gs[1, 4]); chart(ax, n, ymax, bottom_axis=True)
+        ax.plot(np.arange(n), ph, color=BLUE, lw=2.6, solid_capstyle="round")
+        ax.plot(np.arange(n), ah, color=ORANGE, lw=2.6, solid_capstyle="round")
+        ax.annotate("belief ≈ reality", xy=(0.30, 0.68), xycoords="axes fraction",
+                    color=INK, fontsize=10.5, fontweight="bold")
+        end_value(ax, n - 1, ah[-1], f"{ah[-1]:.0f}", ORANGE)
+        row_header(fig, 0.418, "Healthy run", "same recipe, different Phase-2 draw",
+                   "caught and held · true catch rate 0.704")
+
+        fig.suptitle("Same recipe, same data, same pretrained base — "
+                     "only the finetune draw differs",
+                     fontsize=15, fontweight="bold", color=INK, y=0.975)
+        fig.savefig(OUT / "hero_static.png", bbox_inches="tight", facecolor="white", dpi=150)
+        plt.close(fig)
+        print("hero_static.png saved")
+
     def make_gif(cell_glob, title, out_name, stride=4, fps=14):
         frames, pred, actual, ret, _ = _load(cell_glob)
         n = len(pred)
-        ymax = max(pred.max(), actual.max(), 1.0) * 1.06
+        ymax = max(pred.max(), actual.max(), 1.0) * 1.10
         imgs = []
-        fig = plt.figure(figsize=(9.6, 4.15), dpi=100)
-        gs = fig.add_gridspec(1, 2, width_ratios=[1, 1.12], left=0.005, right=0.975,
-                              top=0.86, bottom=0.135, wspace=0.16)
-        ax_im, ax_cv = fig.add_subplot(gs[0]), fig.add_subplot(gs[1])
-        fig.suptitle(title, fontsize=13.5, y=0.965, fontweight="bold")
-        im = ax_im.imshow(frames[0]); ax_im.axis("off")
-        (l1,) = ax_cv.plot([], [], color=BLUE, lw=2.4,
-                           label="reward model's belief (cumulative predicted)")
-        (l2,) = ax_cv.plot([], [], color=ORANGE, lw=2.4,
-                           label="reality (cumulative actual reward)")
-        ax_cv.set_xlim(0, n); ax_cv.set_ylim(0, ymax)
-        ax_cv.set_xlabel("decision step"); ax_cv.set_ylabel("cumulative reward")
-        ax_cv.legend(loc="upper left", frameon=False, fontsize=9.5)
-        for s in ("top", "right"):
-            ax_cv.spines[s].set_visible(False)
-        txt = ax_cv.text(0.985, 0.06, "", transform=ax_cv.transAxes, ha="right",
-                         fontsize=11, fontweight="bold")
+        fig = plt.figure(figsize=(9.8, 4.3), dpi=100)
+        fig.patch.set_facecolor("white")
+        gs = fig.add_gridspec(1, 3, width_ratios=[1, 0.12, 1.2], left=0.012, right=0.965,
+                              top=0.845, bottom=0.145, wspace=0.05)
+        ax_im, ax_cv = fig.add_subplot(gs[0]), fig.add_subplot(gs[2])
+        fig.suptitle(title, fontsize=13, y=0.965, fontweight="bold", color=INK)
+        im = ax_im.imshow(prep(frames[0]))
+        ax_im.set_xticks([]); ax_im.set_yticks([])
+        for sp in ax_im.spines.values():
+            sp.set_color(EDGE); sp.set_linewidth(0.9)
+        chart(ax_cv, n, ymax, bottom_axis=True)
+        (l1,) = ax_cv.plot([], [], color=BLUE, lw=2.6)
+        (l2,) = ax_cv.plot([], [], color=ORANGE, lw=2.6)
+        ax_cv.annotate("reward model's belief", xy=(0.03, 0.90), xycoords="axes fraction",
+                       color=BLUE, fontsize=10.5, fontweight="bold")
+        ax_cv.annotate("reality", xy=(0.03, 0.82), xycoords="axes fraction",
+                       color=ORANGE, fontsize=10.5, fontweight="bold")
+        txt = ax_cv.text(0.97, 0.06, "", transform=ax_cv.transAxes, ha="right",
+                         fontsize=11.5, fontweight="bold")
+        tl = ax_im.set_xlabel("t = 0", fontsize=9, color=GREY2, labelpad=4)
         for i in range(0, n, stride):
-            im.set_data(frames[min(i, len(frames) - 1)])
+            im.set_data(prep(frames[min(i, len(frames) - 1)]))
+            tl.set_text(f"t = {i}")
             l1.set_data(np.arange(i + 1), pred[:i + 1])
             l2.set_data(np.arange(i + 1), actual[:i + 1])
             gap = pred[i] - actual[i]
             txt.set_text(f"belief − reality = {gap:+.0f}")
-            txt.set_color(BLUE if gap > 5 else GREY)
+            txt.set_color(BLUE if gap > 5 else GREY2)
             fig.canvas.draw()
             imgs.append(Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[..., :3]))
         plt.close(fig)
@@ -185,53 +283,13 @@ def compose():
                      duration=int(1000 / fps), loop=0, optimize=True)
         print(f"{out_name}: {len(imgs)} frames, {(OUT / out_name).stat().st_size / 1e6:.1f} MB")
 
-    def make_static():
-        fe, pe, ae, _, _ = _load("exploiting_rl21_seed*.npz")
-        fh, ph, ah, _, _ = _load("healthy_rl24_seed*.npz")
-        n = len(pe)
-        ymax = max(pe.max(), ph.max(), ah.max()) * 1.05
-        fig = plt.figure(figsize=(12.6, 7.0), dpi=150)
-        gs = fig.add_gridspec(2, 4, width_ratios=[1, 1, 1, 1.65], hspace=0.42, wspace=0.06,
-                              left=0.005, right=0.985, top=0.845, bottom=0.075)
-        rows = [("Exploiting run", "the policy its own reward model prefers",
-                 "true catch rate 0.126", fe, pe, ae, 0),
-                ("Healthy run", "same recipe, different Phase-2 draw",
-                 "true catch rate 0.704", fh, ph, ah, 1)]
-        for name, sub, rate, fr, pred, act, r in rows:
-            for c, pos in enumerate([0.05, 0.5, 0.98]):
-                ax = fig.add_subplot(gs[r, c]); ax.axis("off")
-                ax.imshow(fr[int(pos * (len(fr) - 1))])
-                if r == 0:
-                    ax.set_title(["start", "middle", "end"][c], fontsize=9, color=GREY, pad=3)
-            ax = fig.add_subplot(gs[r, 3])
-            ax.plot(np.arange(len(pred)), pred, color=BLUE, lw=2.4, label="reward model's belief")
-            ax.plot(np.arange(len(act)), act, color=ORANGE, lw=2.4, label="reality")
-            ax.set_xlim(0, n); ax.set_ylim(0, ymax)
-            for sp in ("top", "right"):
-                ax.spines[sp].set_visible(False)
-            ax.set_ylabel("cumulative reward", fontsize=9, labelpad=2)
-            if r == 1:
-                ax.set_xlabel("decision step", fontsize=9)
-            else:
-                ax.tick_params(labelbottom=False)
-            ax.legend(loc="upper left", frameon=False, fontsize=9)
-            y_hdr = 0.878 if r == 0 else 0.442
-            fig.text(0.005, y_hdr, f"{name} — {sub}", fontsize=12.5,
-                     fontweight="bold", va="bottom")
-            fig.text(0.985, y_hdr, rate, fontsize=11, color=GREY, va="bottom", ha="right")
-        fig.suptitle("Same training recipe, same data, same pretrained base — "
-                     "only the finetune draw differs",
-                     fontsize=14, fontweight="bold", y=0.975)
-        fig.savefig(OUT / "hero_static.png", bbox_inches="tight")
-        print("hero_static.png saved")
-
+    make_static()
     make_gif("exploiting_rl21_seed*.npz",
              "Hallucinated success: the reward model believes; the ball never lands in the cup",
              "hero_exploiting.gif")
     make_gif("healthy_rl24_seed*.npz",
              "Healthy run: belief tracks reality; the ball is caught",
              "hero_healthy.gif")
-    make_static()
 
 
 if __name__ == "__main__":
