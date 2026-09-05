@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Weights on HF](https://img.shields.io/badge/🤗%20weights-dreamer--v4-blue)](https://huggingface.co/vijayabhaskarev/dreamer-v4)
 
-A faithful, from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
+A from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
 
 <p align="center">
   <img src="assets/hero_static.png" width="920"><br>
