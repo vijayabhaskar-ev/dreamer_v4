@@ -320,11 +320,23 @@ def sec7_block():
 
     print("\n== sec7.1/7.5: anchor within-draw ranking, 6 runs -> 15 pairs ==")
     a6 = [(v["imagined_return"], v["real_catch"]) for v in finals["anchor"].values()]
-    agree = sum((x[0] > y[0]) == (x[1] > y[1]) for x, y in itertools.combinations(a6, 2))
-    p = sum(comb(15, k) for k in range(agree, 16)) / 2 ** 15
     imag = [x[0] for x in a6]
     real = [x[1] for x in a6]
-    print(f"  concordant {agree}/15, exact one-sided p = {p:.4f}")
+
+    def concordant(rv):
+        return sum((imag[i] > imag[j]) == (rv[i] > rv[j])
+                   for i, j in itertools.combinations(range(6), 2))
+
+    agree = concordant(real)
+    # Exact one-sided permutation test over all 6! orderings (Kendall-type).
+    # NOT a binomial over the 15 pairs: pairs among six items are
+    # transitivity-constrained, and Bin(15, 1/2) is anti-conservative (0.059 vs 0.136).
+    n_ge = sum(concordant(list(perm)) >= agree for perm in itertools.permutations(real))
+    p = n_ge / 720
+    ri = np.argsort(np.argsort(imag)); rr = np.argsort(np.argsort(real))
+    rho = 1 - 6 * float(((ri - rr) ** 2).sum()) / (6 * 35)
+    print(f"  concordant {agree}/15 (Kendall tau {(2*agree-15)/15:.3f}), Spearman rho {rho:.3f}, "
+          f"exact one-sided permutation p = {n_ge}/720 = {p:.4f}")
     print(f"  imagined band {min(imag):.2f}-{max(imag):.2f} "
           f"(relative {100*(max(imag)-min(imag))/min(imag):.1f}%)  real band "
           f"{min(real):.3f}-{max(real):.3f} (relative "
