@@ -357,19 +357,23 @@ def site_panel():
                 ax.axvline(t0, color=P["grey"], lw=0.9, ls=(0, (2, 3)))
                 ax.annotate(f"belief starts accruing, t = {t0}", xy=(t0, ymax * 0.92), xytext=(-7, 0),
                             textcoords="offset points", ha="right", va="center", fontsize=10 + fs, color=P["grey"])
-                ax.annotate("reward model's belief", xy=(0.27, 0.40), xycoords="axes fraction",
-                            color=P["belief"], fontsize=12.5 + fs, fontweight="bold")
                 if narrow:
-                    ax.annotate("reality — never caught", xy=(0.03, 0.10), xycoords="axes fraction",
-                                ha="left", color=P["reality"], fontsize=12.5 + fs, fontweight="bold")
+                    ax.annotate("reward model's belief", xy=(0.97, 0.80), xycoords="axes fraction",
+                                ha="right", color=P["belief"], fontsize=11 + fs, fontweight="bold")
+                    ax.annotate("reality —\nnever caught", xy=(0.40, 0.06), xycoords="axes fraction",
+                                ha="right", va="bottom", color=P["reality"], fontsize=11 + fs,
+                                fontweight="bold", linespacing=1.15)
                 else:
+                    ax.annotate("reward model's belief", xy=(0.27, 0.40), xycoords="axes fraction",
+                                color=P["belief"], fontsize=12.5 + fs, fontweight="bold")
                     ax.annotate("reality — never caught", xy=(0.97, 0.07), xycoords="axes fraction",
                                 ha="right", color=P["reality"], fontsize=12.5 + fs, fontweight="bold")
                 for y, txt, c in ((pred[-1], f"{pred[-1]:.0f}", P["belief"]), (0, "0", P["reality"])):
                     ax.annotate(txt, xy=(n - 1, y), xytext=(7, 0), textcoords="offset points",
                                 va="center", color=c, fontsize=14 + fs, fontweight="bold")
             else:
-                ax.annotate("belief ≈ reality", xy=(0.30, 0.68), xycoords="axes fraction",
+                ax.annotate("belief ≈ reality", xy=(0.06, 0.80) if narrow else (0.30, 0.68),
+                            xycoords="axes fraction", ha="left",
                             color=P["ink"], fontsize=12.5 + fs, fontweight="bold")
                 ax.annotate(f"{act[-1]:.0f}", xy=(n - 1, act[-1]), xytext=(7, 0), textcoords="offset points",
                             va="center", color=P["reality"], fontsize=14 + fs, fontweight="bold")
