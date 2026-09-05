@@ -1,0 +1,101 @@
+{
+ "_provenance": {
+  "imagined_return": "final [ep 15 step 3000] return= line of each run's training log (factorial) / stats/imagined_return wandb summary (anchor); identical where both exist",
+  "mean_reward_per_step": "wandb summary stats/mean_reward (imagination/trainer.py:375), final step",
+  "mean_continue": "wandb summary stats/mean_continue (imagination/trainer.py:379), final step",
+  "bc_losses": "final 'Epoch 40:' line of bc_seed*_train.log",
+  "real_catch": "evaluation/*/summary.json success_rate, n=500",
+  "pulled": "2026-08-19"
+ },
+ "factorial": {
+  "bc11-rl21": {
+   "imagined_return": 58.67545,
+   "mean_reward": 1.27058,
+   "mean_continue": 0.9998,
+   "real_catch": 0.126
+  },
+  "bc11-rl22": {
+   "imagined_return": 57.78645,
+   "mean_reward": 1.13997,
+   "mean_continue": 0.99981,
+   "real_catch": 0.118
+  },
+  "bc12-rl23": {
+   "imagined_return": 68.82207,
+   "mean_reward": 1.18514,
+   "mean_continue": 0.99984,
+   "real_catch": 0.648
+  },
+  "bc12-rl24": {
+   "imagined_return": 73.08026,
+   "mean_reward": 1.36047,
+   "mean_continue": 0.99982,
+   "real_catch": 0.704
+  },
+  "bc13-rl25": {
+   "imagined_return": 4.680145,
+   "mean_reward": 0.25103,
+   "mean_continue": 0.99992,
+   "real_catch": 0.288
+  },
+  "bc13-rl26": {
+   "imagined_return": 3.506109,
+   "mean_reward": 0.19857,
+   "mean_continue": 0.99993,
+   "real_catch": 0.294
+  }
+ },
+ "anchor": {
+  "original": {
+   "imagined_return": 75.49558,
+   "real_catch": 0.374
+  },
+  "seed1": {
+   "imagined_return": 78.4024,
+   "real_catch": 0.446
+  },
+  "seed2": {
+   "imagined_return": 77.6359,
+   "real_catch": 0.46
+  },
+  "seed3": {
+   "imagined_return": 74.2371,
+   "real_catch": 0.366
+  },
+  "seed4": {
+   "imagined_return": 75.6661,
+   "real_catch": 0.392
+  },
+  "seed5": {
+   "imagined_return": 74.6423,
+   "real_catch": 0.454
+  }
+ },
+ "bc_parents": {
+  "seed11": {
+   "train_loss": 4.1663,
+   "val_loss": 3.5069,
+   "bc_catch": 0.448
+  },
+  "seed12": {
+   "train_loss": 4.1221,
+   "val_loss": 2.8977,
+   "bc_catch": 0.434
+  },
+  "seed13": {
+   "train_loss": 4.1514,
+   "val_loss": 3.2581,
+   "bc_catch": 0.374
+  }
+ },
+ "expert_dataset": {
+  "file": "ball_in_cup_catch.npz",
+  "bytes": 5911961452,
+  "md5": "2511f964de531e4e877b834af49e80a8",
+  "per_step_reward": {
+   "min": 0.0,
+   "max": 2.0,
+   "mean": 1.1454
+  }
+ }
+}

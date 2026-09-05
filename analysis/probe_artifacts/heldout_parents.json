@@ -1,0 +1,30 @@
+{
+ "_provenance": {
+  "script": "dynamics/evaluate_agent.py (split=\"val\" hardcoded, val_fraction=0.1, split_seed=0)",
+  "config": "--batch-size 8 --steps 60 --seq-len 16 --tau-sweep 0.9 --amp  (480 sequences from the 24 held-out episodes)",
+  "checkpoints": "checkpoints-phase2-cat-seed{11,12,13}/final.pt",
+  "tokenizer": "checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt",
+  "pulled": "2026-08-28"
+ },
+ "seed11": {
+  "heldout_policy_nll": 4.957326889038086,
+  "heldout_action_mse_argmax": 0.2197415977716446,
+  "heldout_action_mse_mean": 0.13216233253479004,
+  "heldout_reward_mse": 0.02048610709607601,
+  "heldout_reward_pearson": 0.9893800916370152
+ },
+ "seed12": {
+  "heldout_policy_nll": 4.921940326690674,
+  "heldout_action_mse_argmax": 0.22679416835308075,
+  "heldout_action_mse_mean": 0.13737456500530243,
+  "heldout_reward_mse": 0.022117478772997856,
+  "heldout_reward_pearson": 0.9884251220620028
+ },
+ "seed13": {
+  "heldout_policy_nll": 4.831255912780762,
+  "heldout_action_mse_argmax": 0.22206752002239227,
+  "heldout_action_mse_mean": 0.14111632108688354,
+  "heldout_reward_mse": 0.01978629268705845,
+  "heldout_reward_pearson": 0.9896844596114273
+ }
+}

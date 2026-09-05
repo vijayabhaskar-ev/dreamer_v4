@@ -222,12 +222,16 @@ def main():
     print(f"  draw-level mean {100*grand:+.1f}pp, 95% CI "
           f"[{100*(grand - tcrit2*se_d):+.1f}, {100*(grand + tcrit2*se_d):+.1f}] "
           f"(not estimable at n=3)")
-    demo = np.load(ROOT / "ball_in_cup_catch.npz", mmap_mode="r")
-    rew = np.asarray(demo["rewards"], float)
-    # per-frame rewards carry action-repeat-2 sums (values in {0,1,2}), so the
-    # per-step normalizer is 2*T, matching the env's ~1000-scale returns
-    print(f"  demo ceilings: catch {(rew.sum(axis=1) > 0).mean():.3f}, "
-          f"normalized return {rew.sum(axis=1).mean() / (2 * rew.shape[1]):.3f}, "
+    npz = ROOT / "ball_in_cup_catch.npz"   # not redistributed: rebuild with convert_hansen_to_npz.py
+    if not npz.exists():
+        print("  demo ceilings: skipped (ball_in_cup_catch.npz not present; see README > Training from scratch)")
+    else:
+        demo = np.load(npz, mmap_mode="r")
+        rew = np.asarray(demo["rewards"], float)
+        # per-frame rewards carry action-repeat-2 sums (values in {0,1,2}), so the
+        # per-step normalizer is 2*T, matching the env's ~1000-scale returns
+        print(f"  demo ceilings: catch {(rew.sum(axis=1) > 0).mean():.3f}, "
+              f"normalized return {rew.sum(axis=1).mean() / (2 * rew.shape[1]):.3f}, "
           f"hold fraction {(rew > 0).mean():.3f}")
 
     print("\n== BC vs random (whole-stack integration check) ==")
@@ -290,14 +294,14 @@ def main():
 
 def sec7_block():
     """Section 7 twins: every number quoted in sec7 that is not already
-    printed above. Sources: paper/probe_artifacts/{kl_probe_results,
+    printed above. Sources: analysis/probe_artifacts/{kl_probe_results,
     training_finals,weight_forensics}.json + evaluation/*/episodes.csv."""
     import csv
     import itertools
     import json
     from math import comb, sqrt
 
-    pa = ROOT / "paper/probe_artifacts"
+    pa = ROOT / "analysis/probe_artifacts"   # released copies (paper/ is not public)
     finals = json.load(open(pa / "training_finals.json"))
     probe = json.load(open(pa / "kl_probe_results.json"))
     wf = json.load(open(pa / "weight_forensics.json"))
