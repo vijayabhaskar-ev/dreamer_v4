@@ -14,6 +14,7 @@ Usage:  python -m analysis.paper_stats
 """
 import csv
 import math
+from math import factorial
 from pathlib import Path
 
 import numpy as np
@@ -322,25 +323,32 @@ def sec7_block():
         se = sqrt(a * (1 - a) / 500 + b * (1 - b) / 500)
         print(f"    {k}: diff {a-b:+.3f}  se_diff {se:.4f}  ({abs(a-b)/se:.2f} sigma)")
 
-    print("\n== sec7.1/7.5: anchor within-draw ranking, 6 runs -> 15 pairs ==")
     a6 = [(v["imagined_return"], v["real_catch"]) for v in finals["anchor"].values()]
     imag = [x[0] for x in a6]
     real = [x[1] for x in a6]
+    n_runs = len(a6)                       # 6 anchor runs
+    n_pairs = n_runs * (n_runs - 1) // 2   # 15 pairwise comparisons
+    n_orders = factorial(n_runs)           # 720 possible orderings of the outcomes
+    print(f"\n== sec7.1/7.5: anchor within-draw ranking, {n_runs} runs -> {n_pairs} pairs ==")
 
     def concordant(rv):
+        """How many of the n_pairs comparisons the imagined ordering gets right."""
         return sum((imag[i] > imag[j]) == (rv[i] > rv[j])
-                   for i, j in itertools.combinations(range(6), 2))
+                   for i, j in itertools.combinations(range(n_runs), 2))
 
     agree = concordant(real)
-    # Exact one-sided permutation test over all 6! orderings (Kendall-type).
-    # NOT a binomial over the 15 pairs: pairs among six items are
-    # transitivity-constrained, and Bin(15, 1/2) is anti-conservative (0.059 vs 0.136).
+    # Exact one-sided permutation test over all n_runs! orderings (Kendall-type):
+    # count the orderings that match the model at least as well as reality did.
+    # NOT a binomial over the pairs -- pairs among n items are transitivity-
+    # constrained (A>B and B>C force A>C), so Bin(n_pairs, 1/2) assumes 2^15
+    # outcomes where only 6! exist and is anti-conservative (0.059 vs 0.136).
     n_ge = sum(concordant(list(perm)) >= agree for perm in itertools.permutations(real))
-    p = n_ge / 720
+    p = n_ge / n_orders
     ri = np.argsort(np.argsort(imag)); rr = np.argsort(np.argsort(real))
-    rho = 1 - 6 * float(((ri - rr) ** 2).sum()) / (6 * 35)
-    print(f"  concordant {agree}/15 (Kendall tau {(2*agree-15)/15:.3f}), Spearman rho {rho:.3f}, "
-          f"exact one-sided permutation p = {n_ge}/720 = {p:.4f}")
+    rho = 1 - 6 * float(((ri - rr) ** 2).sum()) / (n_runs * (n_runs ** 2 - 1))
+    tau = (2 * agree - n_pairs) / n_pairs
+    print(f"  concordant {agree}/{n_pairs} (Kendall tau {tau:.3f}), Spearman rho {rho:.3f}, "
+          f"exact one-sided permutation p = {n_ge}/{n_orders} = {p:.4f}")
     print(f"  imagined band {min(imag):.2f}-{max(imag):.2f} "
           f"(relative {100*(max(imag)-min(imag))/min(imag):.1f}%)  real band "
           f"{min(real):.3f}-{max(real):.3f} (relative "
