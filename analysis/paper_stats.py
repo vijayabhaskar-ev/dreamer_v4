@@ -317,6 +317,13 @@ def sec7_block():
     lo = [finals["factorial"][k]["real_catch"] for k in ("bc11-rl21", "bc11-rl22")]
     hi = [finals["factorial"][k]["real_catch"] for k in ("bc12-rl23", "bc12-rl24")]
     print(f"  real-catch factor (midpoints): {(sum(hi)/2)/(sum(lo)/2):.2f}")
+    # sec7.1 cross-draw inversion: the exploiting draw vs the declining draw
+    im11 = sum(finals["factorial"][k]["imagined_return"] for k in ("bc11-rl21", "bc11-rl22")) / 2
+    im13 = sum(finals["factorial"][k]["imagined_return"] for k in ("bc13-rl25", "bc13-rl26")) / 2
+    rc13 = sum(finals["factorial"][k]["real_catch"] for k in ("bc13-rl25", "bc13-rl26")) / 2
+    print(f"  cross-draw inversion (bc11 vs bc13): imagined {im11:.1f} vs {im13:.1f} "
+          f"({im11/im13:.0f}x in favour of the exploiting draw); real catch {sum(lo)/2:.3f} vs {rc13:.3f} "
+          f"({rc13/(sum(lo)/2):.1f}x in favour of the declining draw)")
     print("  within-draw pair diffs vs binomial noise (n=500/cell):")
     cells = {"bc11": (0.126, 0.118), "bc12": (0.648, 0.704), "bc13": (0.288, 0.294)}
     for k, (a, b) in cells.items():
