@@ -555,7 +555,33 @@ def sec64_reml4_block():
         print(f"  {tag:12s} first10 {first10}/10   true {rate(d):.3f}")
 
 
+def wm_split_check_block():
+    """app A: shipped world model scored on training vs held-out windows (same seed).
+
+    Reads evaluation/wm-split-check/{train,val}/per_batch_mse.csv produced by
+    `python -m dynamics.evaluate_dynamics --split {train,val} --seed 123 --steps 80`.
+    """
+    base = ROOT / "evaluation/wm-split-check"
+    if not (base / "train/per_batch_mse.csv").exists():
+        print("\n== app A: WM train-vs-held-out check: skipped (evaluation/wm-split-check absent) ==")
+        return
+    def load(split):
+        with open(base / split / "per_batch_mse.csv") as f:
+            return np.array([float(r["latent_mse"]) for r in csv.DictReader(f)])
+    tr, va = load("train"), load("val")
+    n = min(len(tr), len(va)); tr, va = tr[:n], va[:n]
+    d = va - tr
+    rng = np.random.default_rng(SEED)
+    boot = np.array([rng.choice(d, n).mean() for _ in range(N_BOOT)])
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    print("\n== app A: shipped world model, held-out vs training windows (paired, shared seed) ==")
+    print(f"  batches {n}: train latent MSE {tr.mean():.3f}, held-out {va.mean():.3f}; "
+          f"diff {d.mean():+.4f} ({100*d.mean()/tr.mean():+.1f}%), 95% bootstrap CI "
+          f"[{100*lo/tr.mean():+.1f}%, {100*hi/tr.mean():+.1f}%]; corr {np.corrcoef(tr, va)[0,1]:.2f}")
+
+
 if __name__ == "__main__":
     main()
     sec7_block()
     sec64_reml4_block()
+    wm_split_check_block()

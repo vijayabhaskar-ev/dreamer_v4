@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--output-dir", type=str, default="evaluation/dynamics")
     parser.add_argument("--tau-bins", type=int, default=5)
+    parser.add_argument("--split", choices=["train", "val"], default="train",
+                        help="Episode split to score (default: train, as in the appendix's rollout metrics).")
+    parser.add_argument("--val-fraction", type=float, default=0.1)
+    parser.add_argument("--split-seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed numpy+torch so window offsets and (tau, d) draws are reproducible across runs.")
     parser.add_argument("--max-gifs", type=int, default=4)
     parser.add_argument("--gif-fps", type=int, default=8)
     parser.add_argument("--wandb-project", type=str, default="dreamer-v4-dynamics-eval")
@@ -353,6 +359,9 @@ def write_csv(path: Path, header: list[str], rows: list[list[object]]) -> None:
 def main(args: Optional[list[str]] = None) -> None:
     parser = build_parser()
     opts = parser.parse_args(args)
+    if opts.seed is not None:
+        import numpy as _np
+        _np.random.seed(opts.seed); torch.manual_seed(opts.seed)
 
     output_dir = Path(opts.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -425,6 +434,7 @@ def main(args: Optional[list[str]] = None) -> None:
         batch_size=opts.batch_size,
         steps_per_epoch=steps_per_worker,
         dataset_path=opts.dataset_path,
+        split=opts.split, val_fraction=opts.val_fraction, split_seed=opts.split_seed,
     )
     loader = DataLoader(
         dataset,
@@ -458,6 +468,7 @@ def main(args: Optional[list[str]] = None) -> None:
     # Store data for GIF generation AFTER the main loop
     gif_data: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     processed_steps = 0
+    batch_mse_list: list[float] = []
 
     with torch.no_grad():
         for step_idx, batch in enumerate(loader):
@@ -483,6 +494,7 @@ def main(args: Optional[list[str]] = None) -> None:
             mse_bt = ((z_hat - z_clean) ** 2).mean(dim=(-2, -1))  # (B, T)
             overall_sum_t += mse_bt.sum().double()
             overall_count_t += mse_bt.numel()
+            batch_mse_list.append(float(mse_bt.mean()))
 
             # Tau-bucket metrics — vectorized, no Python loop with .any()
             # Digitize tau into bins: bin index for each (B, T) element
@@ -586,6 +598,7 @@ def main(args: Optional[list[str]] = None) -> None:
         batch_size=opts.batch_size,
         steps_per_epoch=opts.rollout_batches,
         dataset_path=opts.dataset_path,
+        split=opts.split, val_fraction=opts.val_fraction, split_seed=opts.split_seed,
     )
     rollout_loader = DataLoader(
         rollout_dataset,
@@ -662,6 +675,8 @@ def main(args: Optional[list[str]] = None) -> None:
         rollout_overall_mse = float(avg_mse.mean().item())
         rollout_final_mse = float(avg_mse[-1].item())
 
+        write_csv(output_dir / "per_batch_mse.csv", ["batch", "latent_mse"],
+                  [[k, v] for k, v in enumerate(batch_mse_list)])
         write_csv(
             output_dir / "rollout_mse_per_step.csv",
             ["rollout_step", "latent_mse"],
