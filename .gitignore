@@ -48,3 +48,9 @@ sanity_untrained.py
 # TMLR draft — keep out of the public repo until camera-ready (anonymity hygiene)
 paper/
 assets/hero_work/
+
+# released measurement backing app A's generalization-gap sentence (CSV/JSON only)
+!evaluation/wm-split-check/
+!evaluation/wm-split-check/*/
+evaluation/wm-split-check/*/*.gif
+evaluation/wm-split-check/*/*.png

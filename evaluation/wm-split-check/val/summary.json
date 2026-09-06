@@ -1,0 +1,14 @@
+{
+  "overall_latent_mse": 0.5280302856117487,
+  "processed_batches": 80,
+  "batch_size": 8,
+  "seq_len": 8,
+  "gifs_written": 4,
+  "rollout_horizon": 7,
+  "rollout_K_inference": 4,
+  "rollout_num_context": 1,
+  "rollout_overall_mse": 0.6509128383227757,
+  "rollout_final_step_mse": 0.4272804260253906,
+  "rollout_batches_processed": 1,
+  "action_shuffle_batches": 80
+}
