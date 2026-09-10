@@ -1,10 +1,10 @@
-# Dreamer V4 — from-scratch PyTorch reproduction
+# Dreamer V4 — PyTorch reproduction
 
 [![arXiv](https://img.shields.io/badge/arXiv-2509.24527-b31b1b.svg)](https://arxiv.org/abs/2509.24527)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Weights on HF](https://img.shields.io/badge/🤗%20weights-dreamer--v4-blue)](https://huggingface.co/vijayabhaskarev/dreamer-v4)
 
-A from-scratch PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
+A PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
 
 <p align="center">
   <img src="assets/hero_static.png" width="920"><br>
@@ -269,7 +269,7 @@ Independent reproduction — please cite the original DreamerV4 paper; optionall
 }
 
 @software{eswaran2026dreamerv4,
-  title  = {Dreamer V4 --- from-scratch PyTorch reproduction},
+  title  = {Dreamer V4 --- PyTorch reproduction},
   author = {Eswaran, Vijaya Bhaskar},
   year   = {2026},
   url    = {https://github.com/vijayabhaskar-ev/dreamer_v4}
