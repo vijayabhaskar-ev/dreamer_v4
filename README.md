@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Weights on HF](https://img.shields.io/badge/🤗%20weights-dreamer--v4-blue)](https://huggingface.co/vijayabhaskarev/dreamer-v4)
 
+> **Correction notice (26 September 2026).** The results below were produced by a pipeline with two defects, found in September 2026. First, each action was fed to the world model and to the cloned policy one frame late. Second, the world model's shortcut steps, the large steps that imagination uses, received almost no training signal because of how the loss terms were normalized. Both defects passed every check in the verification suite. The findings reported below, including the gain from imagination training, the swing across Phase-2 retrains, and the "hallucinated success" case, are properties of that defective pipeline and should not be read as properties of Dreamer 4. After both fixes, the cloned policy's catch rate rises from about 40% to about 54% on the same 500 episodes. A full corrected study is in preparation and will replace this page. The released checkpoints are kept, labelled as the defective version, so the numbers below remain reproducible.
+
 A PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
 
 <p align="center">
