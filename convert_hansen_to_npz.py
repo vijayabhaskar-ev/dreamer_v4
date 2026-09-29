@@ -85,6 +85,17 @@ def fill_tier_into_slice(tier_dir: Path, n_eps: int,
     episode = td["episode"].numpy()
     del td
 
+    # Layout guard (2026-09-20). Hansen stores, in row t, the action that LED TO frame t, so the first
+    # row of every episode is empty (NaN) and no other row is. The left shift further down is only valid
+    # under that layout, and the reshape assumes contiguous equal-length episodes, so prove both here
+    # instead of assuming them.
+    assert np.array_equal(episode, np.repeat(np.arange(n_eps), T)), \
+        "episodes are not contiguous blocks of T rows in order 0..n_eps-1"
+    nan_rows = np.isnan(action).any(axis=-1).nonzero()[0]
+    assert nan_rows.tolist() == list(range(0, n_eps * T, T)), (
+        f"expected exactly one empty action row at the start of each of {n_eps} episodes, "
+        f"found {len(nan_rows)} NaN rows")
+
     action = np.nan_to_num(action, nan=0.0)
     reward = np.nan_to_num(reward, nan=0.0)
     assert episode.max() + 1 == n_eps and (episode == 0).sum() == T
@@ -100,7 +111,15 @@ def fill_tier_into_slice(tier_dir: Path, n_eps: int,
     # verify with a dm_control replay before applying. Re-run conversion
     # AFTER successful tokenizer training and BEFORE starting dynamics.
 
-    actions_slice[:] = action.reshape(n_eps, T, ACTION_DIM)
+    # Action timing fix (2026-09-20). Store the pipeline's native convention, the one generate_dataset.py
+    # and DMControlDataset produce: actions[e, t] is the action APPLIED AT frames[e, t] (it produces
+    # frames[e, t+1]). Hansen's row t+1 holds exactly that action, so shift left by one row per episode.
+    # The final frame has no action: zero-filled, and the loader's start:end-1 slice never feeds it.
+    # Rewards are deliberately NOT shifted: Hansen's reward row t is the reward on ARRIVING at frame t,
+    # which is what a same-row reward head should learn for a state-based reward.
+    a = action.reshape(n_eps, T, ACTION_DIM)
+    actions_slice[:, :-1] = a[:, 1:]
+    actions_slice[:, -1] = 0.0
     rewards_slice[:] = reward.reshape(n_eps, T)
     dones_slice[:] = 0.0
     dones_slice[:, -1] = 1.0

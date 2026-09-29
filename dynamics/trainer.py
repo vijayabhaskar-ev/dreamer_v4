@@ -139,6 +139,7 @@ class DynamicsTrainer:
 
         self.rms_flow = RMSNormalizer(decay=0.99)
         self.rms_bootstrap = RMSNormalizer(decay=0.99)
+        self.rms_dyn = RMSNormalizer(decay=0.99)       # normalizes the single Eq. 7 dynamics loss
 
         self.tokenizer = MaskedAutoencoderTokenizer(tokenizer_cfg).to(self.device)
         self._load_tokenizer_checkpoint(tokenizer_ckpt)
@@ -335,6 +336,8 @@ class DynamicsTrainer:
                 self.rms_flow.load_state_dict(rms_state["flow"])
             if "bootstrap" in rms_state:
                 self.rms_bootstrap.load_state_dict(rms_state["bootstrap"])
+            if "dyn" in rms_state:
+                self.rms_dyn.load_state_dict(rms_state["dyn"])
 
         # Phase 2 starts a FRESH LR schedule (warmup + cosine over Phase 2's own
         # total_steps, e.g. 10k). Do NOT inherit Phase 1's global_step (~160k):
@@ -492,6 +495,7 @@ class DynamicsTrainer:
                 "rms_normalizers": {
                     "flow": self.rms_flow.state_dict(),
                     "bootstrap": self.rms_bootstrap.state_dict(),
+                    "dyn": self.rms_dyn.state_dict(),
                     "reward": self.rms_reward.state_dict(),
                     "continue": self.rms_continue.state_dict(),
                     "bc": self.rms_bc.state_dict(),
@@ -563,6 +567,8 @@ class DynamicsTrainer:
                 self.rms_flow.load_state_dict(rms_state["flow"])
             if "bootstrap" in rms_state:
                 self.rms_bootstrap.load_state_dict(rms_state["bootstrap"])
+            if "dyn" in rms_state:
+                self.rms_dyn.load_state_dict(rms_state["dyn"])
             if "reward" in rms_state:
                 self.rms_reward.load_state_dict(rms_state["reward"])
             if "continue" in rms_state:
@@ -1114,7 +1120,17 @@ class DynamicsTrainer:
             loss_bootstrap_normed = self._zero
             n_boot = self._zero
 
-        loss_total = loss_flow_normed + loss_bootstrap_normed
+        # Dreamer 4 Eq. 7 as ONE loss term (the paper's formulation): the per-frame loss is the flow case or the
+        # bootstrap case depending on d, weighted by the ramp w(tau) (Eq. 8), averaged over ALL (B, T) frames, i.e.
+        # the expectation over p(tau, d) (Eq. 4), and RMS-normalized ONCE. The footnote to Eq. 7 scales the bootstrap
+        # case by (1 - tau)^2 precisely so the two cases share one scale. Normalizing the two cases SEPARATELY
+        # (this repo's behavior until 2026-09-20) gave the bootstrap case ~20x its natural weight and collapsed a
+        # from-scratch Phase 1. The separately normalized values above are still computed for LOGGING only.
+        per_frame = flow_mask * per_sample_flow
+        if compute_bootstrap:
+            per_frame = per_frame + boot_mask * per_sample_boot
+        loss_dyn = (w * per_frame).mean()
+        loss_total = self.rms_dyn.normalize(loss_dyn, update=training)
 
         # ── Prediction head losses ──────────────────────────────────
         loss_reward = self._zero

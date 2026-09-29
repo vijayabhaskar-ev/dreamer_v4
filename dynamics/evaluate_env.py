@@ -256,36 +256,51 @@ def run_episode(env: DMCEnvWrapper, trainer, dynamics_cfg, *, is_random: bool,
     pred_r_list, actual_r_list, pred_c_list, done_list = [], [], [], []
     total_return, length, done = 0.0, 0, False
 
+    def _readout(pixels_now):
+        """Encode the current frame, run the agent on the context window, return (h, pred_r, pred_c)."""
+        frame = env.preprocess(pixels_now).to(device)[None, None]  # (1,1,3,H,W)
+        z_clean = trainer.model.encode_frames(frame)               # (1,1,S_z,D_lat)
+        tau1 = torch.full((1, 1), tau_ctx_val, device=device)
+        z_noi, _ = add_noise(z_clean, tau1)
+        z_frames.append(z_noi)
+
+        W = min(len(z_frames), cw)
+        z_win = torch.cat(z_frames[-W:], dim=1)                    # (1,W,S_z,D_lat)
+        tau_win = torch.full((1, W), tau_ctx_val, device=device)
+        d_win = torch.full((1, W), d_val, device=device)
+        if W > 1:
+            a_hist = np.stack(act_taken[-(W - 1):])               # (W-1,A)
+            act_win = torch.from_numpy(a_hist).float().to(device)[None]  # (1,W-1,A)
+        else:
+            act_win = None
+
+        out = trainer.model(z_win, act_win, tau_win, d_win, use_agent_tokens=True)
+        if out.agent_out is None:
+            raise RuntimeError("agent_out is None — agent tokens not active "
+                               "(enable_agent_tokens must precede load_checkpoint).")
+        h_ = out.agent_out[:, -1]                                  # (1, D_embed)
+        return (h_,
+                float(trainer.reward_head.predict(h_).reshape(-1)[0].item()),
+                float(trainer.continue_head.predict(h_).reshape(-1)[0].item()))
+
+    # The reward and continue heads are trained SAME-FRAME (dataset rewards[t] / dones[t] describe the
+    # arrival at frames[t]), so the prediction made ON a frame is paired with the (reward, done) of the
+    # step that ARRIVED at that frame. Frame 0 has no arrival; the terminal frame gets one extra readout
+    # after the loop. The extra readout happens after the last env.step and seeds are reset per episode,
+    # so actions, returns and catches are unaffected.
+    arrival = None                                                 # (reward, done) that led to the current frame
     limit = max_steps if max_steps > 0 else 10_000
     for t in range(limit):
         if is_random:
             action = rng.uniform(env.action_spec.minimum,
                                  env.action_spec.maximum).astype(np.float32)
-            pred_r = pred_c = None
         else:
-            frame = env.preprocess(pixels).to(device)[None, None]      # (1,1,3,H,W)
-            z_clean = trainer.model.encode_frames(frame)               # (1,1,S_z,D_lat)
-            tau1 = torch.full((1, 1), tau_ctx_val, device=device)
-            z_noi, _ = add_noise(z_clean, tau1)
-            z_frames.append(z_noi)
-
-            W = min(len(z_frames), cw)
-            z_win = torch.cat(z_frames[-W:], dim=1)                    # (1,W,S_z,D_lat)
-            tau_win = torch.full((1, W), tau_ctx_val, device=device)
-            d_win = torch.full((1, W), d_val, device=device)
-            if W > 1:
-                a_hist = np.stack(act_taken[-(W - 1):])               # (W-1,A)
-                act_win = torch.from_numpy(a_hist).float().to(device)[None]  # (1,W-1,A)
-            else:
-                act_win = None
-
-            out = trainer.model(z_win, act_win, tau_win, d_win, use_agent_tokens=True)
-            if out.agent_out is None:
-                raise RuntimeError("agent_out is None — agent tokens not active "
-                                   "(enable_agent_tokens must precede load_checkpoint).")
-            h = out.agent_out[:, -1]                                   # (1, D_embed)
-            pred_r = float(trainer.reward_head.predict(h).reshape(-1)[0].item())
-            pred_c = float(trainer.continue_head.predict(h).reshape(-1)[0].item())
+            h, pred_r, pred_c = _readout(pixels)
+            if arrival is not None:
+                pred_r_list.append(pred_r)
+                actual_r_list.append(arrival[0])
+                pred_c_list.append(pred_c)
+                done_list.append(arrival[1])
             act_t = trainer.policy_head.act(h, readout=readout)        # (1,A)
             action = act_t.reshape(-1).float().cpu().numpy()
             act_taken.append(env.clip_action(action))                 # store the action actually applied
@@ -295,13 +310,17 @@ def run_episode(env: DMCEnvWrapper, trainer, dynamics_cfg, *, is_random: bool,
         length += 1
         if collect_frames:
             frames_rgb.append(pixels)
-        if pred_r is not None:
-            pred_r_list.append(pred_r)
-            actual_r_list.append(reward)
-            pred_c_list.append(pred_c)
-            done_list.append(1.0 if done else 0.0)
+        if not is_random:
+            arrival = (reward, 1.0 if done else 0.0)
         if done:
             break
+
+    if not is_random and arrival is not None:                          # terminal frame
+        _, pred_r, pred_c = _readout(pixels)
+        pred_r_list.append(pred_r)
+        actual_r_list.append(arrival[0])
+        pred_c_list.append(pred_c)
+        done_list.append(arrival[1])
 
     res = EpisodeResult(
         seed=-1, return_=total_return, length=length,
@@ -393,6 +412,27 @@ def write_outputs(out_dir: Path, opts, dynamics_cfg, per_policy: Dict[str, Dict]
             rows.append([name, r.seed, round(r.return_, 4), r.length, int(r.success), int(r.caught)])
     write_csv(out_dir / "episodes.csv",
               ["policy", "seed", "return", "length", "success", "caught"], rows)
+
+    # Per-step reward-head / continue-head predictions next to what the environment paid (2026-09-26).
+    # summary.json only keeps aggregates (MAE, Pearson, AUC); the exploitation checks need the raw pairs:
+    # predicted reward on steps whose realized reward is 0, and never-caught episodes whose predicted
+    # return still exceeds a threshold. One compressed file per policy; concatenated over episodes in
+    # board order, with ep_len to split them. Numbers already reported are unchanged.
+    for name, blob in per_policy.items():
+        res = [r for r in blob["results"] if r.pred_rewards]
+        if not res:
+            continue
+        np.savez_compressed(
+            out_dir / f"per_step_{name}.npz",
+            seed=np.array([r.seed for r in res], dtype=np.int64),
+            ep_len=np.array([len(r.pred_rewards) for r in res], dtype=np.int64),
+            caught=np.array([r.caught for r in res], dtype=bool),
+            return_=np.array([r.return_ for r in res], dtype=np.float64),
+            pred_reward=np.concatenate([np.asarray(r.pred_rewards, dtype=np.float32) for r in res]),
+            actual_reward=np.concatenate([np.asarray(r.actual_rewards, dtype=np.float32) for r in res]),
+            pred_continue=np.concatenate([np.asarray(r.pred_continue, dtype=np.float32) for r in res]),
+            done=np.concatenate([np.asarray(r.dones, dtype=np.float32) for r in res]),
+        )
 
     # Return-distribution plot (sorted per-episode returns per policy)
     series = []

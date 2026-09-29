@@ -248,12 +248,16 @@ def _train_fn(index=0, args=None):
 
     val_dataset = None
     if val_steps > 0:
+        # Held-out episodes. Without split="val" this silently fell back to the TRAIN split, so the logged
+        # val_loss was a second training loss (fixed 2026-09-20). Train and val use the same val_fraction and
+        # split_seed defaults, so the two episode sets are disjoint by construction.
         val_dataset = DatasetFactory.get_dataset(
             dataset_cfg_short,
             batch_size=training_cfg.batch_size,
             steps_per_epoch=val_steps,
             dataset_path=opts.dataset_path,
             expected_action_dim=opts.action_dim,
+            split="val",
         )
 
     device = get_device(opts.device)

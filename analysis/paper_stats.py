@@ -580,8 +580,39 @@ def wm_split_check_block():
           f"[{100*lo/tr.mean():+.1f}%, {100*hi/tr.mean():+.1f}%]; corr {np.corrcoef(tr, va)[0,1]:.2f}")
 
 
+
+def bc_loss_stability_block():
+    """sec7.5 / tab:heldout: the Phase-2 parents' end-of-epoch loss on training-split windows.
+    Reads the released parent training logs; shows the final-epoch ordering is a single noisy reading."""
+    import re
+    print("\n== sec7.5: is the parents' end-of-epoch training-split loss a stable ordering? ==")
+    seeds = (11, 12, 13); true_order = (12, 13, 11)          # children's mean catch 0.68 > 0.29 > 0.12
+    val, tr = {}, {}
+    for s_ in seeds:
+        txt = open(f"release/_tmlr_anon/logs/bc_seed{s_}_train.log").read()
+        val[s_] = {int(e): float(v) for e, v in re.findall(r"Epoch (\d+): .*?val_loss=([\d.]+)", txt)}
+        tr[s_]  = {int(e): float(v) for e, v in re.findall(r"Epoch (\d+): train_loss=([\d.]+)", txt)}
+    last = range(31, 41)
+    fin = [val[s_][40] for s_ in seeds]
+    print(f"  final-epoch (40) training-split loss, seeds 11/12/13: {fin[0]:.3f}/{fin[1]:.3f}/{fin[2]:.3f}  "
+          f"-> order {'>'.join(str(x) for x in sorted(seeds, key=lambda s_: val[s_][40]))}"
+          f"  ({'matches' if tuple(sorted(seeds, key=lambda s_: val[s_][40])) == true_order else 'no match'})")
+    print("  running train loss, epoch 40: " + "/".join(f"{tr[s_][40]:.3f}" for s_ in seeds))
+    sds = [np.std([val[s_][e] for e in last], ddof=1) for s_ in seeds]
+    print(f"  epoch-to-epoch sd of the training-split loss over epochs 31-40: "
+          + ", ".join(f"seed{s_} {sd:.2f}" for s_, sd in zip(seeds, sds)) + f"  (range {min(sds):.2f}-{max(sds):.2f})")
+    hits = sum(tuple(sorted(seeds, key=lambda s_: val[s_][e])) == true_order for e in last)
+    prev_hits = sum(tuple(sorted(seeds, key=lambda s_: val[s_][e])) == true_order for e in range(31, 40))
+    expl_best = sum(min(seeds, key=lambda s_: val[s_][e]) == 11 for e in range(31, 40))
+    print(f"  correct ordering in epochs 31-40: {hits}/10 (epochs 31-39: {prev_hits}/9); exploiting parent (seed 11) "
+          f"ranked best in {expl_best}/9 of epochs 31-39")
+    means = [np.mean([val[s_][e] for e in last]) for s_ in seeds]
+    print(f"  ten-epoch means (31-40), seeds 11/12/13: {means[0]:.3f}/{means[1]:.3f}/{means[2]:.3f}"
+          f"  -> order {'>'.join(str(x) for x in sorted(seeds, key=lambda s_: means[seeds.index(s_)]))}  (no match)")
+
 if __name__ == "__main__":
     main()
     sec7_block()
     sec64_reml4_block()
     wm_split_check_block()
+    bc_loss_stability_block()

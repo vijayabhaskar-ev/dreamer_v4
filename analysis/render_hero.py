@@ -27,15 +27,15 @@ REPO = Path(__file__).resolve().parents[1]
 WORK = REPO / "assets" / "hero_work"
 OUT = REPO / "assets"
 
-TOK = REPO / "checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt"
+TOK = REPO / "checkpoints/checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt"
 CELLS = {
     "exploiting_rl21": dict(
-        p2=REPO / "checkpoints-phase2-cat-seed11/final.pt",
-        p3=REPO / "checkpoints-phase3-cat-bc11-rl21/epoch_15.pt",
+        p2=REPO / "checkpoints/checkpoints-phase2-cat-seed11/final.pt",
+        p3=REPO / "checkpoints/checkpoints-phase3-cat-bc11-rl21/epoch_15.pt",
         stored=REPO / "evaluation/tmlr-fact-bc11-rl21-n500/episodes.csv", n_scan=50),
     "healthy_rl24": dict(
-        p2=REPO / "checkpoints-phase2-cat-seed12/final.pt",
-        p3=REPO / "checkpoints-phase3-cat-bc12-rl24/epoch_15.pt",
+        p2=REPO / "checkpoints/checkpoints-phase2-cat-seed12/final.pt",
+        p3=REPO / "checkpoints/checkpoints-phase3-cat-bc12-rl24/epoch_15.pt",
         stored=REPO / "evaluation/tmlr-fact-bc12-rl24-n500/episodes.csv", n_scan=12),
 }
 

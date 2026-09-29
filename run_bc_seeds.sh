@@ -12,13 +12,13 @@ PY=${PY:-$HOME/.conda/envs/dreamer_v4/bin/python}
 # Overridable for pod runs (HF-downloaded paths). Weight-identical to local files
 # (verified: tokenizer weights md5 d1c70f9a... in both stripped and full checkpoints).
 BASE=${BASE:-release/ball_in_cup/world_model.pt}
-TOK=${TOK:-checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt}
-P3_DUMMY=${P3_DUMMY:-checkpoints-phase3-categorical/dynamics/final.pt}   # never loaded (--policies bc)
+TOK=${TOK:-checkpoints/checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt}
+P3_DUMMY=${P3_DUMMY:-checkpoints/checkpoints-phase3-categorical/dynamics/final.pt}   # never loaded (--policies bc)
 NPZ=${NPZ:-ball_in_cup_catch.npz}
 SEEDS=${SEEDS:-11 12 13}
 
 for SEED in $SEEDS; do
-  CKDIR=checkpoints-phase2-cat-seed${SEED}
+  CKDIR=checkpoints/checkpoints-phase2-cat-seed${SEED}
   CKPT=${CKDIR}/final.pt
   if [ ! -f "$CKPT" ]; then
     echo "=== [bc-seed ${SEED}] training (~8-9h laptop) — $(date) ==="

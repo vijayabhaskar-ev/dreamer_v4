@@ -20,9 +20,9 @@
 set -u
 
 PY=${PY:-~/.conda/envs/dreamer_v4/bin/python}   # override on RunPod: PY=python3 ./run_seed_study.sh
-P2=checkpoints-phase2-categorical/dynamics/final.pt
-P3=checkpoints-phase3-categorical/dynamics/final.pt
-TOK=checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt
+P2=checkpoints/checkpoints-phase2-categorical/dynamics/final.pt
+P3=checkpoints/checkpoints-phase3-categorical/dynamics/final.pt
+TOK=checkpoints/checkpoints-iter46-extended-550ep/tokenizer/tokenizer_epoch_500.pt
 NPZ=ball_in_cup_catch.npz
 
 # ── Stage 0: headline n=500 on the published categorical pipeline ──
@@ -44,7 +44,7 @@ fi
 
 # ── Stages 1-3: Phase-3 seed study on the categorical pipeline ──
 for SEED in ${SEEDS:-1 2 3}; do   # override per pod: SEEDS="2" ./run_seed_study.sh
-  CKDIR=checkpoints-phase3-cat-seed${SEED}
+  CKDIR=checkpoints/checkpoints-phase3-cat-seed${SEED}
   CKPT=${CKDIR}/epoch_15.pt
 
   if [ ! -f "$CKPT" ]; then
