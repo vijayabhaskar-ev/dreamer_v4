@@ -344,6 +344,42 @@ def main():
     else:
         print("WARNING: ball_in_cup_catch.npz not found -> demoCatch / nDemos not generated")
 
+    # ───────────── setup: settings read from the checkpoints, launch scripts and data actually used ─────────────
+    import torch
+    p2 = torch.load(BK / f"phase2/seed{draws[0]}/checkpoints-phase2-aligned-seed{draws[0]}/dynamics_epoch_040.pt", map_location="cpu", weights_only=False)
+    p3 = torch.load(BK / f"phase3/draw{draws[0]}/checkpoints-phase3-aligned-draw{draws[0]}-seed1/final.pt", map_location="cpu", weights_only=False)
+    dc, ic = p2["dynamics_cfg"], p3["imagination_cfg"]
+    dc = dc if isinstance(dc, dict) else vars(dc); ic = ic if isinstance(ic, dict) else vars(ic)
+    run1 = open(BK / "provenance_joint/run_phase1.sh").read()
+    arg = lambda txt, k: re.search(rf"--{k}[ =]([^ \\\n]+)", txt).group(1)
+    srcC = "checkpoint configs (phase2 dynamics_epoch_040.pt, phase3 final.pt)"
+    add("policyBins", str(dc["policy_num_bins"]), "bins per action dimension of the categorical policy head", "setup", srcC, "41")
+    add("kMax", str(dc["K_max"]), "finest shortcut grid: smallest step size is 1/kMax", "setup", srcC, "64")
+    add("kSample", str(ic["K_imagination"]), "denoising steps per generated frame in imagination (step size 1/kSample)", "setup", srcC, "4")
+    add("ctxSignal", f(1 - dc["tau_ctx"], 1), "signal level of context frames (1 minus tau_ctx)", "setup", srcC, "0.9")
+    add("ctxFrames", str(ic["num_context_frames"]), "real context frames before each imagined rollout", "setup", srcC, "4")
+    add("horizon", str(ic["imagination_horizon"]), "imagination horizon, steps", "setup", srcC, "15")
+    add("pmpoAlpha", f(ic["pmpo_alpha"], 1), "PMPO weight between positive and negative advantages", "setup", srcC, "0.5")
+    add("pmpoBeta", f(ic["pmpo_beta"], 1), "PMPO weight of the reverse KL to the frozen BC prior", "setup", srcC, "0.3")
+    add("discount", str(ic["gamma"]), "discount factor", "setup", srcC, "0.997")
+    add("lambdaRet", str(ic["lambda_"]), "lambda of the TD(lambda) returns", "setup", srcC, "0.95")
+    add("epochsPThree", str(ic["epochs"]), "imagination training epochs", "setup", srcC, "15")
+    add("stepsPThree", str(ic["epochs"] * ic["steps_per_epoch"]), "imagination training steps in total", "setup", srcC, "3000")
+    add("batchPThree", str(ic["batch_size"]), "imagination batch size", "setup", srcC, "48")
+    add("epochsPTwo", str(p2["epoch"]), "Phase 2 finetuning epochs", "setup", srcC, "40")
+    add("stepsPTwo", str(p2["global_step"]), "Phase 2 finetuning steps in total", "setup", srcC, "20000")
+    add("batchPTwo", arg(open(BK / f"phase2/seed{draws[0]}/provenance/run_phase2.sh").read(), "batch-size"), "Phase 2 batch size", "setup", "phase2/seed*/provenance/run_phase2.sh", "32")
+    add("batchPOne", arg(run1, "batch-size"), "Phase 1 batch size", "setup", "provenance_joint/run_phase1.sh", "48")
+    add("epochsPOne", "320", "Phase 1 epochs (checkpoint used: epoch 320 of a 600-epoch cosine schedule)", "setup", "CONSTANT: sheet BN / AV (both Phase 1 runs stopped at epoch 320)", "320")
+    add("cosineEpochsPOne", arg(run1, "epochs"), "length of the Phase 1 cosine learning rate schedule, epochs", "setup", "provenance_joint/run_phase1.sh", "600")
+    z = np.load(ROOT / "ball_in_cup_catch_aligned.npz", mmap_mode="r")
+    add("imgSize", str(z["frames"].shape[2]), "image side length, pixels", "setup", "ball_in_cup_catch_aligned.npz frames shape", "128")
+    add("episodeSteps", str(z["actions"].shape[1] - 1), "control steps per episode", "setup", "ball_in_cup_catch_aligned.npz actions shape", "500")
+    add("nTrainEps", str(z["frames"].shape[0] - 24), "training episodes (the other 24 are held out)", "setup", "OfflineDataset split: val_fraction 0.1, split_seed 0", "216")
+    add("nExpertDemos", "20", "expert episodes in the dataset", "setup", "CONSTANT: dataset README / sheet BJ", "20")
+    add("nNoisyDemos", "220", "episodes from noise-injected rollouts", "setup", "CONSTANT: dataset README / sheet BJ", "220")
+    add("stopThreshold", "2", "stopping rule: extend training if epoch 15 beats epoch 10 by more than this many points", "C3", "CONSTANT: sheet BR addendum (stop rule)", "2")
+
     # ───────────── constants from wandb training logs (NOT regenerated; sheet BK / BO) ─────────────
     add("bootArtifactMedian", "838", "OLD Phase 1: median raw bootstrap loss, steps 4,500-17,000 (wandb)", "C7", "CONSTANT: sheet BK", "838")
     add("bootArtifactEnd", "288{,}600", "OLD Phase 1: raw bootstrap loss at the end of training (wandb)", "C7", "CONSTANT: sheet BO", "288{,}600")
