@@ -383,6 +383,7 @@ def main():
     # ───────────── constants from wandb training logs (NOT regenerated; sheet BK / BO) ─────────────
     add("bootArtifactMedian", "838", "OLD Phase 1: median raw bootstrap loss, steps 4,500-17,000 (wandb)", "C7", "CONSTANT: sheet BK", "838")
     add("bootArtifactEnd", "288{,}600", "OLD Phase 1: raw bootstrap loss at the end of training (wandb)", "C7", "CONSTANT: sheet BO", "288{,}600")
+    add("dreamerMouseClasses", "121", "Dreamer 4 (Minecraft): classes of the joint categorical for mouse movement (11 x 11)", "setup", "CONSTANT: Dreamer 4 paper text, 'mouse actions as a categorical with 121 classes'", "121")
     add("bootSignal", "0.0004", "genuine raw bootstrap loss once the artifact is removed (wandb)", "C7", "CONSTANT: sheet BK", "0.0004")
 
     # ───────────── write ─────────────
