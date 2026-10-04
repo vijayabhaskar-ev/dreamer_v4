@@ -380,6 +380,7 @@ def main():
     add("nMixedSmallDemos", "20", "episodes in the dataset's mixed-small split", "setup", "CONSTANT: dataset README / sheet BJ", "20")
     add("nMixedLargeDemos", "200", "episodes in the dataset's mixed-large split", "setup", "CONSTANT: dataset README / sheet BJ", "200")
     add("nNoisyDemos", "220", "episodes from noise-injected rollouts", "setup", "CONSTANT: dataset README / sheet BJ", "220")
+    add("epochEarly", "10", "the earlier checkpoint compared with the final epoch in the training-length check", "C3", "CONSTANT: checkpoints saved at epochs 5, 10, 15; sheet BR addendum", "10")
     add("stopThreshold", "2", "stopping rule: extend training if epoch 15 beats epoch 10 by more than this many points", "C3", "CONSTANT: sheet BR addendum (stop rule)", "2")
 
     # ───────────── constants from wandb training logs (NOT regenerated; sheet BK / BO) ─────────────
