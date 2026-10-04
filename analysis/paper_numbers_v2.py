@@ -377,6 +377,8 @@ def main():
     add("episodeSteps", str(z["actions"].shape[1] - 1), "control steps per episode", "setup", "ball_in_cup_catch_aligned.npz actions shape", "500")
     add("nTrainEps", str(z["frames"].shape[0] - 24), "training episodes (the other 24 are held out)", "setup", "OfflineDataset split: val_fraction 0.1, split_seed 0", "216")
     add("nExpertDemos", "20", "expert episodes in the dataset", "setup", "CONSTANT: dataset README / sheet BJ", "20")
+    add("nMixedSmallDemos", "20", "episodes in the dataset's mixed-small split", "setup", "CONSTANT: dataset README / sheet BJ", "20")
+    add("nMixedLargeDemos", "200", "episodes in the dataset's mixed-large split", "setup", "CONSTANT: dataset README / sheet BJ", "200")
     add("nNoisyDemos", "220", "episodes from noise-injected rollouts", "setup", "CONSTANT: dataset README / sheet BJ", "220")
     add("stopThreshold", "2", "stopping rule: extend training if epoch 15 beats epoch 10 by more than this many points", "C3", "CONSTANT: sheet BR addendum (stop rule)", "2")
 
