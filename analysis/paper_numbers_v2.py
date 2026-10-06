@@ -84,6 +84,8 @@ def parse_timing(path):
             continue
         if m := re.search(r"STALE \(previous row\)\s+([+-][0-9.]+)% vs correct\s+\(episode-clustered z = ([+-][0-9.]+)\)", line):
             cur["late"], cur["z"] = float(m.group(1)), float(m.group(2))
+        if m := re.search(r"shuffled\s+([+-][0-9.]+)% vs correct", line):
+            cur["shuf"] = float(m.group(1))
         if m := re.search(r"lowest error at k=([+-]?\d+)", line):
             cur["argmin"] = int(m.group(1))
     return rows
@@ -261,6 +263,12 @@ def main():
     add("timingOldDrawsMin", f(min(late)), "4 OLD Phase-2 draws, both setups: change with late actions, most negative, %", "C6", "old_draw_forensics/timing_tests.log", "-3.3")
     add("timingOldDrawsMax", f(max(late)), "... least negative, %", "C6", "old_draw_forensics/timing_tests.log", "-1.0")
     add("timingOldDrawsLate", str(sum(r["argmin"] == -1 for r in od)), "old-draw setups (of 8) with lowest error at LATE timing", "C6", "old_draw_forensics/timing_tests.log", "8")
+    # C8: the same 4 old draws still react strongly to shuffled actions, so a shuffle probe passes on models that read actions late
+    shuf = lambda c: [r["shuf"] for r in od if r["cond"] == c]
+    add("shuffleOldDrawsAmin", f(min(shuf("A")), 0), "4 OLD Phase-2 draws, training-style: error increase with shuffled vs correctly timed actions, smallest, %", "C8", "old_draw_forensics/timing_tests.log", "22")
+    add("shuffleOldDrawsAmax", f(max(shuf("A")), 0), "... largest, %", "C8", "old_draw_forensics/timing_tests.log", "52")
+    add("shuffleOldDrawsBmin", f(min(shuf("B")), 0), "4 OLD Phase-2 draws, pure-noise setup: error increase with shuffled actions, smallest, %", "C8", "old_draw_forensics/timing_tests.log", "52")
+    add("shuffleOldDrawsBmax", f(max(shuf("B")), 0), "... largest, %", "C8", "old_draw_forensics/timing_tests.log", "92")
     e40 = parse_timing(BK / "eval_held_out/timing_control_OLD_e040.log")
     add("timingOldEarlyA", f(g(e40, "A")["late"]), "OLD Phase-1 epoch 40, training-style: change with late actions, %", "C6", "eval_held_out/timing_control_OLD_e040.log", "-11.5")
     add("nHeldOut", "24", "held-out episodes behind every world-model test", "C6", "OfflineDataset split=val", "24")
