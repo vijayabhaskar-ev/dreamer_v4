@@ -355,6 +355,9 @@ def main():
         lag1 = [np.corrcoef(act[:, :-1, k].ravel(), act[:, 1:, k].ravel())[0, 1] for k in range(act.shape[-1])]
         add("lateCorrMin", f(min(lag1), 2), "correlation of each stored action with the next one in its episode (a one-step-late action vs the correct one), smaller of the two action dimensions", "C8", "ball_in_cup_catch.npz actions, rows 1-500", "0.47")
         add("lateCorrMax", f(max(lag1), 2), "... larger of the two", "C8", "ball_in_cup_catch.npz actions, rows 1-500", "0.49")
+        # C9: a model-free tell of the file's convention: nothing 'led to' frame 0, so a 'led to' file has an empty row 0
+        row0 = np.asarray(np.load(npz, mmap_mode="r")["actions"][:, 0], float)
+        add("nRowZero", str(int((row0 == 0).all(axis=1).sum())), "episodes whose action row 0 is exactly zero in the original file (model-free tell of the 'led to' convention)", "C9", "ball_in_cup_catch.npz actions, row 0", "240")
     else:
         print("WARNING: ball_in_cup_catch.npz not found -> demoCatch / nDemos not generated")
 
