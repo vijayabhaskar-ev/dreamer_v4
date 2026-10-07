@@ -290,6 +290,7 @@ def main():
     add("errOldReleased", f(summ("OLD_e320")["overall_latent_mse"], 4), "OLD released (epoch 320): held-out 1-step error, all step sizes", "C7", "evaldyn_OLD_e320/summary.json", "0.5261")
     add("errOldEarly", f(summ("OLD_e040")["overall_latent_mse"], 4), "OLD epoch 40: held-out 1-step error", "C7", "evaldyn_OLD_e040/summary.json", "0.0143")
     add("errNew", f(summ("JOINT_e320")["overall_latent_mse"], 4), "corrected (epoch 320): held-out 1-step error", "C7", "evaldyn_JOINT_e320/summary.json", "0.0096")
+    add("errOldOverNew", f(summ("OLD_e320")["overall_latent_mse"] / summ("JOINT_e320")["overall_latent_mse"], 0), "OLD released error as a multiple of the corrected error (same evaluator, same held-out episodes): the absolute anchor the old train-vs-held-out check lacked", "C8", "evaldyn_OLD_e320 + evaldyn_JOINT_e320 summary.json", "55")
     add("rollOldReleased", f(summ("OLD_e320")["rollout_overall_mse"], 4), "OLD released: 4-step rollout error", "C7", "evaldyn_OLD_e320/summary.json", "0.5678")
     txt = open(BK / "eval_held_out/final_checks.out").read()
     add("rollPairedOld", re.search(r"OLD  e040:.*average ([0-9.]+)", txt).group(1), "paired 4-step rollout error, OLD epoch 40 (1,280 shared windows)", "C7", "eval_held_out/final_checks.out", "0.0303")
@@ -349,6 +350,11 @@ def main():
         rew = np.asarray(np.load(npz, mmap_mode="r")["rewards"], float)
         add("demoCatch", f(100 * (rew.sum(axis=1) > 0).mean()), "share of the demonstration episodes that catch, % (unpaired)", "C1", "ball_in_cup_catch.npz rewards", "84.2")
         add("nDemos", str(rew.shape[0]), "demonstration episodes", "C1", "ball_in_cup_catch.npz", "240")
+        # C8: why the shuffle probe passes with late actions: consecutive stored actions are correlated (row 0 is padding)
+        act = np.asarray(np.load(npz, mmap_mode="r")["actions"], float)[:, 1:]
+        lag1 = [np.corrcoef(act[:, :-1, k].ravel(), act[:, 1:, k].ravel())[0, 1] for k in range(act.shape[-1])]
+        add("lateCorrMin", f(min(lag1), 2), "correlation of each stored action with the next one in its episode (a one-step-late action vs the correct one), smaller of the two action dimensions", "C8", "ball_in_cup_catch.npz actions, rows 1-500", "0.47")
+        add("lateCorrMax", f(max(lag1), 2), "... larger of the two", "C8", "ball_in_cup_catch.npz actions, rows 1-500", "0.49")
     else:
         print("WARNING: ball_in_cup_catch.npz not found -> demoCatch / nDemos not generated")
 
