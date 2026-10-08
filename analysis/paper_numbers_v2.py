@@ -302,6 +302,11 @@ def main():
     add("tdOldSmall", f(to_[dsm], 4), "... at the smallest step 1/64", "C9", srcTD, "0.0037")
     add("tdNewMin", f(min(tn_.values()), 4), "corrected: error at signal level 0.6-0.8, all step sizes present, smallest", "C9", srcTD, "0.0039")
     add("tdNewMax", f(max(tn_.values()), 4), "... largest", "C9", srcTD, "0.0049")
+    add("tdTauLo", "0.6", "lower edge of the signal-level bin used for the td* macros", "C9", srcTD, "0.6")
+    add("tdTauHi", "0.8", "upper edge of that bin", "C9", srcTD, "0.8")
+    tmods = {r["model"] for r in csv.DictReader(open(BK / "timing_new_draws/timing_summary.csv"))}
+    add("nTimingModels", str(len(tmods)), "models in the 2026-09-29 timing run (8 new Phase 2 draws + old Phase 1 epoch 320)", "C9", "timing_new_draws/timing_summary.csv", "9")
+    add("timingMinutes", "14", "wall time of that run on a laptop GPU, minutes", "C9", "CONSTANT: sheet CA, run 03:23:03-03:36:50Z", "14")
     add("errOldOverNew", f(summ("OLD_e320")["overall_latent_mse"] / summ("JOINT_e320")["overall_latent_mse"], 0), "OLD released error as a multiple of the corrected error (same evaluator, same held-out episodes): the absolute anchor the old train-vs-held-out check lacked", "C8", "evaldyn_OLD_e320 + evaldyn_JOINT_e320 summary.json", "55")
     add("rollOldReleased", f(summ("OLD_e320")["rollout_overall_mse"], 4), "OLD released: 4-step rollout error", "C7", "evaldyn_OLD_e320/summary.json", "0.5678")
     txt = open(BK / "eval_held_out/final_checks.out").read()
