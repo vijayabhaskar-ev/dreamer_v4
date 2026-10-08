@@ -290,6 +290,18 @@ def main():
     add("errOldReleased", f(summ("OLD_e320")["overall_latent_mse"], 4), "OLD released (epoch 320): held-out 1-step error, all step sizes", "C7", "evaldyn_OLD_e320/summary.json", "0.5261")
     add("errOldEarly", f(summ("OLD_e040")["overall_latent_mse"], 4), "OLD epoch 40: held-out 1-step error", "C7", "evaldyn_OLD_e040/summary.json", "0.0143")
     add("errNew", f(summ("JOINT_e320")["overall_latent_mse"], 4), "corrected (epoch 320): held-out 1-step error", "C7", "evaldyn_JOINT_e320/summary.json", "0.0096")
+    # C9: error by step size x signal level at tau 0.6-0.8. Frame 0 is pinned at tau = 0.9 (evaluate_dynamics.py:489),
+    # so these cells hold no frame-0 entries; the tau 0.8-1.0 cells for d >= 1/4 hold ONLY frame 0.
+    def tdcell(tag):
+        rows = csv.DictReader(open(BK / f"eval_held_out/evaldyn_{tag}/tau_d_joint_metrics.csv"))
+        return {float(r["d_value"]): float(r["latent_mse"]) for r in rows if abs(float(r["tau_start"]) - 0.6) < 1e-6 and int(r["count"]) > 0}
+    to_, tn_ = tdcell("OLD_e320"), tdcell("JOINT_e320")
+    dsm = min(to_); srcTD = "eval_held_out/evaldyn_{OLD,JOINT}_e320/tau_d_joint_metrics.csv"
+    add("tdOldShortMin", f(min(v for d, v in to_.items() if d != dsm), 2), "OLD released: error at signal level 0.6-0.8 (no frame-0 entries), shortcut steps, smallest", "C9", srcTD, "0.49")
+    add("tdOldShortMax", f(max(v for d, v in to_.items() if d != dsm), 2), "... largest", "C9", srcTD, "0.57")
+    add("tdOldSmall", f(to_[dsm], 4), "... at the smallest step 1/64", "C9", srcTD, "0.0037")
+    add("tdNewMin", f(min(tn_.values()), 4), "corrected: error at signal level 0.6-0.8, all step sizes present, smallest", "C9", srcTD, "0.0039")
+    add("tdNewMax", f(max(tn_.values()), 4), "... largest", "C9", srcTD, "0.0049")
     add("errOldOverNew", f(summ("OLD_e320")["overall_latent_mse"] / summ("JOINT_e320")["overall_latent_mse"], 0), "OLD released error as a multiple of the corrected error (same evaluator, same held-out episodes): the absolute anchor the old train-vs-held-out check lacked", "C8", "evaldyn_OLD_e320 + evaldyn_JOINT_e320 summary.json", "55")
     add("rollOldReleased", f(summ("OLD_e320")["rollout_overall_mse"], 4), "OLD released: 4-step rollout error", "C7", "evaldyn_OLD_e320/summary.json", "0.5678")
     txt = open(BK / "eval_held_out/final_checks.out").read()
