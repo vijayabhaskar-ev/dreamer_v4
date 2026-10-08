@@ -237,6 +237,10 @@ def main():
     add("missedOldHealthy", str(sm("hea", "missed")), "never-caught games, OLD healthy runs", "C5", src5b, "530")
     add("maxBeliefMissedNew", f(max(float(r["max_belief_missed"]) for r in grp["new"]), 0), "highest predicted return on a never-caught game, new runs", "C5", src5b, "46")
     add("maxBeliefMissedOld", f(max(float(r["max_belief_missed"]) for r in grp["col"]), 0), "... OLD collapsing draw", "C5", src5b)
+    import re as _re
+    thr = _re.search(r"^THRESH\s*=\s*([0-9.]+)", (P3 / "analysis/scripts/perstep_metrics.py").read_text(), _re.M).group(1)
+    add("mirageThreshold", f(float(thr), 0), "predicted return above which a never-caught game counts as a mirage", "C5", "phase3/analysis/scripts/perstep_metrics.py THRESH", "100")
+    add("nPerstepBoards", str(int(grp["new"][0]["games"])), "boards per run in the per-game reward analysis (boards 0-99)", "C5", src5b, "100")
     add("phantomChildMed", f(np.median(ph("new")), 3), "phantom reward per zero-reward step, new children, median", "C5", src5b, "0.030")
     add("phantomParentMed", f(np.median(ph("par")), 3), "... new BC parents, median", "C5", src5b, "0.011")
     add("phantomOldMin", f(ph("col").min(), 3), "... OLD collapsing draw, smaller", "C5", src5b, "0.196")
