@@ -363,6 +363,15 @@ def main():
     add("imagArgmax", f(np.median(col("p3_argmax"))), "imagination children (seed 1), argmax readout, median catch %", "C12", srcR, "26.5")
     add("imagMeanReadout", f(np.median(col("p3_mean"))), "imagination children, mean readout, median catch %", "C12", srcR, "31.6")
     add("imagSampledSeedOne", f(np.median(col("p3_sampled"))), "the same 8 children with sampled actions, median catch %", "C12", srcR, "84.2")
+    # ───────────── C14: reproducibility (constants from the sheet: BU cross-GPU check, CC launch inventory) ─────────────
+    srcG = "CONSTANT: sheet BU cross-GPU check (draw 13 seed 1 evaluated on a 4090 and an A4500)"
+    add("gpuDivergedBoards", "11", "boards (of 500) whose trajectory diverged between the two GPU families on the one re-evaluated run", "C14", srcG, "11")
+    add("gpuCatchFlips", "1", "catch outcomes that flipped on that run (453 vs 452 catches)", "C14", srcG, "1")
+    add("gpuWorstCase", f(100 * 11 / 500), "worst case if every diverged board flipped one way, points", "C14", srcG, "2.2")
+    add("nAmpereRuns", "12", "imagination policies (draws 10, 13, 14, 17) evaluated on the Ampere family; all BC parents on Ada/Blackwell", "C14", srcG, "12")
+    add("nLaunchesPThree", "27", "wandb launches behind the 24 imagination results (3 aborted and relaunched with the same seeds)", "C14", "CONSTANT: sheet CC", "27")
+    add("nAbortedPThree", "3", "aborted imagination launches (one killed on a slow pod, two failed on a corrupted tokenizer file)", "C14", "CONSTANT: sheet CC", "3")
+    add("nLaunchesPTwo", "10", "wandb launches behind the 8 Phase 2 draws (2 aborted)", "C14", "CONSTANT: sheet CC", "10")
     add("nReadoutEvals", str(det.size), "deterministic evaluations (16 policies x 2 readouts)", "C12", srcR, "32")
 
     # ───────────── demonstrations ─────────────
