@@ -1,3 +1,4 @@
+import os
 """Controlled test: which stored action index drives the cup's acceleration around frame t?
 acc(t) = p(t+1) - 2p(t) + p(t-1) is caused by the forces applied during [t-1,t) and [t,t+1).
   convention A (action[t] applied AT frame t)      -> those forces are stored at k = -1 and k = 0
@@ -78,7 +79,7 @@ analyse("CONTROL, stored as convention A (action[t] applied at frame t) -- what 
 analyse("CONTROL, same episodes deliberately stored as convention B (action[t] led TO frame t)", ctrl_B)
 
 # ---------- Hansen's demos as converted (ball_in_cup_catch.npz) ----------
-path = "/home/vijay/Documents/Projects/dreamer_v4/ball_in_cup_catch.npz"
+path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ball_in_cup_catch.npz")  # repo root
 zf = zipfile.ZipFile(path); info = zf.getinfo("frames.npy")
 with open(path, "rb") as f:
     f.seek(info.header_offset); lh = f.read(30)
