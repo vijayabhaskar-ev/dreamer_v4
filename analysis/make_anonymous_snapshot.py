@@ -15,7 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "release" / "code_anonymous.zip"
-DROP = ["CITATION.cff", "README.md", "assets/", "analysis/render_hero.py", "analysis/paper_lint_v2.py"]
+DROP = ["CITATION.cff", "README.md", "assets/", "analysis/render_hero.py", "analysis/paper_lint_v2.py",
+        "analysis/make_anonymous_snapshot.py"]   # this script carries the identity list it scans for
 HOME_PREFIX = "/home/vijay/Documents/Projects/dreamer_v4_phase1_aligned_backup/"
 IDENTITY = ["vijay", "eswaran", "outlook.com", "gmail.com", "github.com/", "huggingface.co", "hf.co/", "jarvis", "/home/", "wandb.ai/"]
 ALLOWED = ["github.com/nicklashansen/dreamer4"]    # the public dataset source, not the authors
