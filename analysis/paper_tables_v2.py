@@ -83,7 +83,7 @@ for i, d in enumerate(draws):
     if d == int(macros["looLowDraw"]):
         check("looWithoutLow", f(v["sb"], 2))
 t2 = rf"""% Leave-one-draw-out table. Written by analysis/paper_tables_v2.py; checked against numbers.tex.
-\begin{{table}}[t]
+\begin{{table}}[H]
 \centering
 \small
 \caption{{Leave-one-draw-out: the mean gain over the remaining {len(draws) - 1} draws (95\% $t$ interval) and the between-draw and within-draw standard deviations (one-way random effects), with each draw left out in turn. With all \nDraws draws: mean \gainMeanExact\ [\gainLoExact, \gainHiExact], between-draw sd \sdBetween, within-draw sd \sdWithin.}}
@@ -120,7 +120,7 @@ assert len(checks) == int(macros["nChecks"])
 crow = [" & ".join(c) + r" \\" for c in checks]
 t3 = rf"""% The v1 verification table with two added columns. Written by analysis/paper_tables_v2.py.
 % Columns 1-3 copied from old/main_v1.tex (tag v1-old-pipeline). TODO(author): review the two right-hand columns.
-\begin{{table}}[t]
+\begin{{table}}[H]
 \centering
 \scriptsize
 \caption{{The \nChecks checks that passed with both defects present, and why neither defect was visible to them. A further check, the world model's error on training against held-out episodes (\wmTrain against \wmHeldOut), was relative and had no reference for the absolute error.}}
@@ -156,7 +156,7 @@ dev = [
 ]
 drow = [" & ".join(r) + r" \\" for r in dev]
 t4 = rf"""% Deviations from Dreamer 4. Written by analysis/paper_tables_v2.py; transcribed from DEVIATIONS.md Table 1. TODO(author): review.
-\begin{{table}}[t]
+\begin{{table}}[H]
 \centering
 \scriptsize
 \caption{{Where the corrected pipeline still differs from Dreamer 4 \citep{{hafner2025dreamer4}}, and whether the difference could hide a silent defect.}}
@@ -181,7 +181,7 @@ inv = [
 ]
 irow = [" & ".join(r) + r" \\" for r in inv]
 t5 = rf"""% Run inventory. Written by analysis/paper_tables_v2.py from the launch records. No run identifiers (anonymity).
-\begin{{table}}[t]
+\begin{{table}}[H]
 \centering
 \small
 \caption{{Training launches behind the reported results, and the GPU family used to evaluate each policy. Evaluations are identical bit for bit within a GPU family (\Cref{{sec:limitations}}).}}
