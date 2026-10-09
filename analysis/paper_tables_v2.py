@@ -136,3 +136,64 @@ component & check & result & could it see defect 1 (action timing)? & could it s
 """
 (GEN / "table_checks.tex").write_text(t3)
 print("wrote table_results.tex, table_loo.tex, table_checks.tex; all cells match numbers.tex")
+
+# ---------------- appendix: deviations from Dreamer 4 (transcribed from paper/DEVIATIONS.md Table 1) ----------------
+# TODO(author): review every row; wording is a paper-safe transcription (no file paths, sheet codes or hashes).
+dev = [
+    ("bootstrap curriculum", "none; shortcut models train without schedules", "Phase 1 starts flow only for 2k steps and ramps the bootstrap loss in over the next 2k; off in Phase 2", "low under one normalizer"),
+    ("context corruption at training time", "past inputs are corrupted at inference only", "frame 0 of every training window is kept at signal level 0.9", "yes; with separate normalizers it caused defect 2"),
+    ("frame 0 step size", "no special case", "frame 0 always gets the smallest step size, 1/64", "a patch for the row above"),
+    ("attention soft cap", "on", "off; the latent rank collapsed with it on", "medium"),
+    ("tokenizer loss", "MSE plus 0.2 LPIPS, normalized; mask ratio drawn per image, including no mask", "MSE on masked patches only; LPIPS on a composite image; no normalization; one mask ratio per clip", "the unmasked case gives zero loss"),
+    ("tokenizer encoding context", "frame by frame", "training encodes 8 or 32 frames jointly; deployment encodes single frames", "latent codes depend on the slot position"),
+    ("policy head and readout", "categorical or binary, readout unspecified", "41 bins per action dimension; actions sampled at evaluation", "deterministic readouts collapse (Discussion)"),
+    ("Phase 2 data and learning rates", "half uniform, half task relevant; BC on the relevant half", "uniform windows over all 216 training episodes; BC on all of them; world model at 0.3 times the learning rate, heads at 3 times", "clones failed episodes"),
+    ("first imagined transition", "action from the policy", "the first imagined step gets a zero action", "every rollout starts with a step the policy did not choose"),
+    ("signal level when the agent state is read", "unspecified", "imagination reads at 0.75 with step size 1/4; deployment at 0.9 with step size 1/64", "the policy is deployed on a differently noised state; untested"),
+    ("RL targets", "continue flag marks non terminal steps; bootstrap from the last value", "done is set only on the last row of each episode; bootstrap from the value of the last imagined state", "the time limit is treated as terminal"),
+    ("scale", "20 tasks, 400M and 1.6B parameters, pretraining stages", "one task, 74.9M and 47.8M parameters, no pretraining stages", "external validity only"),
+    ("data split", "90/10", "216 training and 24 held out episodes of 240; the tokenizer saw the 24 held out episodes during its first 350 epochs", "world model tests on held out episodes are clean for the dynamics model only"),
+]
+drow = [" & ".join(r) + r" \\" for r in dev]
+t4 = rf"""% Deviations from Dreamer 4. Written by analysis/paper_tables_v2.py; transcribed from DEVIATIONS.md Table 1. TODO(author): review.
+\begin{{table}}[t]
+\centering
+\scriptsize
+\caption{{Where the corrected pipeline still differs from Dreamer 4 \citep{{hafner2025dreamer4}}, and whether the difference could hide a silent defect.}}
+\label{{tab:deviations}}
+\begin{{tabular}}{{@{{}}L{{2.6cm}}L{{3.4cm}}L{{5.2cm}}L{{3.2cm}}@{{}}}}
+\toprule
+component & Dreamer 4 & this paper & could it hide a defect? \\
+\midrule
+{chr(10).join(drow)}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+"""
+(GEN / "table_deviations.tex").write_text(t4)
+
+# ---------------- appendix: run inventory (sheet CC, BU; DEVIATIONS.md Table 2) ----------------
+inv = [
+    ("Phase 1, corrected", "2", "1", "the first attempt kept the two separate normalizers and collapsed; discarded", "--"),
+    ("Phase 2", r"\nLaunchesPTwo", r"\nDraws", "2 aborted", "--"),
+    ("Phase 3", r"\nLaunchesPThree", r"\nRuns", r"\nAbortedPThree aborted (one slow pod stopped on purpose; two failed on a corrupted tokenizer file) and relaunched with the same seeds", "draws 11, 12, 15, 16 on Ada or Blackwell; draws 10, 13, 14, 17 on Ampere"),
+    ("BC parents, evaluation", "--", r"\nDraws", "--", "Ada or Blackwell"),
+]
+irow = [" & ".join(r) + r" \\" for r in inv]
+t5 = rf"""% Run inventory. Written by analysis/paper_tables_v2.py from the launch records. No run identifiers (anonymity).
+\begin{{table}}[t]
+\centering
+\small
+\caption{{Training launches behind the reported results, and the GPU family used to evaluate each policy. Evaluations are identical bit for bit within a GPU family (\Cref{{sec:limitations}}).}}
+\label{{tab:runs}}
+\begin{{tabular}}{{@{{}}L{{3.0cm}}cL{{1.2cm}}L{{5.0cm}}L{{3.6cm}}@{{}}}}
+\toprule
+stage & launches & results & aborted or discarded & evaluation GPU family \\
+\midrule
+{chr(10).join(irow)}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+"""
+(GEN / "table_runs.tex").write_text(t5)
+print("wrote table_deviations.tex, table_runs.tex")
