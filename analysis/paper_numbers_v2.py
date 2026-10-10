@@ -158,6 +158,13 @@ def main():
     others = [loo[d]["sb"] for d in draws if d != low_d]
     add("looLowDraw", str(low_d), "the draw with the smallest mean gain", "C2", src, "10")
     add("looWithoutLow", f(loo[low_d]["sb"], 2), "between-draw sd with that draw left out", "C2", src, "3.33")
+    # secondary (sheet BU): each parent is scored once and shared by its 3 seeds, so the observed spread of the 8 parent rates
+    # (points^2) sits inside the between-draw component; subtracting it gives the parent-noise-corrected between-draw sd
+    pr = 100 * bc_rate; vp = pr.var(ddof=1)
+    i_low = draws.index(low_d); vp_loo = np.delete(pr, i_low).var(ddof=1)
+    add("parentSdPts", f(math.sqrt(vp), 2), "observed sd of the 8 BC parent catch rates, points", "C2", src, "1.77")
+    add("sdBetweenCorr", f(math.sqrt(max(v["sb"] ** 2 - vp, 0)), 1), "between-draw sd after subtracting the parents' observed variance (secondary)", "C2", src, "5.4")
+    add("looWithoutLowCorr", f(math.sqrt(max(loo[low_d]["sb"] ** 2 - vp_loo, 0)), 1), "... with the lowest draw left out (secondary)", "C2", src, "2.8")
     add("looOtherMin", f(min(others), 2), "between-draw sd leaving out any other draw, smallest", "C2", src, "5.50")
     add("looOtherMax", f(max(others), 2), "... largest", "C2", src, "6.17")
     binom = np.mean(p3_rate * (1 - p3_rate) / 500) * 1e4
@@ -259,6 +266,7 @@ def main():
     add("timingNewDrawsAmax", f(max(rng_(nd, "A", "km1_pct")), 0), "... largest", "C6", srcT, "66")
     add("timingNewDrawsBmin", f(min(rng_(nd, "B", "km1_pct")), 0), "8 new draws, pure-noise setup: late-action penalty, smallest, %", "C6", srcT, "177")
     add("timingNewDrawsBmax", f(max(rng_(nd, "B", "km1_pct")), 0), "... largest", "C6", srcT, "181")
+    add("timingNewDrawsZmin", f(min(float(r["km1_z"]) for r in nd)), "8 new Phase-2 draws, both setups: episode-clustered z of late vs correct, smallest", "C6", srcT, "10.6")
     add("timingNewDrawsCorrect", str(sum(int(r["argmin_k"]) == 0 for r in nd)), "new-draw setups (of 16) with lowest error at correct timing", "C6", srcT, "16")
     add("timingOldReleasedA", f(rng_(oe, "A", "km1_pct")[0]), "OLD released Phase-1 (epoch 320), training-style: change with late actions, %", "C6", srcT, "-1.8")
     add("timingOldReleasedB", f(rng_(oe, "B", "km1_pct")[0]), "... pure-noise setup, %", "C6", srcT, "-20.7")
@@ -270,6 +278,8 @@ def main():
     late = [r["late"] for r in od]
     add("timingOldDrawsMin", f(min(late)), "4 OLD Phase-2 draws, both setups: change with late actions, most negative, %", "C6", "old_draw_forensics/timing_tests.log", "-3.3")
     add("timingOldDrawsMax", f(max(late)), "... least negative, %", "C6", "old_draw_forensics/timing_tests.log", "-1.0")
+    add("timingOldDrawsZnear", f(max(r["z"] for r in od)), "4 OLD Phase-2 draws, both setups: episode-clustered z of late vs correct, closest to zero", "C6", "old_draw_forensics/timing_tests.log", "-3.0")
+    add("timingOldDrawsZfar", f(min(r["z"] for r in od)), "... farthest from zero", "C6", "old_draw_forensics/timing_tests.log", "-8.6")
     add("timingOldDrawsLate", str(sum(r["argmin"] == -1 for r in od)), "old-draw setups (of 8) with lowest error at LATE timing", "C6", "old_draw_forensics/timing_tests.log", "8")
     # C8: the same 4 old draws still react strongly to shuffled actions, so a shuffle probe passes on models that read actions late
     shuf = lambda c: [r["shuf"] for r in od if r["cond"] == c]
@@ -376,6 +386,22 @@ def main():
     add("nLaunchesPThree", "27", "wandb launches behind the 24 imagination results (3 aborted and relaunched with the same seeds)", "C14", "CONSTANT: sheet CC", "27")
     add("nAbortedPThree", "3", "aborted imagination launches (one killed on a slow pod, two failed on a corrupted tokenizer file)", "C14", "CONSTANT: sheet CC", "3")
     add("nLaunchesPTwo", "10", "wandb launches behind the 8 Phase 2 draws (2 aborted)", "C14", "CONSTANT: sheet CC", "10")
+    sj = json.load(open(ROOT / "evaluation/tmlr-aligned-bc-seed10-n500/summary.json"))
+    def find_key(o, key):
+        if isinstance(o, dict):
+            if key in o: return o[key]
+            for v in o.values():
+                r = find_key(v, key)
+                if r is not None: return r
+        return None
+    ar = int(find_key(sj, "action_repeat")); mj = str(find_key(sj, "mujoco_version"))
+    srcE = "evaluation/tmlr-aligned-bc-seed10-n500/summary.json (same for every evaluation)"
+    add("actionRepeat", str(ar), "action repeat in the simulator", "setup", srcE, "2")
+    add("simStepsPerGame", str(ar * 500), "simulator steps per game (decisions x action repeat)", "setup", srcE, "1000")
+    add("returnMax", str(ar * 500), "largest possible return (reward 1 per simulator step in the cup)", "setup", srcE, "1000")
+    add("mujocoVersion", mj, "MuJoCo version recorded by the evaluator", "setup", srcE, "3.3.7")
+    nb = re.search(r"for _ in range\((\d+)\)", (P3 / "analysis/scripts/imagined_vs_real.py").read_text()).group(1)
+    add("bootReplicates", f"{int(nb):,}".replace(",", "{,}"), "replicates of the draw-then-seed bootstrap", "C10", "phase3/analysis/scripts/imagined_vs_real.py", "20{,}000")
     add("nReadoutEvals", str(det.size), "deterministic evaluations (16 policies x 2 readouts)", "C12", srcR, "32")
 
     # ───────────── demonstrations ─────────────
