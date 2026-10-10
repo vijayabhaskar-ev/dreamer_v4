@@ -164,6 +164,10 @@ def main():
     i_low = draws.index(low_d); vp_loo = np.delete(pr, i_low).var(ddof=1)
     add("parentSdPts", f(math.sqrt(vp), 2), "observed sd of the 8 BC parent catch rates, points", "C2", src, "1.77")
     add("sdBetweenCorr", f(math.sqrt(max(v["sb"] ** 2 - vp, 0)), 1), "between-draw sd after subtracting the parents' observed variance (secondary)", "C2", src, "5.4")
+    vb = np.mean(bc_rate * (1 - bc_rate) / 500) * 1e4; vb_loo = np.mean(np.delete(bc_rate, i_low) * (1 - np.delete(bc_rate, i_low)) / 500) * 1e4
+    add("parentBinomSdPts", f(math.sqrt(vb), 2), "binomial sd of one parent's 500 game catch rate at the observed rates, points", "C2", src, "2.23")
+    add("sdBetweenCorrBinom", f(math.sqrt(max(v["sb"] ** 2 - vb, 0)), 1), "between-draw sd after subtracting the parents' binomial variance (secondary)", "C2", src, "5.2")
+    add("looWithoutLowCorrBinom", f(math.sqrt(max(loo[low_d]["sb"] ** 2 - vb_loo, 0)), 1), "... with the lowest draw left out (secondary)", "C2", src, "2.5")
     add("looWithoutLowCorr", f(math.sqrt(max(loo[low_d]["sb"] ** 2 - vp_loo, 0)), 1), "... with the lowest draw left out (secondary)", "C2", src, "2.8")
     add("looOtherMin", f(min(others), 2), "between-draw sd leaving out any other draw, smallest", "C2", src, "5.50")
     add("looOtherMax", f(max(others), 2), "... largest", "C2", src, "6.17")
@@ -179,9 +183,16 @@ def main():
     src3 = "phase3/draw*/evaluation/*-seed1[-e10]-n500/summary.json"
     add("stopDiff", f(m3, 2), "catch rate at epoch 15 minus epoch 10, points (8 draws, seed 1)", "C3", src3, "-0.15")
     add("stopLo", f(lo3, 2), "95% CI lower", "C3", src3, "-1.94")
+    add("stopHalfWidth", f((hi3 - lo3) / 2, 2), "half width of the epoch 10 vs 15 paired t interval, points", "C3", src3, "1.79")
     add("stopHi", f(hi3, 2), "95% CI upper", "C3", src3, "1.64")
     cur = list(csv.DictReader(open(P3 / "analysis/p3_wandb_curves.csv")))
     last = np.array([float(r["imagined_return_last500"]) for r in cur]); prev = np.array([float(r["imagined_return_prev500"]) for r in cur])
+    add("riseWindow", "500", "training steps in each window of the imagined return comparison", "C3", "phase3/analysis/p3_wandb_curves.csv (last500 vs prev500 columns)", "500")
+    sc = json.load(open(BK / "phase2/eval_stop_criterion/summary.json"))
+    dd = sc["bc0_clean_delta_32_40_seedlevel"]; v40 = sc["bc0_clean_e40_val_mean"]
+    add("bcNllDropPct", f(100 * abs(dd["mean"]) / v40, 2), "held out BC loss change from epoch 32 to 40 as % of its value (Phase 2 stop check)", "C3", "phase2/eval_stop_criterion/summary.json", "0.07")
+    add("nStopDraws", str(dd["n_seeds"]), "Phase 2 draws whose checkpoints were scored in that check", "C3", "phase2/eval_stop_criterion/summary.json", "5")
+    add("bcNllTrainOverVal", f(sc["bc0_clean_e40_train_mean"] / v40, 2), "ratio of the BC head's training loss to its held out loss at epoch 40 (above 1 means no memorization)", "C3", "phase2/eval_stop_criterion/summary.json", "1.07")
     add("imagRisePct", f(100 * (last.mean() / prev.mean() - 1)), "rise of imagined return over the last 500 steps, %", "C3", "phase3/analysis/p3_wandb_curves.csv", "3.0")
     add("imagRiseRuns", str(int((last > prev).sum())), "runs whose imagined return was still rising", "C3", "phase3/analysis/p3_wandb_curves.csv", "23")
 
@@ -485,6 +496,7 @@ def main():
     add("lrPThree", sci(ic["lr"]), "Phase 3 learning rate", "setup", "imagination_cfg", r"3\times10^{-5}")
     add("warmupPThree", str(ic["warmup_steps"]), "Phase 3 warmup steps", "setup", "imagination_cfg", "100")
     add("wdPThree", str(ic["weight_decay"]), "Phase 3 weight decay", "setup", "imagination_cfg", "0.01")
+    add("minLrPThree", sci(ic["min_lr"]), "Phase 3 final learning rate of the cosine decay", "setup", "imagination_cfg", r"1\times10^{-6}")
     add("clipPThree", f(ic["grad_clip"], 0), "Phase 3 gradient clip", "setup", "imagination_cfg", "10")
     add("policyBins", str(dc["policy_num_bins"]), "bins per action dimension of the categorical policy head", "setup", srcC, "41")
     add("kMax", str(dc["K_max"]), "finest shortcut grid: smallest step size is 1/kMax", "setup", srcC, "64")

@@ -5,7 +5,7 @@ import re, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]; PAPER = ROOT / "paper"
-files = sorted((PAPER / "sections").glob("*.tex")) + [PAPER / "main.tex", PAPER / "figures" / "fig_beforeafter.tex"] + sorted((PAPER / "generated").glob("table_*.tex"))
+files = sorted((PAPER / "sections").glob("*.tex")) + [PAPER / "main.tex"] + sorted((PAPER / "figures").glob("fig_*.tex")) + sorted((PAPER / "generated").glob("table_*.tex"))
 bib_keys = set(k.strip() for k in re.findall(r"@\w+\{\s*([^,\s]+)\s*,", (PAPER / "refs.bib").read_text(), re.I))
 BANNED = ["pre-registered", "preregistered", "converged", "contradicts", "before the runs", "plan-specified", "pre-specified",
           "novel", "significant", "beats the demonstrations", "released model", "to the best of our knowledge", "state of the art",

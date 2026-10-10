@@ -86,11 +86,11 @@ t2 = rf"""% Leave-one-draw-out table. Written by analysis/paper_tables_v2.py; ch
 \begin{{table}}[H]
 \centering
 \small
-\caption{{Leave-one-draw-out: the mean gain over the remaining {len(draws) - 1} draws (95\% $t$ interval) and the between-draw and within-draw standard deviations (one-way random effects), with each draw left out in turn. With all \nDraws draws: mean \gainMeanExact\ [\gainLoExact, \gainHiExact], between-draw sd \sdBetween, within-draw sd \sdWithin.}}
+\caption{{Leave one draw out: the mean gain over the remaining {len(draws) - 1} draws (95\% $t$ interval) and the standard deviations between draws and within a draw (one way random effects), with each draw left out in turn. With all \nDraws draws: mean \gainMeanExact\ [\gainLoExact, \gainHiExact], sd between draws \sdBetween, sd within a draw \sdWithin.}}
 \label{{tab:loo}}
 \begin{{tabular}}{{@{{}}lcccc@{{}}}}
 \toprule
-draw left out & its mean gain & mean gain of the rest & between-draw sd & within-draw sd \\
+draw left out & its mean gain & mean gain of the rest & sd between draws & sd within a draw \\
 \midrule
 {chr(10).join(loo_rows)}
 \bottomrule
@@ -103,16 +103,16 @@ draw left out & its mean gain & mean gain of the rest & between-draw sd & within
 # Columns 1-3 are copied from old/main_v1.tex Table 1 (tag v1-old-pipeline). Columns 4-5 are judgments:
 # TODO(author): review every entry in the two right-hand columns.
 checks = [
-    (r"$\lambda$-returns, advantages", "unit test against hand-computed values", "pass", "no: tests the RL arithmetic on given inputs", "no"),
+    (r"$\lambda$-returns, advantages", "unit test against hand computed values", "pass", "no: tests the RL arithmetic on given inputs", "no"),
     ("attention firewall", r"$\partial \hat z / \partial\,\mathrm{agent} = 0$", "exact", "no: tests gradient routing", "no"),
-    ("gradient routing", "per-head isolation", "pass", "no: tests gradient routing", "no"),
+    ("gradient routing", "per head isolation", "pass", "no: tests gradient routing", "no"),
     ("tokenizer", "latent rank, reconstruction", r"rank $\approx 11/16$", "no: frames were correct in both pipelines", "no"),
-    ("reward head", "closed-loop calibration", "MAE 0.013 to 0.035", "no: reward rows were paired correctly", "no"),
-    ("continue head", "closed-loop calibration", "Brier 0.0020", "no: same as the reward head", "no"),
+    ("reward head", "closed loop calibration", "MAE 0.013 to 0.035", "no: reward rows were paired correctly", "no"),
+    ("continue head", "closed loop calibration", "Brier 0.0020", "no: same as the reward head", "no"),
     ("PMPO objective", "unit test against the algebra", "pass", "no: tests the policy loss on given inputs", "no"),
-    ("action conditioning", "batch-shuffle probe", r"shift $\approx 0.17$ vs 0.006", "no: asks whether actions matter, never when", "no"),
+    ("action conditioning", "batch shuffle probe", r"policy shift $\approx 0.17$, against 0.006 for an action blind model", "no: asks whether actions matter, never when", "no"),
     ("full stack", "random-policy floor", r"$p = 3.8 \times 10^{-28}$", "no: a policy with late actions still beats random", "no: a degraded world model still beats random"),
-    ("determinism", "closed-loop replay", "90/90 identical", "no: tests reproducibility", "no"),
+    ("determinism", "closed loop replay", "90/90 identical", "no: tests reproducibility", "no"),
     ("software stack", "versions recorded per run", "recorded", "no: bookkeeping", "no"),
     ("provenance", "checkpoint paths recorded", "recorded", "no: bookkeeping", "no"),
 ]
@@ -123,7 +123,7 @@ t3 = rf"""% The v1 verification table with two added columns. Written by analysi
 \begin{{table}}[H]
 \centering
 \scriptsize
-\caption{{The \nChecks checks that passed with both defects present, and why neither defect was visible to them. A further check, the world model's error on training against held-out episodes (\wmTrain against \wmHeldOut), was relative and had no reference for the absolute error.}}
+\caption{{The \nChecks checks that passed with both defects present, and why neither defect was visible to them. A further check, the world model's error on training against held out episodes (\wmTrain against \wmHeldOut), was relative and had no reference for the absolute error.}}
 \label{{tab:checks}}
 \begin{{tabular}}{{@{{}}L{{2.2cm}}L{{2.9cm}}L{{1.8cm}}L{{4.7cm}}L{{2.9cm}}@{{}}}}
 \toprule
@@ -203,7 +203,7 @@ hp = [
     ("Data", [
         ("episodes (expert / mixed small / mixed large)", r"\nDemos\ (\nExpertDemos\ / \nMixedSmallDemos\ / \nMixedLargeDemos)"),
         ("training / held out episodes", r"\nTrainEps\ / \nHeldOut"),
-        ("steps per episode; image size", r"\episodeSteps; \imgSize\ by \imgSize\ pixels")]),
+        ("decisions per game (action repeat); image size", r"\episodeSteps\ (\actionRepeat); \imgSize\ by \imgSize\ pixels")]),
     ("Tokenizer", [
         ("parameters", r"\nParamsTokenizer M"),
         ("patch size; depth; width", r"\tokPatch; \tokDepth; \embedDim"),
@@ -215,7 +215,7 @@ hp = [
         ("step sizes; context signal level; context frames", r"$1/\kMax$ to 1; \ctxSignal; \ctxFrames"),
         ("epochs trained (of a cosine schedule for); batch size", r"\epochsPOne\ (\cosineEpochsPOne); \batchPOne"),
         ("steps per epoch; gradient clip", r"\stepsPerEpochPOne; \clipPOne"),
-        ("peak learning rate; warmup steps; weight decay (heavy)", r"$\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne)"),
+        ("peak learning rate; warmup steps; weight decay (projection layers)", r"$\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne)"),
         ("training windows, short and long (share of long batches)", r"\seqShort\ and \seqLong\ frames (\longBatchRatio)"),
         ("context length; register tokens", r"\contextLength\ frames; \registerTokens"),
         ("bootstrap curriculum", r"\curriculumWarmup\ flow only steps, then a \curriculumRamp\ step ramp")]),
@@ -228,7 +228,7 @@ hp = [
         ("epochs; steps; batch size", r"\epochsPThree; \stepsPThree; \batchPThree"),
         ("imagination horizon; sampling steps", r"\horizon; \kSample"),
         (r"PMPO $\alpha$, $\beta$; discount; $\lambda$", r"\pmpoAlpha, \pmpoBeta; \discount; \lambdaRet"),
-        ("learning rate; warmup steps; weight decay; gradient clip", r"$\lrPThree$; \warmupPThree; \wdPThree; \clipPThree")]),
+        ("learning rate (cosine decay to); warmup steps; weight decay; gradient clip", r"$\lrPThree$ ($\minLrPThree$); \warmupPThree; \wdPThree; \clipPThree")]),
     ("Evaluation", [
         ("paired games per policy; action readout", r"\nBoards; sampled"),
         ("decisions per game (action repeat); MuJoCo", r"\episodeSteps\ (\actionRepeat); \mujocoVersion"),
@@ -271,7 +271,7 @@ t7 = rf"""% Every imagination run. Written by analysis/paper_tables_v2.py from p
 \begin{{table}}[H]
 \centering
 \scriptsize
-\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. Imagined return is the mean return of the imagined rollouts over the last 500 training steps, read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was scored on an Ada or Blackwell card.}}
+\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. Imagined return is the mean $\lambda$ return of the imagined rollouts over the \horizon step horizon, including the bootstrapped value at the last step, averaged over the last 500 training steps; it is on a different scale from the real return and is read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was scored on an Ada or Blackwell card.}}
 \label{{tab:runs_all}}
 \setlength{{\tabcolsep}}{{3.2pt}}
 \begin{{tabular}}{{@{{}}rrrrrrrrrrl@{{}}}}
