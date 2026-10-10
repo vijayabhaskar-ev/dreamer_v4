@@ -56,7 +56,7 @@ t1 = rf"""% Table 1. Written by analysis/paper_tables_v2.py from phase3/analysis
 \begin{{table}}[t]
 \centering
 \small
-\caption{{Catch rate of each BC parent and of the imagination policies trained from it (\nBoards paired games each, actions sampled), and the gain of each run over its parent in points. The last row averages the \nDraws draws; the interval is a 95\% $t$ confidence interval over the draw means.}}
+\caption{{Catch rate of each BC parent and of the imagination policies trained from it (\nBoards paired games each, actions sampled), and the gain of each run over its parent in points. The imagination column is the mean over the \nSeeds seeds of the draw. The last row averages the \nDraws draws; the interval is a 95\% $t$ confidence interval over the draw means. Every run is listed in \Cref{{tab:runs_all}}.}}
 \label{{tab:results}}
 \begin{{tabular}}{{@{{}}lcc{'c' * len(seeds)}c@{{}}}}
 \toprule
@@ -214,7 +214,11 @@ hp = [
         ("depth; width; attention heads (key/value heads)", r"\dynDepth; \embedDim; \dynHeads\ (\dynKvHeads)"),
         ("step sizes; context signal level; context frames", r"$1/\kMax$ to 1; \ctxSignal; \ctxFrames"),
         ("epochs trained (of a cosine schedule for); batch size", r"\epochsPOne\ (\cosineEpochsPOne); \batchPOne"),
-        ("peak learning rate; warmup steps; weight decay", r"$\lrPOne$; \warmupPOne; \wdPOne")]),
+        ("steps per epoch; gradient clip", r"\stepsPerEpochPOne; \clipPOne"),
+        ("peak learning rate; warmup steps; weight decay (heavy)", r"$\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne)"),
+        ("training windows, short and long (share of long batches)", r"\seqShort\ and \seqLong\ frames (\longBatchRatio)"),
+        ("context length; register tokens", r"\contextLength\ frames; \registerTokens"),
+        ("bootstrap curriculum", r"\curriculumWarmup\ flow only steps, then a \curriculumRamp\ step ramp")]),
     ("Phase 2", [
         ("epochs; steps; batch size", r"\epochsPTwo; \stepsPTwo; \batchPTwo"),
         ("base learning rate; world model multiplier; heads multiplier", r"$\lrPTwo$; \lrMultDyn; \lrMultHeads"),
@@ -226,7 +230,9 @@ hp = [
         (r"PMPO $\alpha$, $\beta$; discount; $\lambda$", r"\pmpoAlpha, \pmpoBeta; \discount; \lambdaRet"),
         ("learning rate; warmup steps; weight decay; gradient clip", r"$\lrPThree$; \warmupPThree; \wdPThree; \clipPThree")]),
     ("Evaluation", [
-        ("paired games per policy; action readout", r"\nBoards; sampled")]),
+        ("paired games per policy; action readout", r"\nBoards; sampled"),
+        ("decisions per game (action repeat); MuJoCo", r"\episodeSteps\ (\actionRepeat); \mujocoVersion"),
+        ("optimizer (all phases); PyTorch on the rented GPUs and on the laptop", r"AdamW; \torchPods\ and \torchLaptop")]),
 ]
 hrows = []
 for group, items in hp:
@@ -249,3 +255,34 @@ setting & value \\
 """
 (GEN / "table_hparams.tex").write_text(t6)
 print("wrote table_hparams.tex")
+
+# ---------------- appendix: every imagination run (p3_runs.csv + p3_wandb_curves.csv + summary.json reward calibration) ----------------
+BKP = Path.home() / "Documents/Projects/dreamer_v4_phase1_aligned_backup"
+curves = {(int(r["draw"]), int(r["seed"])): r for r in csv.DictReader(open(BKP / "phase3/analysis/p3_wandb_curves.csv"))}
+EVAL_GPU = {10: "A4500", 11: "RTX 4090", 12: "RTX 4000 Ada", 13: "A4500", 14: "A40", 15: "RTX 5080", 16: "RTX 5090", 17: "A4500"}   # sheet BU
+import json as _json
+rrows = []
+for r in runs:
+    d, sd = int(r["draw"]), int(r["seed"])
+    summ = _json.load(open(BKP / f"phase3/draw{d}/evaluation/tmlr-aligned-p3-draw{d}-seed{sd}-n500/summary.json"))
+    pear = summ["policies"]["phase3"]["reward_calibration"]["reward_pearson"]
+    rrows.append(f"{d} & {sd} & {f(100*float(r['bc_rate']))} & {f(100*float(r['p3_rate']))} & {float(r['delta_pts']):+.1f} & {f(float(r['se_paired_pts']))} & {f(float(r['bc_return']), 0)} & {f(float(r['p3_return']), 0)} & {f(float(curves[(d, sd)]['imagined_return_last500']), 0)} & {f(pear, 3)} & {EVAL_GPU[d]} \\\\")
+t7 = rf"""% Every imagination run. Written by analysis/paper_tables_v2.py from p3_runs.csv, p3_wandb_curves.csv and the evaluation summaries.
+\begin{{table}}[H]
+\centering
+\scriptsize
+\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. Imagined return is the mean return of the imagined rollouts over the last 500 training steps, read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was scored on an Ada or Blackwell card.}}
+\label{{tab:runs_all}}
+\setlength{{\tabcolsep}}{{3.2pt}}
+\begin{{tabular}}{{@{{}}rrrrrrrrrrl@{{}}}}
+\toprule
+draw & seed & BC catch & imag.\ catch & gain & SE & BC return & imag.\ return & imagined return & reward corr. & evaluation GPU \\
+ & & (\%) & (\%) & (pts) & (pts) & & & & & \\
+\midrule
+{chr(10).join(rrows)}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+"""
+(GEN / "table_runs_all.tex").write_text(t7)
+print("wrote table_runs_all.tex")
