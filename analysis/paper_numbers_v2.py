@@ -135,6 +135,10 @@ def main():
     add("imagCatch", f(100 * p3_rate.mean()), "imagination policies' mean catch rate, % (24 runs)", "C1", src, "81.7")
     add("imagCatchMin", f(100 * p3_rate.min()), "lowest imagination-run catch rate, %", "C1", src, "68.8")
     add("imagCatchMax", f(100 * p3_rate.max()), "highest imagination-run catch rate, %", "C1", src, "90.6")
+    bc_rc = np.mean([float(r["bc_return"]) * 500 / float(r["bc_caught"]) for r in runs if r["seed"] == "1"])
+    p3_rc = np.mean([float(r["p3_return"]) * 500 / float(r["p3_caught"]) for r in runs])
+    add("bcReturnCaught", f(bc_rc, 0), "BC parents: mean return of caught games (time the ball was held)", "C1", src, "536")
+    add("imagReturnCaught", f(p3_rc, 0), "imagination policies: mean return of caught games", "C1", src, "637")
     add("bcReturn", f(bc_ret.mean(), 0), "BC parents' mean return", "C1", src, "292")
     add("imagReturn", f(p3_ret.mean(), 0), "imagination policies' mean return", "C1", src, "521")
 
@@ -378,6 +382,10 @@ def main():
     npz = ROOT / "ball_in_cup_catch.npz"
     if npz.exists():
         rew = np.asarray(np.load(npz, mmap_mode="r")["rewards"], float)
+        # returns: the per-step reward is 1 while the ball sits in the cup, so the return of a caught game is the time held
+        ret = rew.sum(axis=1); caught = ret > 0
+        add("demoReturn", f(ret.mean(), 0), "demonstrations: mean return (unpaired reference)", "C1", "ball_in_cup_catch.npz rewards", "574")
+        add("demoReturnCaught", f(ret[caught].mean(), 0), "demonstrations: mean return of the caught episodes (time the ball was held)", "C1", "ball_in_cup_catch.npz rewards", "682")
         add("demoCatch", f(100 * (rew.sum(axis=1) > 0).mean()), "share of the demonstration episodes that catch, % (unpaired)", "C1", "ball_in_cup_catch.npz rewards", "84.2")
         add("nDemos", str(rew.shape[0]), "demonstration episodes", "C1", "ball_in_cup_catch.npz", "240")
         # C8: why the shuffle probe passes with late actions: consecutive stored actions are correlated (row 0 is padding)
@@ -400,6 +408,46 @@ def main():
     run1 = open(BK / "provenance_joint/run_phase1.sh").read()
     arg = lambda txt, k: re.search(rf"--{k}[ =]([^ \\\n]+)", txt).group(1)
     srcC = "checkpoint configs (phase2 dynamics_epoch_040.pt, phase3 final.pt)"
+    tokck = torch.load(next((ROOT / "checkpoints").rglob("tokenizer_epoch_500.pt")), map_location="cpu", weights_only=False)
+    n_tok = sum(v.numel() for v in tokck["model"].values() if torch.is_tensor(v))
+    n_tok_in_p2 = sum(v.numel() for k, v in p2["model"].items() if torch.is_tensor(v) and k.startswith("tokenizer"))
+    n_dyn = sum(v.numel() for v in p2["model"].values() if torch.is_tensor(v)) - n_tok_in_p2
+    n_heads = sum(sum(v.numel() for v in p2[k].values() if torch.is_tensor(v)) for k in ("reward_head", "continue_head", "policy_head"))
+    srcP = "checkpoints: tokenizer_epoch_500.pt, phase2 dynamics_epoch_040.pt (state dict sizes)"
+    add("nParamsTokenizer", f(n_tok / 1e6), "tokenizer parameters, millions", "setup", srcP, "74.9")
+    add("nParamsWorldModel", f(n_dyn / 1e6), "world model (dynamics transformer) parameters, millions", "setup", srcP, "47.8")
+    add("nParamsHeads", f(n_heads / 1e6), "reward, continue and policy heads, millions", "setup", srcP, "3.9")
+    add("dreamerParamsTokenizer", "400", "Dreamer 4 tokenizer parameters, millions (paper text)", "setup", "CONSTANT: arXiv 2509.24527 sec. 4", "400")
+    add("dreamerParamsDynamics", "1.6", "Dreamer 4 dynamics model parameters, billions (paper text)", "setup", "CONSTANT: arXiv 2509.24527 sec. 4", "1.6")
+    tc = tokck["tokenizer_cfg"]; tc = tc if isinstance(tc, dict) else vars(tc)
+    dc = p2["dynamics_cfg"]; dc = dc if isinstance(dc, dict) else vars(dc)
+    ic = p3["imagination_cfg"]; ic = ic if isinstance(ic, dict) else vars(ic)
+    def sci(x):
+        m, e = f"{float(x):.0e}".split("e"); return rf"{int(float(m))}\times10^{{{int(e)}}}"
+    add("tokPatch", str(tc["patch_size"][0]), "tokenizer patch size, pixels", "setup", "tokenizer_cfg", "16")
+    add("tokDepth", str(tc["depth"]), "tokenizer transformer depth", "setup", "tokenizer_cfg", "8")
+    add("embedDim", str(dc["embed_dim"]), "embedding width (tokenizer and world model)", "setup", "dynamics_cfg", "512")
+    add("latentDim", str(tc["latent_dim"]), "latent dimension per latent token", "setup", "tokenizer_cfg", "16")
+    add("latentTokens", str(tc["num_latent_tokens"]), "latent tokens per frame", "setup", "tokenizer_cfg", "32")
+    add("dynDepth", str(dc["depth"]), "world model transformer depth", "setup", "dynamics_cfg", "12")
+    add("dynHeads", str(dc["num_heads"]), "attention heads", "setup", "dynamics_cfg", "8")
+    add("dynKvHeads", str(dc["num_kv_heads"]), "key/value heads (grouped query attention)", "setup", "dynamics_cfg", "2")
+    add("lrTok", sci(tc["tokenizer_lr"]), "tokenizer learning rate", "setup", "tokenizer_cfg", r"1\times10^{-4}")
+    add("wdTok", str(tc["weight_decay"]), "tokenizer weight decay", "setup", "tokenizer_cfg", "0.05")
+    p1flags = (BK / "provenance_joint/run_phase1.sh").read_text()
+    g1 = lambda flag: re.search(rf"--{flag} ([0-9e.-]+)", p1flags).group(1)
+    add("lrPOne", sci(g1("lr")), "Phase 1 peak learning rate (cosine to min-lr)", "setup", "provenance_joint/run_phase1.sh", r"3\times10^{-4}")
+    add("warmupPOne", g1("warmup-steps"), "Phase 1 warmup steps", "setup", "provenance_joint/run_phase1.sh", "1000")
+    add("wdPOne", g1("weight-decay"), "Phase 1 weight decay", "setup", "provenance_joint/run_phase1.sh", "0.01")
+    ta = (ROOT / "dynamics/train_agent.py").read_text()
+    g2 = lambda flag: re.search(rf'"--{flag}", type=float, default=([0-9e.-]+)', ta).group(1)
+    add("lrPTwo", sci(g2("lr")), "Phase 2 base learning rate (launch script left the default)", "setup", "dynamics/train_agent.py default (unchanged since c680182)", r"1\times10^{-4}")
+    add("lrMultDyn", g2("dynamics-lr-multiplier"), "Phase 2: world model learning rate multiplier", "setup", "dynamics/train_agent.py default", "0.3")
+    add("lrMultHeads", f(float(g2("head-lr-multiplier")), 0), "Phase 2: heads learning rate multiplier", "setup", "dynamics/train_agent.py default", "3")
+    add("lrPThree", sci(ic["lr"]), "Phase 3 learning rate", "setup", "imagination_cfg", r"3\times10^{-5}")
+    add("warmupPThree", str(ic["warmup_steps"]), "Phase 3 warmup steps", "setup", "imagination_cfg", "100")
+    add("wdPThree", str(ic["weight_decay"]), "Phase 3 weight decay", "setup", "imagination_cfg", "0.01")
+    add("clipPThree", f(ic["grad_clip"], 0), "Phase 3 gradient clip", "setup", "imagination_cfg", "10")
     add("policyBins", str(dc["policy_num_bins"]), "bins per action dimension of the categorical policy head", "setup", srcC, "41")
     add("kMax", str(dc["K_max"]), "finest shortcut grid: smallest step size is 1/kMax", "setup", srcC, "64")
     add("kSample", str(ic["K_imagination"]), "denoising steps per generated frame in imagination (step size 1/kSample)", "setup", srcC, "4")

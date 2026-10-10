@@ -197,3 +197,55 @@ stage & launches & results & aborted or discarded & evaluation GPU family \\
 """
 (GEN / "table_runs.tex").write_text(t5)
 print("wrote table_deviations.tex, table_runs.tex")
+
+# ---------------- appendix: hyperparameters (cells are macro names only, so the table cannot drift from numbers.tex) ----------------
+hp = [
+    ("Data", [
+        ("episodes (expert / mixed small / mixed large)", r"\nDemos\ (\nExpertDemos\ / \nMixedSmallDemos\ / \nMixedLargeDemos)"),
+        ("training / held out episodes", r"\nTrainEps\ / \nHeldOut"),
+        ("steps per episode; image size", r"\episodeSteps; \imgSize\ by \imgSize\ pixels")]),
+    ("Tokenizer", [
+        ("parameters", r"\nParamsTokenizer M"),
+        ("patch size; depth; width", r"\tokPatch; \tokDepth; \embedDim"),
+        ("latent tokens per frame; latent dimension", r"\latentTokens; \latentDim"),
+        ("learning rate; weight decay", r"$\lrTok$; \wdTok")]),
+    ("World model (Phase 1)", [
+        ("parameters", r"\nParamsWorldModel M"),
+        ("depth; width; attention heads (key/value heads)", r"\dynDepth; \embedDim; \dynHeads\ (\dynKvHeads)"),
+        ("step sizes; context signal level; context frames", r"$1/\kMax$ to 1; \ctxSignal; \ctxFrames"),
+        ("epochs trained (of a cosine schedule for); batch size", r"\epochsPOne\ (\cosineEpochsPOne); \batchPOne"),
+        ("peak learning rate; warmup steps; weight decay", r"$\lrPOne$; \warmupPOne; \wdPOne")]),
+    ("Phase 2", [
+        ("epochs; steps; batch size", r"\epochsPTwo; \stepsPTwo; \batchPTwo"),
+        ("base learning rate; world model multiplier; heads multiplier", r"$\lrPTwo$; \lrMultDyn; \lrMultHeads"),
+        ("policy head", r"categorical, \policyBins\ bins per action dimension"),
+        ("heads parameters", r"\nParamsHeads M")]),
+    ("Phase 3 (imagination)", [
+        ("epochs; steps; batch size", r"\epochsPThree; \stepsPThree; \batchPThree"),
+        ("imagination horizon; sampling steps", r"\horizon; \kSample"),
+        (r"PMPO $\alpha$, $\beta$; discount; $\lambda$", r"\pmpoAlpha, \pmpoBeta; \discount; \lambdaRet"),
+        ("learning rate; warmup steps; weight decay; gradient clip", r"$\lrPThree$; \warmupPThree; \wdPThree; \clipPThree")]),
+    ("Evaluation", [
+        ("paired games per policy; action readout", r"\nBoards; sampled")]),
+]
+hrows = []
+for group, items in hp:
+    hrows.append(r"\multicolumn{2}{@{}l}{\textit{" + group + r"}} \\")
+    hrows += [f"{k} & {v} \\\\" for k, v in items]
+t6 = rf"""% Hyperparameters. Written by analysis/paper_tables_v2.py; every cell is a macro from numbers.tex (read from the checkpoints and launch scripts).
+\begin{{table}}[H]
+\centering
+\small
+\caption{{Settings of the corrected pipeline, read from the checkpoints and launch scripts. Dreamer 4 trains a \dreamerParamsTokenizer M tokenizer and a \dreamerParamsDynamics B dynamics model \citep{{hafner2025dreamer4}}.}}
+\label{{tab:hparams}}
+\begin{{tabular}}{{@{{}}L{{7.2cm}}L{{6.6cm}}@{{}}}}
+\toprule
+setting & value \\
+\midrule
+{chr(10).join(hrows)}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+"""
+(GEN / "table_hparams.tex").write_text(t6)
+print("wrote table_hparams.tex")
