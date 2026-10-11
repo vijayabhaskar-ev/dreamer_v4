@@ -181,17 +181,17 @@ component & Dreamer 4 & this paper & could it hide a defect? \\
 
 # ---------------- appendix: run inventory (sheet CC, BU; DEVIATIONS.md Table 2) ----------------
 inv = [
-    ("Phase 1, corrected", "2", "1", "the first attempt kept the two separate normalizers and collapsed; discarded", "--"),
-    ("Phase 2", r"\nLaunchesPTwo", r"\nDraws", "2 aborted", "--"),
-    ("Phase 3", r"\nLaunchesPThree", r"\nRuns", r"\nAbortedPThree aborted (one slow pod stopped on purpose; two failed on a corrupted tokenizer file) and relaunched with the same seeds", "draws 11, 12, 15, 16 on Ada or Blackwell; draws 10, 13, 14, 17 on Ampere"),
-    ("BC parents, evaluation", "--", r"\nDraws", "--", "Ada or Blackwell"),
+    ("Phase 1", r"\nLaunchesPOne", r"\nResultsPOne", "the first launch kept the two separate normalizers of defect 2, collapsed and was discarded; the second stopped before its first training step and was relaunched with the same settings and live logging", "--"),
+    ("Phase 2", r"\nLaunchesPTwo", r"\nDraws", r"\nAbortedPTwo\ aborted (one stopped to restart its pod, one out of GPU memory at start) and relaunched with the same seeds", "--"),
+    ("Phase 3", r"\nLaunchesPThree", r"\nRuns", r"\nAbortedPThree aborted (one slow pod stopped on purpose; two failed on a corrupted tokenizer file) and relaunched with the same seeds", "draws 11 and 12 on Ada, draws 15 and 16 on Blackwell; draws 10, 13, 14, 17 on Ampere"),
+    ("BC parents, evaluation", "--", r"\nDraws", "--", "Blackwell (one RTX 5070 Ti)"),
 ]
 irow = [" & ".join(r) + r" \\" for r in inv]
 t5 = rf"""% Run inventory. Written by analysis/paper_tables_v2.py from the launch records. No run identifiers (anonymity).
 \begin{{table}}[H]
 \centering
 \small
-\caption{{Training launches behind the reported results, and the GPU family used to evaluate each policy. Ada and Blackwell cards gave identical evaluations, and Ampere cards differed on a few boards (\Cref{{sec:limitations}}).}}
+\caption{{Training launches behind the reported results, and the GPU family used to evaluate each policy. Ada and Blackwell cards agreed exactly on the games we repeated, and an Ampere card differed on \gpuDivergedBoards of \nBoards games (\Cref{{sec:limitations}}).}}
 \label{{tab:runs}}
 \begin{{tabular}}{{@{{}}L{{3.0cm}}cL{{1.2cm}}L{{5.0cm}}L{{3.6cm}}@{{}}}}
 \toprule
@@ -215,25 +215,30 @@ hp = [
         ("parameters", r"\nParamsTokenizer M"),
         ("patch size; depth; width", r"\tokPatch; \tokDepth; \embedDim"),
         ("latent tokens per frame; latent dimension", r"\latentTokens; \latentDim"),
-        ("learning rate; weight decay", r"$\lrTok$; \wdTok")]),
+        ("learning rate, constant; weight decay", r"$\lrTok$; \wdTok"),
+        ("epochs; steps per epoch; clip length", r"\tokEpochs; \tokStepsPerEpoch; \tokClipLen\ frames"),
+        ("batch size; precision", r"\tokBatchEarly, then \tokBatchLate\ after epoch \tokAllEpsEpochs; fp32, then fp16 mixed precision"),
+        ("mask ratio", r"uniform from 0 to \tokMaskMax, one draw per clip"),
+        ("loss; gradient clip", r"MSE on masked patches plus \lpipsWeight\ LPIPS (VGG); \clipTok")]),
     ("World model (Phase 1)", [
         ("parameters", r"\nParamsWorldModel M"),
         ("depth; width; attention heads (key/value heads)", r"\dynDepth; \embedDim; \dynHeads\ (\dynKvHeads)"),
-        ("step sizes; context signal level; context frames", r"$1/\kMax$ to 1; \ctxSignal; \ctxFrames"),
+        ("step sizes; context signal level", r"$1/\kMax$ to 1; \ctxSignal"),
         ("epochs trained (of a cosine schedule for); batch size", r"\epochsPOne\ (\cosineEpochsPOne); \batchPOne"),
         ("steps per epoch; gradient clip", r"\stepsPerEpochPOne; \clipPOne"),
-        ("peak learning rate; warmup steps; weight decay (projection layers)", r"$\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne)"),
+        ("peak learning rate; warmup steps; weight decay (on attention and feed forward matrices)", r"$\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne)"),
         ("training windows, short and long (share of long batches)", r"\seqShort\ and \seqLong\ frames (\longBatchRatio)"),
         ("context length; register tokens", r"\contextLength\ frames; \registerTokens"),
-        ("bootstrap curriculum", r"\curriculumWarmup\ flow only steps, then a \curriculumRamp\ step ramp")]),
+        ("bootstrap curriculum", r"\curriculumWarmup\ flow only steps, then the bootstrap loss ramps in linearly until step \curriculumRamp")]),
     ("Phase 2", [
         ("epochs; steps; batch size", r"\epochsPTwo; \stepsPTwo; \batchPTwo"),
         ("base learning rate; world model multiplier; heads multiplier", r"$\lrPTwo$; \lrMultDyn; \lrMultHeads"),
+        ("cosine decay of the base learning rate to; warmup steps", r"$\minLrPTwo$; \warmupPTwo"),
         ("policy head", r"categorical, \policyBins\ bins per action dimension"),
         ("heads parameters", r"\nParamsHeads M")]),
     ("Phase 3 (imagination)", [
         ("epochs; steps; batch size", r"\epochsPThree; \stepsPThree; \batchPThree"),
-        ("imagination horizon; sampling steps", r"\horizon; \kSample"),
+        ("real context frames; imagination horizon; sampling steps", r"\ctxFrames; \horizon; \kSample"),
         (r"PMPO $\alpha$, $\beta$; discount; $\lambda$", r"\pmpoAlpha, \pmpoBeta; \discount; \lambdaRet"),
         ("learning rate (cosine decay to); warmup steps; weight decay; gradient clip", r"$\lrPThree$ ($\minLrPThree$); \warmupPThree; \wdPThree; \clipPThree")]),
     ("Evaluation", [
@@ -278,7 +283,7 @@ t7 = rf"""% Every imagination run. Written by analysis/paper_tables_v2.py from p
 \begin{{table}}[H]
 \centering
 \scriptsize
-\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. Imagined return is the mean $\lambda$ return of the imagined rollouts over the \horizon step horizon, including the bootstrapped value at the last step, averaged over the last 500 training steps; it is on a different scale from the real return and is read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was scored on an Ada or Blackwell card.}}
+\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. Imagined return is the mean $\lambda$ return of the imagined rollouts over the \horizon step horizon, including the bootstrapped value at the last step, averaged over the last 500 training steps; it is on a different scale from the real return and is read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was evaluated on one Blackwell card, an RTX 5070 Ti.}}
 \label{{tab:runs_all}}
 \setlength{{\tabcolsep}}{{3.2pt}}
 \begin{{tabular}}{{@{{}}rrrrrrrrrrl@{{}}}}
