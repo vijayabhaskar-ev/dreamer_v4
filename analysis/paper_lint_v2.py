@@ -25,8 +25,9 @@ for f in files:
         if raw.lstrip().startswith("%"): continue
         code = re.sub(r"(?<!\\)%.*$", "", raw)                  # drop a real comment, keep \%
         tag = f"{f.relative_to(PAPER)}:{n}"
-        if m := re.search(r"(\\[A-Za-z]+|\d)%", raw):          # bare % swallows the rest of the line; test raw, since `code` has already lost it
-            print(f"BARE %        {tag}: {raw[max(0, m.start()-40):m.end()+30]}"); problems += 1
+        unspaced = re.sub(r"(?<!\\)\s+%.*$", "", raw)          # a real comment has a space before its %; a bare % after a macro or digit does not
+        if m := re.search(r"(\\[A-Za-z]+|\d)%", unspaced):     # bare % swallows the rest of the line (tested here, since `code` has already lost it)
+            print(f"BARE %        {tag}: {unspaced[max(0, m.start()-40):m.end()+30]}"); problems += 1
         for key in re.findall(r"\\cite[pt]?\{([^}]*)\}", code):
             for k in key.split(","):
                 if k.strip() not in bib_keys: print(f"UNKNOWN KEY   {tag}: {k.strip()}"); problems += 1
