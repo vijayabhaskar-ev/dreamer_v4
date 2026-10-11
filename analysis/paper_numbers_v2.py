@@ -218,6 +218,7 @@ def main():
     dd = sc["bc0_clean_delta_32_40_seedlevel"]; v40 = sc["bc0_clean_e40_val_mean"]
     add("bcNllDropPct", f(100 * abs(dd["mean"]) / v40, 2), "held out BC loss change from epoch 32 to 40 as % of its value (Phase 2 stop check)", "C3", "phase2/eval_stop_criterion/summary.json", "0.07")
     add("nStopDraws", str(dd["n_seeds"]), "Phase 2 draws whose checkpoints were scored in that check", "C3", "phase2/eval_stop_criterion/summary.json", "5")
+    add("bcLossEpochFrom", "32", "earlier Phase 2 checkpoint in the held out BC loss comparison (checkpoints at epochs 8, 16, 24, 32, 40)", "C3", "CONSTANT: phase2/eval_stop_criterion/summary.json (bc0_clean_delta_32_40)", "32")
     add("bcNllTrainOverVal", f(sc["bc0_clean_e40_train_mean"] / v40, 2), "ratio of the BC head's training loss to its held out loss at epoch 40 (above 1 means no memorization)", "C3", "phase2/eval_stop_criterion/summary.json", "1.07")
     add("imagRisePct", f(100 * (last.mean() / prev.mean() - 1)), "rise of imagined return over the last 500 steps, %", "C3", "phase3/analysis/p3_wandb_curves.csv", "3.0")
     add("imagRiseRuns", str(int((last > prev).sum())), "runs whose imagined return was still rising", "C3", "phase3/analysis/p3_wandb_curves.csv", "23")
