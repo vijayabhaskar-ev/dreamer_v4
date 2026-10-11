@@ -102,6 +102,13 @@ draw left out & its mean gain & mean gain of the rest & sd between draws & sd wi
 # ---------------- the 12 checks of the v1 verification table ----------------
 # Columns 1-3 are copied from old/main_v1.tex Table 1 (tag v1-old-pipeline). Columns 4-5 are judgments:
 # TODO(author): review every entry in the two right-hand columns.
+# shuffle probe cell: v1 printed "0.17" (one old model); the cell now gives the range over both old Phase 2 models, from the raw files
+def _shift(d):
+    r = {x["metric"]: float(x["value"]) for x in csv.DictReader(open(ROOT / "evaluation" / d / "action_shuffle_agent.csv"))}
+    return [r["policy_mu_abs_delta_dim0"], r["policy_mu_abs_delta_dim1"]]
+_old = _shift("agent-e40-categorical") + _shift("agent-optionA-e040"); _blind = _shift("agent")
+check("shufPolicyShiftMin", f(min(_old), 2)); check("shufPolicyShiftMax", f(max(_old), 2))
+check("shufPolicyShiftBlindMin", f(min(_blind), 3)); check("shufPolicyShiftBlindMax", f(max(_blind), 3))
 checks = [
     (r"$\lambda$-returns, advantages", "unit test against hand computed values", "pass", "no: tests the RL arithmetic on given inputs", "no"),
     ("attention firewall", r"$\partial \hat z / \partial\,\mathrm{agent} = 0$", "exact", "no: tests gradient routing", "no"),
@@ -110,7 +117,7 @@ checks = [
     ("reward head", "closed loop calibration", "MAE 0.013 to 0.035", "no: reward rows were paired correctly", "no"),
     ("continue head", "closed loop calibration", "Brier 0.0020", "no: same as the reward head", "no"),
     ("PMPO objective", "unit test against the algebra", "pass", "no: tests the policy loss on given inputs", "no"),
-    ("action conditioning", "batch shuffle probe", r"policy shift $\approx 0.17$, against 0.006 for an action blind model", "no: asks whether actions matter, never when", "no"),
+    ("action conditioning", "batch shuffle probe", r"policy shift \shufPolicyShiftMin to \shufPolicyShiftMax per action dimension, against \shufPolicyShiftBlindMin to \shufPolicyShiftBlindMax for an action blind model", "no: asks whether actions matter, never when", "no"),
     ("full stack", "random-policy floor", r"$p = 3.8 \times 10^{-28}$", "no: a policy with late actions still beats random", "no: a degraded world model still beats random"),
     ("determinism", "closed loop replay", "90/90 identical", "no: tests reproducibility", "no"),
     ("software stack", "versions recorded per run", "recorded", "no: bookkeeping", "no"),

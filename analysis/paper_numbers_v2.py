@@ -324,6 +324,16 @@ def main():
     add("shuffleOldDrawsAmax", f(max(shuf("A")), 0), "... largest, %", "C8", "old_draw_forensics/timing_tests.log", "52")
     add("shuffleOldDrawsBmin", f(min(shuf("B")), 0), "4 OLD Phase-2 draws, pure-noise setup: error increase with shuffled actions, smallest, %", "C8", "old_draw_forensics/timing_tests.log", "52")
     add("shuffleOldDrawsBmax", f(max(shuf("B")), 0), "... largest, %", "C8", "old_draw_forensics/timing_tests.log", "92")
+    # checklist shuffle probe (policy head): mean |shift| of the policy mean per action dimension when the batch's actions are shuffled
+    def shift(dirname):
+        rows = {r["metric"]: float(r["value"]) for r in csv.DictReader(open(ROOT / "evaluation" / dirname / "action_shuffle_agent.csv"))}
+        return [rows["policy_mu_abs_delta_dim0"], rows["policy_mu_abs_delta_dim1"]]
+    old_shift = shift("agent-e40-categorical") + shift("agent-optionA-e040"); blind_shift = shift("agent")
+    srcS = "evaluation/agent{-e40-categorical,-optionA-e040,}/action_shuffle_agent.csv"
+    add("shufPolicyShiftMin", f(min(old_shift), 2), "checklist shuffle probe: policy head shift per action dimension, old Phase 2 models (categorical and Gaussian), smallest", "C8", srcS, "0.14")
+    add("shufPolicyShiftMax", f(max(old_shift), 2), "... largest", "C8", srcS, "0.19")
+    add("shufPolicyShiftBlindMin", f(min(blind_shift), 3), "same probe on the action blind model (agent embedding frozen at init), smallest", "C8", srcS, "0.005")
+    add("shufPolicyShiftBlindMax", f(max(blind_shift), 3), "... largest", "C8", srcS, "0.006")
     e40 = parse_timing(BK / "eval_held_out/timing_control_OLD_e040.log")
     add("timingOldEarlyA", f(g(e40, "A")["late"]), "OLD Phase-1 epoch 40, training-style: change with late actions, %", "C6", "eval_held_out/timing_control_OLD_e040.log", "-11.5")
     add("nHeldOut", "24", "held-out episodes behind every world-model test", "C6", "OfflineDataset split=val", "24")
