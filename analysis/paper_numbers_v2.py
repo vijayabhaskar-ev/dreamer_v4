@@ -141,6 +141,32 @@ def main():
     add("imagReturnCaught", f(p3_rc, 0), "imagination policies: mean return of caught games", "C1", src, "637")
     add("bcReturn", f(bc_ret.mean(), 0), "BC parents' mean return", "C1", src, "292")
     add("imagReturn", f(p3_ret.mean(), 0), "imagination policies' mean return", "C1", src, "521")
+    # returns on the games BOTH the run and its own BC parent caught (paired by game), and on the games only the run caught
+    def load_cr(path, policy):
+        o = {}
+        for r in csv.DictReader(open(path)):
+            if r["policy"] == policy:
+                o[int(r["seed"])] = (int(r["caught"]), float(r["return"]))
+        assert len(o) == 500, (path, len(o)); return o
+    both_bc, both_im, both_diff, extra = [], [], [], []
+    for d in draws:
+        pb = load_cr(ROOT / f"evaluation/tmlr-aligned-bc-seed{d}-n500/episodes.csv", "bc")
+        for s in (1, 2, 3):
+            pi = load_cr(P3 / f"draw{d}/evaluation/tmlr-aligned-p3-draw{d}-seed{s}-n500/episodes.csv", "phase3")
+            g = [b for b in pb if pb[b][0] and pi[b][0]]
+            both_bc.append(np.mean([pb[b][1] for b in g])); both_im.append(np.mean([pi[b][1] for b in g]))
+            both_diff.append(both_im[-1] - both_bc[-1])
+            extra.append(np.mean([pi[b][1] for b in pb if pi[b][0] and not pb[b][0]]))
+    bd = np.array(both_diff).reshape(len(draws), 3).mean(1)
+    bh = stats.t.ppf(0.975, len(bd) - 1) * bd.std(ddof=1) / math.sqrt(len(bd))
+    srcB = "evaluation/tmlr-aligned-bc-seed*-n500 + phase3/draw*/evaluation/tmlr-aligned-p3-draw*-seed*-n500 episodes.csv"
+    add("retBothBC", f(np.mean(both_bc), 0), "BC parents: mean return on the games both the run and its parent caught (mean over 24 runs)", "C1", srcB, "549")
+    add("retBothImag", f(np.mean(both_im), 0), "imagination runs: mean return on the same games", "C1", srcB, "665")
+    add("retBothGain", f(bd.mean(), 0), "paired return gain on those games, mean of the 8 draw means", "C1", srcB, "116")
+    add("retBothLo", f(bd.mean() - bh, 0), "its 95% t interval over the 8 draw means, lower", "C1", srcB, "87")
+    add("retBothHi", f(bd.mean() + bh, 0), "... upper", "C1", srcB, "146")
+    add("retBothRunsPos", str(int((np.array(both_diff) > 0).sum())), "runs whose paired return gain on those games is positive (of 24)", "C1", srcB, "24")
+    add("retExtraCatch", f(np.mean(extra), 0), "imagination runs: mean return on the games only the run caught (its parent missed)", "C1", srcB, "603")
 
     # ───────────── C2: how much does the retrain matter? ─────────────
     v = one_way_random(tab)
