@@ -191,7 +191,7 @@ t5 = rf"""% Run inventory. Written by analysis/paper_tables_v2.py from the launc
 \begin{{table}}[H]
 \centering
 \small
-\caption{{Training launches behind the reported results, and the GPU family used to evaluate each policy. Evaluations are identical bit for bit within a GPU family (\Cref{{sec:limitations}}).}}
+\caption{{Training launches behind the reported results, and the GPU family used to evaluate each policy. Ada and Blackwell cards gave identical evaluations, and Ampere cards differed on a few boards (\Cref{{sec:limitations}}).}}
 \label{{tab:runs}}
 \begin{{tabular}}{{@{{}}L{{3.0cm}}cL{{1.2cm}}L{{5.0cm}}L{{3.6cm}}@{{}}}}
 \toprule
