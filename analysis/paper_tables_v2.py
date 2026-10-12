@@ -110,7 +110,7 @@ _old = _shift("agent-e40-categorical") + _shift("agent-optionA-e040"); _blind = 
 check("shufPolicyShiftMin", f(min(_old), 2)); check("shufPolicyShiftMax", f(max(_old), 2))
 check("shufPolicyShiftBlindMin", f(min(_blind), 3)); check("shufPolicyShiftBlindMax", f(max(_blind), 3))
 checks = [
-    (r"$\lambda$-returns, advantages", "unit test against hand computed values", "pass", "no: tests the RL arithmetic on given inputs", "no"),
+    (r"$\lambda$ returns, advantages", "unit test against hand computed values", "pass", "no: tests the RL arithmetic on given inputs", "no"),
     ("attention firewall", r"$\partial \hat z / \partial\,\mathrm{agent} = 0$", "exact", "no: tests gradient routing", "no"),
     ("gradient routing", "per head isolation", "pass", "no: tests gradient routing", "no"),
     ("tokenizer", "latent rank, reconstruction", r"rank $\approx 11/16$", "no: frames were correct in both pipelines", "no"),
@@ -118,7 +118,7 @@ checks = [
     ("continue head", "closed loop calibration", "Brier 0.0020", "no: same as the reward head", "no"),
     ("PMPO objective", "unit test against the algebra", "pass", "no: tests the policy loss on given inputs", "no"),
     ("action conditioning", "batch shuffle probe", r"policy shift \shufPolicyShiftMin to \shufPolicyShiftMax per action dimension, against \shufPolicyShiftBlindMin to \shufPolicyShiftBlindMax for an action blind model", "no: asks whether actions matter, never when", "no"),
-    ("full stack", "random-policy floor", r"$p = 3.8 \times 10^{-28}$", "no: a policy with late actions still beats random", "no: a degraded world model still beats random"),
+    ("full stack", "random policy floor", "pass (exact test on the discordant paired games)", "no: a policy with late actions still beats random", "no: a degraded world model still beats random"),
     ("determinism", "closed loop replay", "90/90 identical", "no: tests reproducibility", "no"),
     ("software stack", "versions recorded per run", "recorded", "no: bookkeeping", "no"),
     ("provenance", "checkpoint paths recorded", "recorded", "no: bookkeeping", "no"),
@@ -147,20 +147,20 @@ print("wrote table_results.tex, table_loo.tex, table_checks.tex; all cells match
 # ---------------- appendix: deviations from Dreamer 4 (transcribed from paper/DEVIATIONS.md Table 1) ----------------
 # TODO(author): review every row; wording is a paper-safe transcription (no file paths, sheet codes or hashes).
 dev = [
-    ("bootstrap curriculum", "none; shortcut models train without schedules", "Phase 1 starts flow only for 2k steps and ramps the bootstrap loss in over the next 2k; off in Phase 2", "low under one normalizer"),
-    ("context corruption at training time", "past inputs are corrupted at inference only", "frame 0 of every training window is kept at signal level 0.9", "yes; with separate normalizers it caused defect 2"),
-    ("frame 0 step size", "no special case", "frame 0 always gets the smallest step size, 1/64", "a patch for the row above"),
+    ("bootstrap curriculum", "none; shortcut models train without schedules", r"Phase 1 starts flow only for \curriculumWarmup\ steps and ramps the bootstrap loss in until step \curriculumRamp; off in Phase 2", "low under one normalizer"),
+    ("context corruption at training time", "past inputs are corrupted at inference only", r"frame 0 of every training window is kept at signal level \ctxSignal", "yes; with separate normalizers it caused defect 2"),
+    ("frame 0 step size", "no special case", r"frame 0 always gets the smallest step size, $1/\kMax$", "a patch for the row above"),
     ("attention soft cap", "on", "off; the latent rank collapsed with it on", "medium"),
     ("tokenizer loss", "MSE plus 0.2 LPIPS, normalized; mask ratio drawn per image, including no mask", "MSE on masked patches only; LPIPS on a composite image; no normalization; one mask ratio per clip", "the unmasked case gives zero loss"),
-    ("tokenizer encoding context", "frame by frame", "training encodes 8 or 32 frames jointly; deployment encodes single frames", "latent codes depend on the slot position"),
+    ("tokenizer encoding context", "causal in time, so a frame's code can depend on its past frames", r"training encodes \seqShort\ or \seqLong\ frames jointly; deployment encodes each frame alone, without its past frames", "latent codes depend on the slot position"),
     ("frozen tokenizer", "the world model trains on the output of a frozen tokenizer", "weights frozen, but dropout and drop path stayed active while the tokenizer encoded the training windows of Phases 1 and 2; both are off in imagination and at evaluation", "unintended; untested"),
-    ("policy head and readout", "categorical or binary, readout unspecified", "41 bins per action dimension; actions sampled at evaluation", "deterministic readouts collapse (Discussion)"),
-    ("Phase 2 data and learning rates", "half uniform, half task relevant; BC on the relevant half", "uniform windows over all 216 training episodes; BC on all of them; world model at 0.3 times the learning rate, heads at 3 times", "clones failed episodes"),
+    ("policy head and readout", "categorical or binary, readout unspecified", r"\policyBins\ bins per action dimension; actions sampled at evaluation", "deterministic readouts collapse (Discussion)"),
+    ("Phase 2 data and learning rates", "half uniform, half task relevant; BC on the relevant half", r"uniform windows over all \nTrainEps\ training episodes; BC on all of them; world model at \lrMultDyn\ times the learning rate, heads at \lrMultHeads\ times", "clones failed episodes"),
     ("first imagined transition", "action from the policy", "the first imagined step gets a zero action", "every rollout starts with a step the policy did not choose"),
-    ("signal level when the agent state is read", "unspecified", "imagination reads at 0.75 with step size 1/4; deployment at 0.9 with step size 1/64", "the policy is deployed on a differently noised state; untested"),
+    ("signal level when the agent state is read", "unspecified", r"imagination reads at \imagReadSignal\ with step size $1/\kSample$; deployment at \ctxSignal\ with step size $1/\kMax$", "the policy is deployed on a differently noised state; untested"),
     ("RL targets", "continue flag marks non terminal steps; bootstrap from the last value", "done is set only on the last row of each episode; bootstrap from the value of the last imagined state", "the time limit is treated as terminal"),
-    ("scale", "20 tasks, 400M and 1.6B parameters, pretraining stages", "one task, 74.9M and 47.8M parameters, no pretraining stages", "external validity only"),
-    ("data split", "90/10", "216 training and 24 held out episodes of 240; the tokenizer saw the 24 held out episodes during its first 350 epochs", "world model tests on held out episodes are clean for the dynamics model only"),
+    ("scale", r"20 tasks, \dreamerParamsTokenizer M and \dreamerParamsDynamics B parameters, pretraining stages", r"one task, \nParamsTokenizer M and \nParamsWorldModel M parameters, one dataset of \nDemos\ episodes for all phases", "external validity only"),
+    ("data split", "90/10", r"\nTrainEps\ training and \nHeldOut\ held out episodes of \nDemos; the tokenizer saw the \nHeldOut\ held out episodes during its first \tokAllEpsEpochs\ epochs", "tests on held out episodes are clean for the world model but not for the tokenizer"),
 ]
 drow = [" & ".join(r) + r" \\" for r in dev]
 t4 = rf"""% Deviations from Dreamer 4. Written by analysis/paper_tables_v2.py; transcribed from DEVIATIONS.md Table 1. TODO(author): review.
@@ -244,8 +244,8 @@ hp = [
         ("learning rate (cosine decay to); warmup steps; weight decay; gradient clip", r"$\lrPThree$ ($\minLrPThree$); \warmupPThree; \wdPThree; \clipPThree")]),
     ("Evaluation", [
         ("paired games per policy; action readout", r"\nBoards; sampled"),
-        ("decisions per game (action repeat); MuJoCo", r"\episodeSteps\ (\actionRepeat); \mujocoVersion"),
-        ("optimizer (all phases); PyTorch on the rented GPUs and on the laptop", r"AdamW; \torchPods\ and \torchLaptop")]),
+        ("decisions per game (action repeat); MuJoCo; dm\\_control (laptop)", r"\episodeSteps\ (\actionRepeat); \mujocoVersion; \dmControlLaptop"),
+        ("optimizer (all phases); PyTorch (Python) on the rented GPUs and on the laptop", r"AdamW; \torchPods\ (\pythonPods) and \torchLaptop\ (\pythonLaptop)")]),
 ]
 hrows = []
 for group, items in hp:
@@ -255,7 +255,7 @@ t6 = rf"""% Hyperparameters. Written by analysis/paper_tables_v2.py; every cell 
 \begin{{table}}[H]
 \centering
 \small
-\caption{{Settings of the corrected pipeline, read from the checkpoints and launch scripts. Dreamer 4 trains a \dreamerParamsTokenizer M tokenizer and a \dreamerParamsDynamics B dynamics model \citep{{hafner2025dreamer4}}.}}
+\caption{{Settings of the corrected pipeline, read from the checkpoints and launch scripts. Dreamer 4 trains a \dreamerParamsTokenizer M tokenizer and a \dreamerParamsDynamics B world model, which it calls the dynamics model \citep{{hafner2025dreamer4}}.}}
 \label{{tab:hparams}}
 \begin{{tabular}}{{@{{}}L{{7.2cm}}L{{6.6cm}}@{{}}}}
 \toprule
@@ -284,13 +284,13 @@ t7 = rf"""% Every imagination run. Written by analysis/paper_tables_v2.py from p
 \begin{{table}}[H]
 \centering
 \scriptsize
-\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. Imagined return is the mean $\lambda$ return of the imagined rollouts over the \horizon step horizon, including the bootstrapped value at the last step, averaged over the last 500 training steps; it is on a different scale from the real return and is read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was evaluated on one Blackwell card, an RTX 5070 Ti.}}
+\caption{{Every imagination run of the corrected pipeline on the same \nBoards games. SE is the paired standard error of the gain over those games. Imagined return is the mean $\lambda$ return of the imagined rollouts over the \horizon step horizon, including the bootstrapped value at the last step, averaged over the last \riseWindow training steps; it is on a different scale from the real return and is read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's own games. The evaluation GPU is the card that scored the imagination policy; every BC parent was evaluated on one Blackwell card, an RTX 5070 Ti.}}
 \label{{tab:runs_all}}
 \setlength{{\tabcolsep}}{{3.2pt}}
 \begin{{tabular}}{{@{{}}rrrrrrrrrrl@{{}}}}
 \toprule
 draw & seed & BC catch & imag.\ catch & gain & SE & BC return & imag.\ return & imagined return & reward corr. & evaluation GPU \\
- & & (\%) & (\%) & (pts) & (pts) & & & & & \\
+ & & (\%) & (\%) & (pts) & (pts) & (real) & (real) & ($\lambda$) & & \\
 \midrule
 {chr(10).join(rrows)}
 \bottomrule

@@ -473,7 +473,7 @@ def main():
     add("returnMax", str(ar * 500), "largest possible return (reward 1 per simulator step in the cup)", "setup", srcE, "1000")
     add("mujocoVersion", mj, "MuJoCo version recorded by the evaluator", "setup", srcE, "3.3.7")
     nb = re.search(r"for _ in range\((\d+)\)", (P3 / "analysis/scripts/imagined_vs_real.py").read_text()).group(1)
-    add("bootReplicates", f"{int(nb):,}".replace(",", "{,}"), "replicates of the draw-then-seed bootstrap", "C10", "phase3/analysis/scripts/imagined_vs_real.py", "20{,}000")
+    add("bootReplicates", str(int(nb)), "replicates of the draw-then-seed bootstrap", "C10", "phase3/analysis/scripts/imagined_vs_real.py", "20000")
     add("nReadoutEvals", str(det.size), "deterministic evaluations (16 policies x 2 readouts)", "C12", srcR, "32")
 
     # ───────────── demonstrations ─────────────
@@ -575,6 +575,13 @@ def main():
     add("policyBins", str(dc["policy_num_bins"]), "bins per action dimension of the categorical policy head", "setup", srcC, "41")
     add("kMax", str(dc["K_max"]), "finest shortcut grid: smallest step size is 1/kMax", "setup", srcC, "64")
     add("kSample", str(ic["K_imagination"]), "denoising steps per generated frame in imagination (step size 1/kSample)", "setup", srcC, "4")
+    add("imagReadSignal", f((ic["K_imagination"] - 1) / ic["K_imagination"], 2), "signal level of the new frame at the last denoising step, where imagination reads the agent state ((K-1)/K)", "setup", srcC + "; imagination/rollout.py (tau_k = k / K)", "0.75")
+    add("dreamerEvalEpisodes", "1000", "evaluation episodes behind each Dreamer 4 success rate (paper text)", "setup", "CONSTANT: arXiv 2509.24527, Table 7 caption", "1000")
+    import sys as _sys, importlib.metadata as _md
+    _meta = json.load(open(BK / "wandb_logs/wandb/run-20260920_083236-4bupwxn9/files/wandb-metadata.json"))
+    add("pythonPods", _meta["python"].split()[-1], "Python version on the rented GPUs (corrected Phase 1 run)", "C14", "wandb-metadata.json of the corrected Phase 1 run", "3.12.3")
+    add("pythonLaptop", _sys.version.split()[0], "Python version of the laptop environment (parent evaluations and checks)", "C14", "the conda environment that runs this script", "3.10.19")
+    add("dmControlLaptop", _md.version("dm_control"), "dm_control version of the laptop environment, installed 2025-11-22 and unchanged since (not recorded on the rented evaluation machines)", "C14", "package metadata of the conda environment", "1.0.34")
     add("ctxSignal", f(1 - dc["tau_ctx"], 1), "signal level of context frames (1 minus tau_ctx)", "setup", srcC, "0.9")
     add("ctxFrames", str(ic["num_context_frames"]), "real context frames before each imagined rollout", "setup", srcC, "4")
     add("horizon", str(ic["imagination_horizon"]), "imagination horizon, steps", "setup", srcC, "15")
@@ -605,7 +612,7 @@ def main():
 
     # ───────────── constants from wandb training logs (NOT regenerated; sheet BK / BO) ─────────────
     add("bootArtifactMedian", "838", "OLD Phase 1: median raw bootstrap loss, steps 4,500-17,000 (wandb)", "C7", "CONSTANT: sheet BK", "838")
-    add("bootArtifactEnd", "288{,}600", "OLD Phase 1: raw bootstrap loss at the end of training (wandb)", "C7", "CONSTANT: sheet BO", "288{,}600")
+    add("bootArtifactEnd", "288600", "OLD Phase 1: raw bootstrap loss at the end of training (wandb)", "C7", "CONSTANT: sheet BO", "288600")
     add("dreamerMouseClasses", "121", "Dreamer 4 (Minecraft): classes of the joint categorical for mouse movement (11 x 11)", "setup", "CONSTANT: Dreamer 4 paper text, 'mouse actions as a categorical with 121 classes'", "121")
     add("bootSignal", "0.0004", "genuine raw bootstrap loss once the artifact is removed (wandb)", "C7", "CONSTANT: sheet BK", "0.0004")
 
