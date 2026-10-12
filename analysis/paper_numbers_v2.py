@@ -374,6 +374,19 @@ def main():
     add("tdOldSmall", f(to_[dsm], 4), "... at the smallest step 1/64", "C9", srcTD, "0.0037")
     add("tdNewMin", f(min(tn_.values()), 4), "corrected: error at signal level 0.6-0.8, all step sizes present, smallest", "C9", srcTD, "0.0039")
     add("tdNewMax", f(max(tn_.values()), 4), "... largest", "C9", srcTD, "0.0049")
+    # the step-size averages include frame 0 (kept at tau 0.9 at every step size by the evaluator); without the tau 0.8-1.0 bin:
+    def notop(tag):
+        acc = {}
+        for r in csv.DictReader(open(BK / f"eval_held_out/evaldyn_{tag}/tau_d_joint_metrics.csv")):
+            n = int(r["count"])
+            if n and float(r["tau_start"]) < 0.8 - 1e-9:
+                a = acc.setdefault(float(r["d_value"]), [0.0, 0]); a[0] += n * float(r["latent_mse"]); a[1] += n
+        return {d: s / n for d, (s, n) in acc.items()}
+    no_, nn_ = notop("OLD_e320"), notop("JOINT_e320")
+    rat = [no_[d] / no_[dsm] for d in no_ if d != dsm and d < 1.0]            # the five shortcut steps below 1
+    assert len(rat) == 5 and no_[1.0] <= nn_[1.0], "at step size 1 the old model must be no worse than the corrected one"
+    add("errOldNoTopMin", f(min(rat), 0), "OLD released, signal levels below 0.8 (where frame 0 never sits): shortcut-step error as a multiple of the smallest-step error, five steps below 1, smallest", "C7", srcTD, "13")
+    add("errOldNoTopMax", f(max(rat), 0), "... largest", "C7", srcTD, "24")
     add("tdTauLo", "0.6", "lower edge of the signal-level bin used for the td* macros", "C9", srcTD, "0.6")
     add("tdTauHi", "0.8", "upper edge of that bin", "C9", srcTD, "0.8")
     tmods = {r["model"] for r in csv.DictReader(open(BK / "timing_new_draws/timing_summary.csv"))}
@@ -541,7 +554,8 @@ def main():
     add("registerTokens", g1("num-register-tokens"), "register tokens", "setup", "recorded arguments of the corrected Phase 1 run (wandb-metadata.json)", "4")
     add("curriculumWarmup", g1("curriculum-warmup-steps"), "flow only steps before the bootstrap loss ramps in", "setup", "recorded arguments of the corrected Phase 1 run (wandb-metadata.json)", "2000")
     add("curriculumRamp", g1("curriculum-ramp-steps"), "global step at which the bootstrap ramp is complete; the ramp starts right after the flow only steps", "setup", "recorded arguments of the corrected Phase 1 run (wandb-metadata.json)", "4000")
-    add("torchPods", "2.4.1", "PyTorch version on the rented GPUs (corrected pipeline)", "C14", "CONSTANT: sheet BU/K (pods torch 2.4.1, py3.11)", "2.4.1")
+    _req = (BK / "wandb_logs/wandb/run-20260920_083236-4bupwxn9/files/requirements.txt").read_text()   # 2.4.1 was the OLD pipeline's pods (sheet lines 121, 137, 1259)
+    add("torchPods", re.search(r"^torch==([0-9.]+)", _req, re.M).group(1), "PyTorch version on the rented GPUs (corrected pipeline)", "C14", "requirements.txt recorded by the corrected Phase 1 run; the same value was read on 2026-10-12 from two Phase 2 and two Phase 3 runs", "2.8.0")
     add("torchLaptop", "2.9.1", "PyTorch version on the laptop (checks and re-evaluations)", "C14", "CONSTANT: sheet BU (laptop torch 2.9.1)", "2.9.1")
     add("warmupPOne", g1("warmup-steps"), "Phase 1 warmup steps", "setup", "recorded arguments of the corrected Phase 1 run (wandb-metadata.json)", "1000")
     add("wdPOne", g1("weight-decay"), "Phase 1 weight decay on matrices other than attention and feed forward", "setup", "recorded arguments of the corrected Phase 1 run (wandb-metadata.json)", "0.01")

@@ -153,6 +153,7 @@ dev = [
     ("attention soft cap", "on", "off; the latent rank collapsed with it on", "medium"),
     ("tokenizer loss", "MSE plus 0.2 LPIPS, normalized; mask ratio drawn per image, including no mask", "MSE on masked patches only; LPIPS on a composite image; no normalization; one mask ratio per clip", "the unmasked case gives zero loss"),
     ("tokenizer encoding context", "frame by frame", "training encodes 8 or 32 frames jointly; deployment encodes single frames", "latent codes depend on the slot position"),
+    ("frozen tokenizer", "the world model trains on the output of a frozen tokenizer", "weights frozen, but dropout and drop path stayed active while the tokenizer encoded the training windows of Phases 1 and 2; both are off in imagination and at evaluation", "unintended; untested"),
     ("policy head and readout", "categorical or binary, readout unspecified", "41 bins per action dimension; actions sampled at evaluation", "deterministic readouts collapse (Discussion)"),
     ("Phase 2 data and learning rates", "half uniform, half task relevant; BC on the relevant half", "uniform windows over all 216 training episodes; BC on all of them; world model at 0.3 times the learning rate, heads at 3 times", "clones failed episodes"),
     ("first imagined transition", "action from the policy", "the first imagined step gets a zero action", "every rollout starts with a step the policy did not choose"),
