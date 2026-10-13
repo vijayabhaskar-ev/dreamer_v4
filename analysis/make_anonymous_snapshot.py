@@ -124,7 +124,8 @@ def main():
     n_scrub = 0
     SCRUB = [(HOME_PREFIX, "<results-backup>/"), ("/home/vijay/Documents/Projects/dreamer_v4/", "<repo>/"), ("/home/vijay", "<home>"),
          ('A = os.path.expanduser("~/Documents/Projects/dreamer_v4_phase1_aligned_backup/phase3/analysis")', 'A = os.path.dirname(os.path.abspath(__file__))   # p3_runs.csv and p3_wandb_curves.csv sit beside this script'),
-         ("~/Documents/Projects/dreamer_v4_phase1_aligned_backup", "<results-backup>"), ('Path.home() / "Documents/Projects/dreamer_v4_phase1_aligned_backup', 'Path("<results-backup>'),
+         ("~/Documents/Projects/dreamer_v4_phase1_aligned_backup", "<results-backup>"), ('Path.home() / "Documents/Projects/dreamer_v4_phase1_aligned_backup/phase3/analysis/p3_runs.csv"', 'Path("<results-backup>/phase3/analysis/p3_runs.csv")'),
+         ('str(Path.home() / "Documents/Projects/dreamer_v4_phase1_aligned_backup")', '"<results-backup>"'), ('Path.home() / "Documents/Projects/dreamer_v4_phase1_aligned_backup"', 'Path("<results-backup>")'),
          ("~/Documents/Projects/dreamer_v4", "<repo>"), ("~/.conda/envs/dreamer_v4/bin/python", "python"), ("# override on RunPod:", "# override on a pod:"),
          ("2026-09-27 (14:55 IST)", "2026-09-27"), ("2026-09-27T21:17:16+05:30", "2026-09-27"),
              ("# TMLR paper experiments — CATEGORICAL pipeline (the published artifact:\n# GitHub/HF agent_bc.pt + agent_imagination_rl.pt were stripped from these dirs).",
