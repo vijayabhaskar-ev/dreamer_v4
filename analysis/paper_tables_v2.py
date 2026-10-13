@@ -134,7 +134,7 @@ t3 = rf"""% The v1 verification table with two added columns. Written by analysi
 \label{{tab:checks}}
 \begin{{tabular}}{{@{{}}L{{2.2cm}}L{{2.9cm}}L{{1.8cm}}L{{4.7cm}}L{{2.9cm}}@{{}}}}
 \toprule
-component & check & result & could it see defect 1 (action timing)? & could it see defect 2 (shortcut loss)? \\
+component & check & result & could it see defect 1 (action timing)? & could it see defect 2 (bootstrap loss)? \\
 \midrule
 {chr(10).join(crow)}
 \bottomrule
