@@ -86,7 +86,7 @@ t2 = rf"""% Leave-one-draw-out table. Written by analysis/paper_tables_v2.py; ch
 \begin{{table}}[H]
 \centering
 \small
-\caption{{Leave one draw out: the mean gain over the remaining {len(draws) - 1} draws (95\% $t$ interval) and the standard deviations between draws and within a draw (one way random effects), with each draw left out in turn. With all \nDraws draws: mean \gainMeanExact\ [\gainLoExact, \gainHiExact], sd between draws \sdBetween, sd within a draw \sdWithin.}}
+\caption{{Leave one draw out. Each row leaves out one draw and gives the mean gain over the remaining draws with its 95\% $t$ interval, and the standard deviations between draws and within a draw from the one way random effects fit. With all \nDraws draws the mean gain is \gainMeanExact points. Its interval runs from \gainLoExact to \gainHiExact points. The standard deviation between draws is \sdBetween points and within a draw \sdWithin points.}}
 \label{{tab:loo}}
 \begin{{tabular}}{{@{{}}lcccc@{{}}}}
 \toprule
@@ -155,11 +155,11 @@ dev = [
     ("tokenizer encoding context", "causal in time, so a frame's code can depend on its past frames", r"training encodes \seqShort\ or \seqLong\ frames jointly; deployment encodes each frame alone, without its past frames", "latent codes depend on the slot position"),
     ("frozen tokenizer", "the world model trains on the output of a frozen tokenizer", "weights frozen, but dropout and drop path stayed active while the tokenizer encoded the training windows of Phases 1 and 2; both are off in imagination and at evaluation", "unintended; untested"),
     ("policy head and readout", "categorical or binary, readout unspecified", r"\policyBins\ bins per action dimension; actions sampled at evaluation", "deterministic readouts collapse (Discussion)"),
-    ("Phase 2 data and learning rates", "half uniform, half task relevant; BC on the relevant half", r"uniform windows over all \nTrainEps\ training episodes; BC on all of them; world model at \lrMultDyn\ times the learning rate, heads at \lrMultHeads\ times", "clones failed episodes"),
+    ("Phase 2 data and learning rates", "half uniform, half task relevant; BC on the relevant half; learning rates unspecified", r"uniform windows over all \nTrainEps\ training episodes; BC on all of them; world model at \lrMultDyn\ times the learning rate, heads at \lrMultHeads\ times", "clones failed episodes"),
     ("first imagined transition", "action from the policy", "the first imagined step gets a zero action", "every rollout starts with a step the policy did not choose"),
     ("signal level when the agent state is read", "unspecified", r"imagination reads at \imagReadSignal\ with step size $1/\kSample$; deployment at \ctxSignal\ with step size $1/\kMax$", "the policy is deployed on a differently noised state; untested"),
     ("RL targets", "continue flag marks non terminal steps; bootstrap from the last value", "done is set only on the last row of each episode; bootstrap from the value of the last imagined state", "the time limit is treated as terminal"),
-    ("scale", r"20 tasks, \dreamerParamsTokenizer M and \dreamerParamsDynamics B parameters, pretraining stages", r"one task, \nParamsTokenizer M and \nParamsWorldModel M parameters, one dataset of \nDemos\ episodes for all phases", "external validity only"),
+    ("scale", r"20 tasks, \dreamerParamsTokenizer M and \dreamerParamsDynamics B parameters, single image batches and a final stage of long batches", r"one task, \nParamsTokenizer M and \nParamsWorldModel M parameters, one dataset of \nDemos\ episodes for all phases", "external validity only"),
     ("data split", "90/10", r"\nTrainEps\ training and \nHeldOut\ held out episodes of \nDemos; the tokenizer saw the \nHeldOut\ held out episodes during its first \tokAllEpsEpochs\ epochs", "tests on held out episodes are clean for the world model but not for the tokenizer"),
 ]
 drow = [" & ".join(r) + r" \\" for r in dev]

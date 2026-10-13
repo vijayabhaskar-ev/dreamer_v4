@@ -20,9 +20,9 @@ DROP = ["CITATION.cff", "README.md", "assets/", "analysis/render_hero.py", "anal
         ".gitignore"]                            # its comments mention the public release and local tool folders   # this script carries the identity list it scans for
 HOME_PREFIX = "/home/vijay/Documents/Projects/dreamer_v4_phase1_aligned_backup/"
 IDENTITY = ["vijay", "eswaran", "outlook.com", "gmail.com", "github", "huggingface", "hf.co/", "hf hub", "hf-downloaded",
-            "public repo", "personal site", ".claude", ".codex", "jarvis", "/home/", "wandb.ai/"]
+            "public repo", "personal site", ".claude", ".codex", "jarvis", "/home/", "wandb.ai/", "+05:30", " ist)", "runpod", "~/documents", "path.home()"]
 ALLOWED = ["github.com/nicklashansen/dreamer4"]    # the public dataset source, not the authors
-TEXT = {".py", ".sh", ".md", ".txt", ".cff", ".json", ".csv", ".yaml", ".yml", ".toml", ".cfg", ".gitignore", ""}
+TEXT = {".py", ".sh", ".md", ".txt", ".cff", ".json", ".csv", ".yaml", ".yml", ".toml", ".cfg", ".gitignore", ".log", ".out", ""}
 
 README = """# Code for "One Retrain Is Not Enough" (anonymous review copy)
 
@@ -49,8 +49,10 @@ analysis scripts behind every number in the paper.
   (`p3_wandb_curves.csv`), the per-game reward analysis (`perstep_metrics.csv` and its script), the timing test runner
   and its summary (`run_timing.py`, `summarize.py`, `timing_summary.csv`), the error-by-step-size and signal-level
   tables of the old and corrected Phase 1 models (`evaldyn_*`), the deterministic readout table, and the logs behind the
-  timing and shuffle numbers (`final_checks.out`, `timing_control_OLD_e040.log`, `timing_tests.log`,
-  `action_shuffle_sensitivity.csv`)
+  timing and shuffle numbers (`final_checks.out`, `timing_control_OLD_e040.log`, `timing_tests.log` for the eight corrected
+  draws and the old Phase 1 model, read by `summarize.py`, `timing_tests_old_draws.log` for the four defective pipeline draws,
+  `evaldyn_OLD_e040/action_shuffle_sensitivity.csv`). Scripts that read the authors' local result folders have those paths
+  replaced by the placeholders `<repo>` and `<results-backup>`; `imagined_vs_real.py` and `summarize.py` read the files beside them
 - `launch/`: the launch scripts of the corrected pipeline's three training phases (`phase1.sh`, `phase2.sh`, `phase3.sh`);
   the tokenizer's settings are in the paper's hyperparameter table. `run_seed_study.sh` and `run_bc_seeds.sh` at the
   top level are the defective pipeline's scripts
@@ -89,8 +91,9 @@ def main():
         for f in ("d_bucket_metrics.csv", "tau_d_joint_metrics.csv", "summary.json"):
             src = BK / f"eval_held_out/evaldyn_{tag}" / f
             if src.exists(): (rc / f"evaldyn_{tag}").mkdir(exist_ok=True); shutil.copy(src, rc / f"evaldyn_{tag}" / f)
-    for f in ("eval_held_out/final_checks.out", "eval_held_out/timing_control_OLD_e040.log", "old_draw_forensics/timing_tests.log"):
+    for f in ("eval_held_out/final_checks.out", "eval_held_out/timing_control_OLD_e040.log", "timing_new_draws/timing_tests.log"):
         shutil.copy(BK / f, rc / Path(f).name)
+    shutil.copy(BK / "old_draw_forensics/timing_tests.log", rc / "timing_tests_old_draws.log")
     shutil.copy(BK / "eval_held_out/evaldyn_OLD_e040/action_shuffle_sensitivity.csv", rc / "evaldyn_OLD_e040" / "action_shuffle_sensitivity.csv")
     # launch scripts that actually ran (provenance_joint/run_phase1.sh did NOT run; see SETUP_FACTS "Exact command")
     ln = tmp / "launch"; ln.mkdir()
@@ -101,11 +104,12 @@ def main():
         if i + 1 < len(args) and not args[i + 1].startswith("--"): eff[args[i]] = args[i + 1]; i += 2
         else: eff[args[i]] = None; i += 1
     assert eff.pop("--dynamics-loss-norm") == "joint"
+    eff.pop("--wandb-name", None)                    # the run name named the cloud vendor and the card; left out (said in the header)
     body = " \\\n  ".join(k if v is None else f"{k} {v}" for k, v in eff.items())
     (ln / "phase1.sh").write_text(
         "#!/bin/bash\n# Corrected Phase 1 run: the effective command, rebuilt from the arguments the run recorded\n"
         "# (where a flag was given twice, the later value won). The run also passed --dynamics-loss-norm joint; in this\n"
-        "# code one joint normalizer is the only mode, so that flag no longer exists.\n"
+        "# code one joint normalizer is the only mode, so that flag no longer exists. The run's --wandb-name is left out;\n# it named the cloud vendor.\n"
         f"python -m dynamics.train_dynamics \\\n  {body}\n")
     p2 = (BK / "phase2/seed11/provenance/run_phase2.sh").read_text()
     p2 = p2.replace("Command = run_bc_seeds.sh (the paper's published categorical pipeline),", "Command = run_bc_seeds.sh (the first build's categorical pipeline),")
@@ -119,6 +123,10 @@ def main():
     lic = tmp / "LICENSE"; lic.write_text(re.sub(r"Copyright \(c\) (\d{4}) .*", r"Copyright (c) \1 The authors", lic.read_text()))
     n_scrub = 0
     SCRUB = [(HOME_PREFIX, "<results-backup>/"), ("/home/vijay/Documents/Projects/dreamer_v4/", "<repo>/"), ("/home/vijay", "<home>"),
+         ('A = os.path.expanduser("~/Documents/Projects/dreamer_v4_phase1_aligned_backup/phase3/analysis")', 'A = os.path.dirname(os.path.abspath(__file__))   # p3_runs.csv and p3_wandb_curves.csv sit beside this script'),
+         ("~/Documents/Projects/dreamer_v4_phase1_aligned_backup", "<results-backup>"), ('Path.home() / "Documents/Projects/dreamer_v4_phase1_aligned_backup', 'Path("<results-backup>'),
+         ("~/Documents/Projects/dreamer_v4", "<repo>"), ("~/.conda/envs/dreamer_v4/bin/python", "python"), ("# override on RunPod:", "# override on a pod:"),
+         ("2026-09-27 (14:55 IST)", "2026-09-27"), ("2026-09-27T21:17:16+05:30", "2026-09-27"),
              ("# TMLR paper experiments — CATEGORICAL pipeline (the published artifact:\n# GitHub/HF agent_bc.pt + agent_imagination_rl.pt were stripped from these dirs).",
               "# Defective pipeline (first build), categorical heads."),
              ("#   Stage 0: n=500 closed-loop eval of the PUBLISHED categorical pipeline", "#   Stage 0: n=500 closed-loop eval of the first build's categorical pipeline"),
