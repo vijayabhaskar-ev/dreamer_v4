@@ -5,7 +5,7 @@
 
 A PyTorch implementation of **Dreamer 4** (Hafner, Yan & Lillicrap, 2025, [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)), the agent that improves a cloned policy by practicing inside a learned world model. All three phases run end to end on one GPU: a masked autoencoder tokenizer, a block causal transformer world model trained with shortcut forcing, a Phase 2 finetune that adds reward, continue and behavior cloning (BC) heads, and Phase 3 imagination training with PMPO. Every policy is scored closed loop in the real `dm_control` environment.
 
-I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is under review. The review is double blind, so this README does not discuss the venue. The code of the submitted version is tagged `paper-submitted`.
+I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is under review (double blind). The code of the submitted version is tagged `paper-submitted`.
 
 ## Result
 
@@ -23,25 +23,25 @@ With one world model and a fixed dataset, I repeated the Phase 2 training 8 time
 | 17 | 56.6 | 79.9 | +21.2, +23.0, +25.6 | +23.3 |
 | **mean over retrains** | 54.55 | 81.70 | 24/24 runs positive | **27.15** [22.20, 32.10] |
 
-The imagination policy beat its BC parent in all 24 runs. Averaged over the 8 retrains, the catch rate rose by **27.15 percentage points** (95% t interval over the retrain means 22.20 to 32.10). The spread between retrains (5.70 points) was about twice the spread between imagination seeds of one retrain (2.76 points), so the Phase 2 retrain is the unit of variation worth reporting.
+The imagination policy beat its BC parent in all 24 runs. Averaged over the 8 retrains, the catch rate rose by **27.15 percentage points** (95% t interval over the retrain means 22.20 to 32.10). The spread between retrains (5.70 points, estimated with a random effects model) was about twice the spread between imagination seeds of one retrain (2.76 points), so the Phase 2 retrain is a unit of variation worth reporting.
 
 The BC parents caught the ball in 54.55% of games, against 84.2% for the demonstrations. So the claim this evidence supports is that imagination training improves on a weak BC start. Whether it improves on a strong one is untested here.
 
-Per game results of the 8 BC parents, the 24 imagination policies and their epoch 10 checkpoints are in `evaluation/tmlr-aligned-*/episodes.csv`. `analysis/paper_numbers_v2.py` and `analysis/paper_tables_v2.py` are the scripts behind every number and table in the paper; their header says which inputs they read.
+Per game results of the 8 BC parents, the 24 imagination policies and the epoch 10 checkpoint of the first seed of each retrain are in `evaluation/*-aligned-*/episodes.csv`. `analysis/paper_numbers_v2.py` and `analysis/paper_tables_v2.py` are the scripts behind every number and table in the paper. They also read training side files (run summaries, timing and step size logs) that are not in this repository, so they do not run from this checkout; the table above can be recomputed from the `episodes.csv` files alone.
 
 ## Two silent defects, and the checks that catch them
 
 My first version of this pipeline had two defects that passed all 12 checks I used to verify it.
 
 1. **Every action reached the model one step late.** The dataset stores, with each frame, the action that led to it; my loader read it as the action taken at that frame. Both the world model and the BC target were affected. The standard action shuffle check passed, because it only shows that a model uses its actions, and a model trained on late actions uses them too.
-2. **The bootstrap loss received almost no learning signal.** Keeping frame 0 almost clean while its step size was drawn at random produced an enormous artifact term, and a separate normalizer for the bootstrap loss then divided the real signal by the artifact's size. The old world model's error at the shortcut steps was 76 to 109 times its error at the smallest step.
+2. **The bootstrap loss received almost no learning signal.** Keeping frame 0 almost clean while its step size was drawn at random produced an enormous artifact term, and a separate normalizer for the bootstrap loss then divided the real signal by the artifact's size. The old world model's error at the shortcut steps was 76 to 109 times its error at the smallest step (13 to 24 times once the almost clean frame 0, an input never used in imagination, is left out).
 
 With both defects present, the same evaluation gave a convincing gain on the first Phase 2 model (+5.9 points, all 6 runs positive) and then gains and losses on further retrains (-32.6, +24.2 and -8.3 points). One retrain was not enough to judge the gain.
 
-Three checks that need no further training catch these failures. They are in `analysis/`:
+Three checks need no further training. The first two catch the two defects, and each was validated on at least one model known to be broken and on the corrected models. The third is aimed at exploitation and is shown on the one case I observed; it is not validated beyond that case. The scripts are:
 
 - **Timing test** (`analysis/phase1_timing_control.py`): feed the trained model the same clips with the actions shifted in time and see which shift predicts best. Every old model preferred late actions; every corrected model preferred correct timing. It took 14 minutes for 9 models on a laptop GPU.
-- **Step size test** (`dynamics/evaluate_dynamics.py`): break the prediction error down by step size and by the signal level of the input. The defective world model's error rose as the input got cleaner; the corrected model's fell.
+- **Step size test** (`dynamics/evaluate_dynamics.py`): break the prediction error down by step size and by the signal level of the input. At the shortcut steps the defective world model's error rose as the input got cleaner; the corrected model's fell.
 - **Reward calibration** (`dynamics/evaluate_env.py`): let the reward head predict rewards while the policy plays real games, and compare with what the environment paid. The one exploitation case I observed came from the defective pipeline's collapsed retrain:
 
 <p align="center">
@@ -52,7 +52,7 @@ Three checks that need no further training catch these failures. They are in `an
 
 ## History of this README
 
-Earlier versions of this README reported results from the defective pipeline: a six run study with a +5.9 point gain, three Phase 2 retrains whose gains ranged from −32.6 to +24.2 points, and before that a single run with no significant gain. Those numbers were produced by the defective code and are superseded by the table above. They stay in the git history (tag `v1-old-pipeline`) because the story of how they were wrong is part of the paper.
+Earlier versions of this README reported results from the defective pipeline: a six run study with a +5.9 point gain, three Phase 2 retrains whose gains ranged from −32.6 to +24.2 points, and before that a single run with no significant gain. Those numbers were produced by the defective code and are superseded by the table above. They stay in the git history (tag `v1-old-pipeline`, the last commit of the defective pipeline) because the story of how they were wrong is part of the paper.
 
 ## Reproduce
 
@@ -61,6 +61,7 @@ Each step needs the output of the one before it. The launch scripts under `launc
 ```bash
 pip install -r requirements.txt
 pip install dm_control mujoco          # closed loop evaluation
+pip install lpips                      # the tokenizer loss has a 0.2 LPIPS term; without the package it is silently dropped
 export MUJOCO_GL=egl                   # headless rendering
 ```
 
@@ -71,12 +72,12 @@ export MUJOCO_GL=egl                   # headless rendering
 3. **Phase 1, world model.** `bash launch/phase1.sh` after pointing `--tokenizer-ckpt` and `--dataset-path` at your files.
 4. **Phase 2, heads and BC policy**, one retrain per seed. Set `BASE`, `TOK` and `NPZ` at the top of `launch/phase2.sh`, then `SEEDS="10 11 12 13 14 15 16 17" bash launch/phase2.sh`.
 5. **Phase 3, imagination training and evaluation**, one job per (retrain, seed): `JOBS="10:1 10:2 10:3" bash launch/phase3.sh`, and so on for retrains 11 to 17.
-6. **Evaluation on its own**, as recorded under `opts` in every `evaluation/*/summary.json`:
+6. **Evaluation on its own**, as recorded under `opts` in the `summary.json` of every closed loop evaluation folder (`evaluation/*-aligned-*/`):
    ```bash
    python -m dynamics.evaluate_env --phase2-ckpt <phase2.pt> --phase3-ckpt <phase3.pt> --tokenizer-ckpt <tokenizer.pt> \
-     --num-episodes 500 --seed-base 0 --image-size 128 --action-repeat 2 --policies phase3 --output-dir evaluation/<name>
+     --num-episodes 500 --seed-base 0 --image-size 128 --action-repeat 2 --policies phase3 --max-gifs 0 --wandb-disabled --output-dir evaluation/<name>
    ```
-   (`--policies bc` for a BC parent.) It writes `episodes.csv` with one row per game.
+   (`--policies bc` for a BC parent; the script still requires a `--phase3-ckpt`.) It writes `episodes.csv` with one row per game.
 7. **Unit tests** of the RL math: `python -m tests.test_imagination_algorithms`, `python -m tests.test_imagination_rollout`, `python -m tests.test_gradient_isolation`.
 
 ### Checkpoints
@@ -107,7 +108,7 @@ dreamer_v4/
 ## Limitations
 
 - One task, one dataset, one tokenizer and one Phase 1 world model. Whether the gain holds elsewhere is untested.
-- The BC parents were weak compared with the demonstrations, partly because the BC head was trained on every episode, including those that never catch. The result covers a weak BC start.
+- The BC parents were weak compared with the demonstrations. One possible reason, untested, is that the BC head was trained on every episode, including those that never catch. The result covers a weak BC start.
 - The two fixes and a fresh Phase 1 training run entered together, so the change between the two pipelines cannot be attributed to either fix alone.
 - Two silent defects passed 12 checks, so a third one that these checks would also miss cannot be ruled out.
 - Single GPU CUDA only; no distributed training.
