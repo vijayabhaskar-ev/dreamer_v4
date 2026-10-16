@@ -82,7 +82,7 @@ export MUJOCO_GL=egl                   # headless rendering
 
 ### Checkpoints
 
-The checkpoints on the Hugging Face Hub at [`vijayabhaskarev/dreamer-v4`](https://huggingface.co/vijayabhaskarev/dreamer-v4) are the **defective pipeline's** and are kept for the record. The corrected pipeline's checkpoints (tokenizer, world model, the 8 Phase 2 retrains and the 24 imagination policies) will be uploaded after the review.
+The corrected pipeline's checkpoints are on the Hugging Face Hub at [`vijayabhaskarev/dreamer-v4`](https://huggingface.co/vijayabhaskarev/dreamer-v4) under `ball_in_cup/corrected/`: the tokenizer, the Phase 1 world model, the 8 Phase 2 retrains and the 24 imagination policies, inference only, with a manifest of sources and checksums. `analysis/release_corrected_checkpoints.py` is the script that produced them. The model card gives a command that reproduces one row of the results table from them. The defective pipeline's checkpoints are kept on the same Hub repository for the record.
 
 ## Repository layout
 
