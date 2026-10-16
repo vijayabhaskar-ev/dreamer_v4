@@ -66,7 +66,7 @@ Evaluation flags are recorded per policy in `evaluation/tmlr-*/summary.json` (`o
 Checkpoints and the dataset are not included (size); they will be released with the camera-ready version.
 
 ## How to reproduce, in order
-Each step needs the output of the one before it. Paths inside the launch scripts (`cd /workspace/dreamer_4` and the
+Each step needs the output of the one before it. Paths inside the launch scripts (`cd /workspace/dreamer_v4` and the
 checkpoint names at their top) are the authors' pod layout; set them to yours before running.
 1. Dataset. Download the `cup-catch` demonstrations (`expert`, `mixed-small`, `mixed-large`) from the public dataset
    (https://github.com/nicklashansen/dreamer4) into `hansen_data/`, then
