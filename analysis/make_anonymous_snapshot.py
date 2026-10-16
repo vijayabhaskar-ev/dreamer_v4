@@ -64,6 +64,33 @@ analysis scripts behind every number in the paper.
 Evaluation flags are recorded per policy in `evaluation/tmlr-*/summary.json` (`opts`); training flags are in the launch scripts under `launch/` and in the paper's appendix.
 
 Checkpoints and the dataset are not included (size); they will be released with the camera-ready version.
+
+## How to reproduce, in order
+Each step needs the output of the one before it. Paths inside the launch scripts (`cd /workspace/dreamer_4` and the
+checkpoint names at their top) are the authors' pod layout; set them to yours before running.
+1. Dataset. Download the `cup-catch` demonstrations (`expert`, `mixed-small`, `mixed-large`) from the public dataset
+   (https://github.com/nicklashansen/dreamer4) into `hansen_data/`, then
+   `python convert_hansen_to_npz.py --hansen-root hansen_data --out-path ball_in_cup_catch_aligned.npz`.
+   The script shifts the stored actions one row earlier per episode (the fix of defect 1).
+2. Tokenizer. `python -m tokenizer.train_tokenizer --dataset offline --dataset-path ball_in_cup_catch_aligned.npz --image-size 128 ...`
+   with the values of the paper's Table 2 (epochs, batch size, learning rate, weight decay, gradient clip, LPIPS);
+   `--help` lists every flag. The authors' run was resumed twice with `--resume-from` (segments in Table 2).
+3. Phase 1 (world model). `bash launch/phase1.sh` after pointing `--tokenizer-ckpt` and `--dataset-path` at your files.
+4. Phase 2 (heads and BC policy), one retrain per seed. Set `BASE`, `TOK` and `NPZ` at the top of `launch/phase2.sh`, then
+   `SEEDS="10 11 12 13 14 15 16 17" bash launch/phase2.sh`.
+5. Phase 3 (imagination training) and evaluation, one job per (draw, seed). `JOBS="10:1 10:2 10:3" bash launch/phase3.sh`
+   and so on for draws 11 to 17. The script also evaluates each policy on games 0 to 499.
+6. Evaluation on its own, as recorded in every `evaluation/*/summary.json` under `opts`:
+   `python -m dynamics.evaluate_env --phase2-ckpt <phase2.pt> --phase3-ckpt <phase3.pt> --tokenizer-ckpt <tokenizer.pt>
+   --num-episodes 500 --seed-base 0 --image-size 128 --action-repeat 2 --policies phase3 --output-dir evaluation/<name>`
+   (`--policies bc` for a BC parent). It writes `episodes.csv` with one row per game.
+7. Numbers. A run's gain is 100 times (mean `caught` of its `episodes.csv` minus mean `caught` of its parent's), paired by
+   game seed; `results_corrected/p3_runs.csv` lists these for the 24 runs. `results_corrected/summarize.py` and
+   `results_corrected/imagined_vs_real.py` run in place and print the timing test summary and the imagined versus real
+   correlations.
+8. Unit tests of the RL math: `python -m tests.test_imagination_algorithms`, `python -m tests.test_imagination_rollout`,
+   `python -m tests.test_gradient_isolation`.
+
 """
 
 def main():
