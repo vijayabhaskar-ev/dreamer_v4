@@ -87,6 +87,11 @@ def main():
               "timing_new_draws/run_timing.py", "timing_new_draws/summarize.py", "timing_new_draws/timing_summary.csv",
               "det_readout_check/readout_table.csv"):
         shutil.copy(BK / f, rc / Path(f).name)
+    import csv                                        # the curves file carries wandb run ids; ship it without them
+    cf = rc / "p3_wandb_curves.csv"; rows = list(csv.DictReader(open(cf))); assert "id" in rows[0]
+    with open(cf, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys())); w.writeheader()
+        for r in rows: r["id"] = ""; w.writerow(r)
     for tag in ("OLD_e320", "JOINT_e320", "OLD_e040"):
         for f in ("d_bucket_metrics.csv", "tau_d_joint_metrics.csv", "summary.json"):
             src = BK / f"eval_held_out/evaldyn_{tag}" / f

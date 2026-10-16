@@ -113,13 +113,13 @@ checks = [
     (r"$\lambda$ returns, advantages", "unit test against hand computed values", "pass", "no: tests the RL arithmetic on given inputs", "no"),
     ("attention firewall", r"$\partial \hat z / \partial\,\mathrm{agent} = 0$", "exact", "no: tests gradient routing", "no"),
     ("gradient routing", "per head isolation", "pass", "no: tests gradient routing", "no"),
-    ("tokenizer", "latent rank, reconstruction", r"rank $\approx 11/16$", "no: frames were correct in both pipelines", "no"),
-    ("reward head", "closed loop calibration", "MAE 0.013 to 0.035", "no: reward rows were paired correctly", "no"),
-    ("continue head", "closed loop calibration", "Brier 0.0020", "no: same as the reward head", "no"),
+    ("tokenizer", "latent rank, reconstruction", r"rank $\approx \chkTokRank$", "no: frames were correct in both pipelines", "no"),
+    ("reward head", "closed loop calibration", r"MAE \chkRewMaeMin\ to \chkRewMaeMax", "no: reward rows were paired correctly", "no"),
+    ("continue head", "closed loop calibration", r"Brier \chkContBrier", "no: same as the reward head", "no"),
     ("PMPO objective", "unit test against the algebra", "pass", "no: tests the policy loss on given inputs", "no"),
     ("action conditioning", "batch shuffle probe", r"policy shift \shufPolicyShiftMin to \shufPolicyShiftMax per action dimension, against \shufPolicyShiftBlindMin to \shufPolicyShiftBlindMax for an action blind model", "no: asks whether actions matter, never when", "no"),
-    ("full stack", "random policy floor", "pass (exact test on the discordant paired games)", "no: a policy with late actions still beats random", "no: a degraded world model still beats random"),
-    ("determinism", "closed loop replay", "90/90 identical", "no: tests reproducibility", "no"),
+    ("full stack", "random policy floor", "pass (exact test on the paired games that only one of the two policies caught)", "no: a policy with late actions still beats random", "no: a degraded world model still beats random"),
+    ("determinism", "closed loop replay", r"\chkReplayN/\chkReplayN\ identical", "no: tests reproducibility", "no"),
     ("software stack", "versions recorded per run", "recorded", "no: bookkeeping", "no"),
     ("provenance", "checkpoint paths recorded", "recorded", "no: bookkeeping", "no"),
 ]
@@ -130,7 +130,7 @@ t3 = rf"""% The v1 verification table with two added columns. Written by analysi
 \begin{{table}}[H]
 \centering
 \scriptsize
-\caption{{The \nChecks checks that passed with both defects present, and why neither defect was visible to them. A further check, the world model's error on training against held out episodes (\wmTrain against \wmHeldOut), was relative and had no reference for the absolute error.}}
+\caption{{The \nChecks checks that passed with both defects present, and why neither defect was visible to them. A further check, the world model's error on training episodes against its error on held out episodes (\wmTrain against \wmHeldOut), was relative and had no reference for the absolute error.}}
 \label{{tab:checks}}
 \begin{{tabular}}{{@{{}}L{{2.2cm}}L{{2.9cm}}L{{1.8cm}}L{{4.7cm}}L{{2.9cm}}@{{}}}}
 \toprule
@@ -151,7 +151,7 @@ dev = [
     ("context corruption at training time", "past inputs are corrupted at inference only", r"frame 0 of every training window is kept at signal level \ctxSignal", "yes; with separate normalizers it caused defect 2"),
     ("frame 0 step size", "no special case", r"frame 0 always gets the smallest step size, $1/\kMax$", "a patch for the row above"),
     ("attention soft cap", "on", "off; the latent rank collapsed with it on", "medium"),
-    ("tokenizer loss", "MSE plus 0.2 LPIPS, normalized; mask ratio drawn per image, including no mask", "MSE on masked patches only; LPIPS on a composite image; no normalization; one mask ratio per clip", "the unmasked case gives zero loss"),
+    ("tokenizer loss", "MSE plus \lpipsWeight\ LPIPS, normalized; mask ratio drawn per image, including no mask", "MSE on masked patches only; LPIPS on a composite image; no normalization; one mask ratio per clip", "the unmasked case gives zero loss"),
     ("tokenizer encoding context", "causal in time, so a frame's code can depend on its past frames", r"training encodes \seqShort\ or \seqLong\ frames jointly; deployment encodes each frame alone, without its past frames", "latent codes depend on the slot position"),
     ("frozen tokenizer", "the world model trains on the output of a frozen tokenizer", "weights frozen, but dropout and drop path stayed active while the tokenizer encoded the training windows of Phases 1 and 2; both are off in imagination and at evaluation", "unintended; untested"),
     ("policy head and readout", "categorical or binary, readout unspecified", r"\policyBins\ bins per action dimension; actions sampled at evaluation", "deterministic readouts collapse (Discussion)"),
@@ -183,8 +183,8 @@ component & Dreamer 4 & this paper & could it hide a defect? \\
 # ---------------- appendix: run inventory (sheet CC, BU; DEVIATIONS.md Table 2) ----------------
 inv = [
     ("Phase 1", r"\nLaunchesPOne", r"\nResultsPOne", "the first launch kept the two separate normalizers of defect 2, collapsed and was discarded; the second stopped before its first training step and was relaunched with the same settings and live logging", "--"),
-    ("Phase 2", r"\nLaunchesPTwo", r"\nDraws", r"\nAbortedPTwo\ aborted (one stopped to restart its pod, one out of GPU memory at start) and relaunched with the same seeds", "--"),
-    ("Phase 3", r"\nLaunchesPThree", r"\nRuns", r"\nAbortedPThree aborted (one slow pod stopped on purpose; two failed on a corrupted tokenizer file) and relaunched with the same seeds", "draws 11 and 12 on Ada, draws 15 and 16 on Blackwell; draws 10, 13, 14, 17 on Ampere"),
+    ("Phase 2", r"\nLaunchesPTwo", r"\nDraws", r"\nAbortedPTwo\ aborted (one stopped to restart its rented machine, one out of GPU memory at start) and relaunched with the same seeds", "--"),
+    ("Phase 3", r"\nLaunchesPThree", r"\nRuns", r"\nAbortedPThree aborted (one stopped on purpose on a slow rented machine; two failed on a corrupted tokenizer file) and relaunched with the same seeds", "draws 11 and 12 on Ada, draws 15 and 16 on Blackwell; draws 10, 13, 14, 17 on Ampere"),
     ("BC parents, evaluation", "--", r"\nDraws", "--", "Blackwell (one RTX 5070 Ti)"),
 ]
 irow = [" & ".join(r) + r" \\" for r in inv]
@@ -219,13 +219,13 @@ hp = [
         ("learning rate, constant; weight decay", r"$\lrTok$; \wdTok"),
         ("epochs; steps per epoch; clip length", r"\tokEpochs; \tokStepsPerEpoch; \tokClipLen\ frames"),
         ("batch size; precision", r"\tokBatchEarly, then \tokBatchLate\ after epoch \tokAllEpsEpochs; fp32, then fp16 mixed precision"),
-        ("mask ratio", r"uniform from 0 to \tokMaskMax, one draw per clip"),
+        ("mask ratio", r"uniform from 0 to \tokMaskMax, one value per clip"),
         ("loss; gradient clip", r"MSE on masked patches plus \lpipsWeight\ LPIPS (VGG); \clipTok")]),
     ("World model (Phase 1)", [
         ("parameters", r"\nParamsWorldModel M"),
         ("depth; width; attention heads (key/value heads)", r"\dynDepth; \embedDim; \dynHeads\ (\dynKvHeads)"),
         ("step sizes; context signal level", r"$1/\kMax$ to 1; \ctxSignal"),
-        ("epochs trained (of a cosine schedule for); batch size", r"\epochsPOne\ (\cosineEpochsPOne); \batchPOne"),
+        ("epochs trained (length of the cosine schedule); batch size", r"\epochsPOne\ (\cosineEpochsPOne); \batchPOne"),
         ("steps per epoch; gradient clip", r"\stepsPerEpochPOne; \clipPOne"),
         ("peak learning rate; warmup steps; weight decay (on attention and feed forward matrices)", r"$\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne)"),
         ("training windows, short and long (share of long batches)", r"\seqShort\ and \seqLong\ frames (\longBatchRatio)"),

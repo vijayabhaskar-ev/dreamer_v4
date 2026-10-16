@@ -410,6 +410,11 @@ def main():
     add("wmHeldOut", f(wv, 3), "... on held-out episodes (the 'no gap' check)", "C8", "evaluation/wm-split-check", "0.528")
     add("wmRatio", f(wv / summ("OLD_e040")["overall_latent_mse"], 0), "held-out error as a multiple of the same run's epoch-40 error (latent MSE)", "C8", "derived", "37")
     add("nChecks", "12", "checks in the v1 verification matrix", "C8", "old/main_v1.tex Table 1", "12")
+    add("chkTokRank", "11/16", "v1 tokenizer check: latent rank over 16 dims", "C8", "old/main_v1.tex at tag v1-old-pipeline, Table 1 (lines 442-447) [CONSTANT]", "11/16")
+    add("chkRewMaeMin", "0.013", "v1 reward head closed loop calibration MAE, smallest", "C8", "old/main_v1.tex at tag v1-old-pipeline, Table 1 (lines 442-447) [CONSTANT]", "0.013")
+    add("chkRewMaeMax", "0.035", "v1 reward head closed loop calibration MAE, largest", "C8", "old/main_v1.tex at tag v1-old-pipeline, Table 1 (lines 442-447) [CONSTANT]", "0.035")
+    add("chkContBrier", "0.0020", "v1 continue head closed loop Brier score", "C8", "old/main_v1.tex at tag v1-old-pipeline, Table 1 (lines 442-447) [CONSTANT]", "0.0020")
+    add("chkReplayN", "90", "v1 determinism check: replayed outcomes identical, out of this many", "C8", "old/main_v1.tex at tag v1-old-pipeline, Table 1 (lines 442-447) [CONSTANT]", "90")
 
     # ───────────── C10: imagined return vs real catch (exploratory) ─────────────
     imag = {(int(r["draw"]), int(r["seed"])): float(r["imagined_return_last500"]) for r in cur}
@@ -449,7 +454,7 @@ def main():
     add("gpuDivergedBoards", "11", "boards (of 500) whose trajectory diverged between the two GPU families on the one re-evaluated run", "C14", srcG, "11")
     add("gpuCatchFlips", "1", "catch outcomes that flipped on that run (453 vs 452 catches)", "C14", srcG, "1")
     add("gpuWorstCase", f(100 * 11 / 500), "worst case if every diverged board flipped one way, points", "C14", srcG, "2.2")
-    add("nAmpereRuns", "12", "imagination policies (draws 10, 13, 14, 17) evaluated on the Ampere family; all BC parents on Ada/Blackwell", "C14", srcG, "12")
+    add("nAmpereRuns", "12", "imagination policies (draws 10, 13, 14, 17) evaluated on the Ampere family; all BC parents on one Blackwell card (RTX 5070 Ti)", "C14", srcG, "12")
     add("nLaunchesPThree", "27", "wandb launches behind the 24 imagination results (3 aborted and relaunched with the same seeds)", "C14", "CONSTANT: sheet CC", "27")
     add("nAbortedPThree", "3", "aborted imagination launches (one killed on a slow pod, two failed on a corrupted tokenizer file)", "C14", "CONSTANT: sheet CC", "3")
     p1logs = ["phase1_train_COLLAPSED_run1.log", "phase1_joint_train_OFFLINE_ATTEMPT_aborted.log", "phase1_joint_train.log"]
