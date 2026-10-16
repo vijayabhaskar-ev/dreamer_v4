@@ -5,7 +5,7 @@
 
 A PyTorch implementation of **Dreamer 4** (Hafner, Yan & Lillicrap, 2025, [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)), the agent that improves a cloned policy by practicing inside a learned world model. All three phases run end to end on one GPU: a masked autoencoder tokenizer, a block causal transformer world model trained with shortcut forcing, a Phase 2 finetune that adds reward, continue and behavior cloning (BC) heads, and Phase 3 imagination training with PMPO. Every policy is scored closed loop in the real `dm_control` environment.
 
-I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is under review. The review is double blind, so I do not name the venue here, and the code of the submitted version is tagged `tmlr-submitted`.
+I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is under review. The review is double blind, so this README does not discuss the venue. The code of the submitted version is tagged `paper-submitted`.
 
 ## Result
 
@@ -27,7 +27,7 @@ The imagination policy beat its BC parent in all 24 runs. Averaged over the 8 re
 
 The BC parents caught the ball in 54.55% of games, against 84.2% for the demonstrations. So the claim this evidence supports is that imagination training improves on a weak BC start. Whether it improves on a strong one is untested here.
 
-Per game results of all 32 policies are in `evaluation/tmlr-aligned-*/episodes.csv`. `analysis/paper_numbers_v2.py` and `analysis/paper_tables_v2.py` are the scripts behind every number and table in the paper; their header says which inputs they read.
+Per game results of the 8 BC parents, the 24 imagination policies and their epoch 10 checkpoints are in `evaluation/tmlr-aligned-*/episodes.csv`. `analysis/paper_numbers_v2.py` and `analysis/paper_tables_v2.py` are the scripts behind every number and table in the paper; their header says which inputs they read.
 
 ## Two silent defects, and the checks that catch them
 
