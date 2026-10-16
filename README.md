@@ -2,274 +2,127 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2509.24527-b31b1b.svg)](https://arxiv.org/abs/2509.24527)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Weights on HF](https://img.shields.io/badge/🤗%20weights-dreamer--v4-blue)](https://huggingface.co/vijayabhaskarev/dreamer-v4)
 
-> **Correction notice (26 September 2026).** The results below were produced by a pipeline with two defects, found in September 2026. First, each action was fed to the world model and to the cloned policy one frame late. Second, the world model's shortcut steps, the large steps that imagination uses, received almost no training signal because of how the loss terms were normalized. Both defects passed every check in the verification suite. The findings reported below, including the gain from imagination training, the swing across Phase-2 retrains, and the "hallucinated success" case, are properties of that defective pipeline and should not be read as properties of Dreamer 4. After both fixes, the cloned policy's catch rate rises from about 40% to about 54% on the same 500 episodes. A full corrected study is in preparation and will replace this page. The released checkpoints are kept, labelled as the defective version, so the numbers below remain reproducible.
+A PyTorch implementation of **Dreamer 4** (Hafner, Yan & Lillicrap, 2025, [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)), the agent that improves a cloned policy by practicing inside a learned world model. All three phases run end to end on one GPU: a masked autoencoder tokenizer, a block causal transformer world model trained with shortcut forcing, a Phase 2 finetune that adds reward, continue and behavior cloning (BC) heads, and Phase 3 imagination training with PMPO. Every policy is scored closed loop in the real `dm_control` environment.
 
-A PyTorch implementation of **DreamerV4** (Hafner, Yan & Lillicrap, DeepMind, 2025 — [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)): a model-based agent that learns by *imagining* trajectories inside a learned world model. All three phases are implemented and run end-to-end — tokenizer → flow-matching world model → behavior-cloned agent → imagination RL — and evaluated **closed-loop in the real environment**, not just inside imagination.
+I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is under review. The review is double blind, so I do not name the venue here, and the code of the submitted version is tagged `tmlr-submitted`.
 
-<p align="center">
-  <img src="assets/hero_static.png" width="920"><br>
-  <em>Two runs of the <b>identical</b> pipeline. Top: a policy whose frozen reward model accumulates a belief of <b>574 reward</b> on an episode where the ball never lands in the cup (true catch rate 0.126). Bottom: a different Phase-2 draw — belief tracks reality (0.704). Both episodes are re-renders of <b>stored, released evaluation episodes</b>, verified bit-for-bit against <code>evaluation/tmlr-*/episodes.csv</code> (<code>analysis/render_hero.py</code>).</em>
-</p>
+## Result
 
-> **TL;DR.** I reproduced DreamerV4 end-to-end on `ball_in_cup_catch` — and found that **the finetune stage is a lottery ticket**. Re-running *only* Phase-2 (identical recipe, bitwise-identical data and pretrained base, different seed) flips imagination-RL's effect from **+24 to −33 points of catch rate**; which draw you start from explains **≈99% of the variance** in deployed outcome. One draw's policy learns to **reward-hack its own frozen reward model** — imagined returns look healthy while real success collapses (the image above) — and **no offline metric we measured reliably flags it in advance**, including properly held-out validation error, which actually *prefers* the exploiting checkpoint. Ten real episodes expose it instantly via the reward model's calibration error.
->
-> Beneath that headline sits the study that found it: **six imagination-RL training runs from one checkpoint, each evaluated on the same 500 seeded episodes.** Averaged over runs, **imagination RL beats behavior cloning by +5.9 points of catch rate** (95% CI [+1.5, +10.4], t(5)=3.40, 6/6 runs positive) and **+64 return**, split roughly evenly between *succeeding more often* and *succeeding sooner/holding longer*. The twist: **our own first single run showed no effect** (p=0.56 at n=500 episodes) — run-to-run spread (sd **4.3 pts**, the observed spread behind that CI) is comparable to the effect itself, so single-run RL comparisons mislead *even with large eval budgets*. Follow-up studies went further: **the Phase-2 checkpoint you start from matters far more than the RL seed.** Coverage still caps the ceiling (best run 0.46 catch vs a **0.84 demo catch rate**). Not SOTA — a small, verified, honestly-measured study.
+With one world model and a fixed dataset, I repeated the Phase 2 training 8 times with different seeds and trained 3 imagination policies from each retrain. Every policy played the same 500 games in the real environment, so each imagination policy is compared with its own BC parent on identical games.
 
----
+| Phase 2 retrain | BC parent catch (%) | imagination catch (%), mean of 3 seeds | gain per seed (points) | retrain mean (points) |
+|:---:|:---:|:---:|:---:|:---:|
+| 10 | 55.8 | 71.0 | +13.0, +14.4, +18.2 | +15.2 |
+| 11 | 53.8 | 87.3 | +35.2, +32.2, +33.2 | +33.5 |
+| 12 | 51.2 | 79.1 | +27.8, +29.2, +26.8 | +27.9 |
+| 13 | 54.4 | 87.7 | +36.2, +30.6, +33.2 | +33.3 |
+| 14 | 56.4 | 82.5 | +29.0, +24.4, +24.8 | +26.1 |
+| 15 | 54.6 | 83.7 | +31.0, +24.2, +32.2 | +29.1 |
+| 16 | 53.6 | 82.3 | +29.4, +25.0, +31.8 | +28.7 |
+| 17 | 56.6 | 79.9 | +21.2, +23.0, +25.6 | +23.3 |
+| **mean over retrains** | 54.55 | 81.70 | 24/24 runs positive | **27.15** [22.20, 32.10] |
 
-## Results — `ball_in_cup_catch` (real-env, closed-loop; 6 training runs × 500 episodes)
+The imagination policy beat its BC parent in all 24 runs. Averaged over the 8 retrains, the catch rate rose by **27.15 percentage points** (95% t interval over the retrain means 22.20 to 32.10). The spread between retrains (5.70 points) was about twice the spread between imagination seeds of one retrain (2.76 points), so the Phase 2 retrain is the unit of variation worth reporting.
 
-Six independent Phase-3 (imagination-RL) training runs — identical recipe, different training seeds — each evaluated on the **same 500 fixed environment seeds** in live `dm_control` (action_repeat 2, ~500 policy decisions/episode, stochastic readout). All runs share one world model + reward/continue heads and initialize from the same BC checkpoint; **only Phase-3 training differs.** Every number below reproduces via `python -m analysis.paper_stats`.
+The BC parents caught the ball in 54.55% of games, against 84.2% for the demonstrations. So the claim this evidence supports is that imagination training improves on a weak BC start. Whether it improves on a strong one is untested here.
 
-**Catch rate** (fraction of 500 episodes that caught the ball; BC baseline **0.356**, random **0.094**):
+Per game results of all 32 policies are in `evaluation/tmlr-aligned-*/episodes.csv`. `analysis/paper_numbers_v2.py` and `analysis/paper_tables_v2.py` are the scripts behind every number and table in the paper; their header says which inputs they read.
 
-| imagination-RL run | catch | Δ vs BC [95% CI] | paired sign-test p |
-|---|:---:|:---:|:---:|
-| run 1 (original) | 0.374 | +1.8 [−3.6, +7.2] | 0.56 |
-| run 2 | 0.446 | +9.0 [+3.6, +14.4] | 0.002 |
-| run 3 | 0.460 | +10.4 [+4.8, +16.0] | 0.001 |
-| run 4 | 0.366 | +1.0 [−4.4, +6.4] | 0.77 |
-| run 5 | 0.392 | +3.6 [−2.0, +9.0] | 0.23 |
-| run 6 | 0.454 | +9.8 [+4.4, +15.4] | 0.001 |
-| **mean of runs** | **0.415** | **+5.9 [+1.5, +10.4]**, t(5)=3.40 | p ≈ 0.02 |
+## Two silent defects, and the checks that catch them
 
-**Return**: +63.6 on average (95% CI [+45.6, +81.7], 6/6 runs positive), decomposing into ~54% *catching more often* and ~46% *catching sooner / holding longer* (return per successful episode 501 → 582).
+My first version of this pipeline had two defects that passed all 12 checks I used to verify it.
 
-> **⚠️ Supersedes the earlier single-run result.** Previous versions of this README (and an accompanying Reddit/X write-up) reported a **single-run** n=50 comparison — BC 0.32 vs imagination-RL 0.38, paired p=0.63 — and concluded "imagination RL ≈ BC." That conclusion did not survive replication: run-to-run spread (observed sd **4.3 pts**) is comparable to the mean effect (+5.9), and that first run landed at the low end. Later work located the variance more precisely — the **BC checkpoint** those six runs all started from is itself the lowest of four BC draws we subsequently trained (0.356 vs 0.374 / 0.434 / 0.448), and the Phase-2 draw, not the RL seed, dominates the outcome. Three of six runs individually look like nothing (p ≥ 0.23) while the six-run average is decisively positive — **the training run, not the evaluation episode, is the unit of inference** for RL comparisons. We keep this note here deliberately: it is the project's most transferable lesson.
+1. **Every action reached the model one step late.** The dataset stores, with each frame, the action that led to it; my loader read it as the action taken at that frame. Both the world model and the BC target were affected. The standard action shuffle check passed, because it only shows that a model uses its actions, and a model trained on late actions uses them too.
+2. **The bootstrap loss received almost no learning signal.** Keeping frame 0 almost clean while its step size was drawn at random produced an enormous artifact term, and a separate normalizer for the bootstrap loss then divided the real signal by the artifact's size. The old world model's error at the shortcut steps was 76 to 109 times its error at the smallest step.
 
-> **These are _offline_ numbers — read them against the demos, not online DreamerV3.** Online DreamerV3 reaches ~0.96 normalized return on cup-catch with millions of *self-collected* environment steps. This pipeline never touches the environment during training — it learns from a **fixed, mixed-quality demo set** (mean 0.58 normalized return; 39% expert, 26% genuinely poor), so the **offline ceiling here is ~0.57, not 0.96.** Our runs sit well below it on matched units — best run 0.26 normalized return vs the demos' 0.57, and 0.46 catch rate vs the demos' 0.84 — and closing the remaining gap is structurally an *online* (DAgger / online-RL) problem.
+With both defects present, the same evaluation gave a convincing gain on the first Phase 2 model (+5.9 points, all 6 runs positive) and then gains and losses on further retrains (-32.6, +24.2 and -8.3 points). One retrain was not enough to judge the gain.
 
-**Three findings:**
+Three checks that need no further training catch these failures. They are in `analysis/`:
 
-1. **Trained ≫ random.** BC 0.356 vs random 0.094 (paired sign test p ≈ 4×10⁻²⁸) — the world model + BC learn a genuine controller.
-2. **Imagination RL improves on BC — on average, with real seed variance.** +5.9 pts catch / +64 return averaged over six runs, 6/6 positive; but per-run outcomes range from null (+1.0) to +10.4, so any *single* run can mislead.
-3. **Deterministic collapses to the random floor.** At n=500, deterministic readouts catch 0.104 (mean) / 0.102 (argmax) — error bars overlapping the 0.094 random floor — versus 0.374 when sampling. PMPO optimizes the *sampled* policy, so sampling is the training-consistent deployment — and a still agent drifts off the always-active expert's state distribution.
-
-### The diagnosis — what limits and what varies
-
-- **Coverage caps the ceiling.** The belief state is healthy **in-distribution** (its action mean ≈ the demos) and degrades only on **out-of-distribution** states the demos never covered; an advantage-weighted-BC probe found `corr(return, action-decisiveness) ≈ 0` (the expert is "always-on"), so offline re-weighting has nothing to exploit.
-- **Training-seed variance is first-order.** Across-run spread of the catch-rate gain (observed sd **4.3 pts** — the number behind the CI) exceeds what per-run evaluation noise alone predicts at n=500 (±2.8 pts); subtracting that noise implies a genuine RL-seed sd of ≈**3.2 pts**, comparable to the mean effect. *(Quote 4.3 to reconstruct the interval; 3.2 only with this derivation attached.)*
-- **But the Phase-2 draw dominates the RL seed.** Retraining Phase-2 three times (identical recipe and data, different seed) gives BC catch 0.448 / 0.434 / 0.374 — and running the same imagination-RL recipe twice on top of *each* gives outcomes of **−32.6 / +24.2 / −8.3** points. Between-draw spread is ≈28 points versus ≈2 points for the RL seed: two runs sharing a Phase-2 draw agree within 0.6–5.6 points, while different draws disagree in sign. Everything above is measured **inside one Phase-2 realization** and should be read that way. Raw per-episode data for every run is in `evaluation/tmlr-*/`.
-- **Imagination compresses what reality separates.** Final *imagined* returns of the six runs span a narrow 74–78 band while their *real* catch rates span 0.366–0.460 — even after training, the world model cannot reliably tell you which policy is the strong one. Closed-loop evaluation is not optional.
-
-### Hallucinated success, on camera
+- **Timing test** (`analysis/phase1_timing_control.py`): feed the trained model the same clips with the actions shifted in time and see which shift predicts best. Every old model preferred late actions; every corrected model preferred correct timing. It took 14 minutes for 9 models on a laptop GPU.
+- **Step size test** (`dynamics/evaluate_dynamics.py`): break the prediction error down by step size and by the signal level of the input. The defective world model's error rose as the input got cleaner; the corrected model's fell.
+- **Reward calibration** (`dynamics/evaluate_env.py`): let the reward head predict rewards while the policy plays real games, and compare with what the environment paid. The one exploitation case I observed came from the defective pipeline's collapsed retrain:
 
 <p align="center">
   <img src="assets/hero_exploiting.gif" width="760"><br>
   <img src="assets/hero_healthy.gif" width="760"><br>
-  <em>Left: the real episode (480px re-render of the same physics; the model itself sees 128px). Right: the frozen reward model's cumulative predicted reward vs. what the environment actually paid. Top — exploiting run, board 29: belief ends at <b>+574</b>, reality at <b>0</b>. Bottom — healthy run, board 0: belief tracks reality to <b>920</b>. Board outcomes match the released per-episode logs exactly; on the exploiting run, 50/50 re-run boards reproduce their stored (return, caught) pairs.</em>
+  <em>Two retrains of the defective pipeline. Top, the collapsed retrain: the frozen reward head keeps predicting reward on a game where the ball never lands in the cup. Bottom, a healthy retrain: predicted reward tracks the real one. Left is the real episode, right the cumulative predicted versus real reward.</em>
 </p>
 
-This is the model-based analogue of reward-model overoptimization: the policy improves against a frozen learned reward while true performance collapses — and the KL-to-prior safeguard cannot prevent it, because the KL is evaluated on *imagined* states while the drift happens on *real* ones. Regenerate with `python -m analysis.render_hero render && python -m analysis.render_hero compose` (needs the factorial checkpoints; every episode is verified against the stored eval before use).
+## History of this README
 
-### Readout ablation (zero-confound: one policy, read three ways; n = 500)
+Earlier versions of this README reported results from the defective pipeline: a six run study with a +5.9 point gain, three Phase 2 retrains whose gains ranged from −32.6 to +24.2 points, and before that a single run with no significant gain. Those numbers were produced by the defective code and are superseded by the table above. They stay in the git history (tag `v1-old-pipeline`) because the story of how they were wrong is part of the paper.
 
-| readout | caught | 95% CI | why |
-|---|:---:|:---:|---|
-| `mean` (Σ pₖ·cₖ) | 0.104 | [0.077, 0.131] | distribution mean |
-| `argmax` (mode) | 0.102 | [0.075, 0.129] | most-likely bin |
-| `sample` | **0.374** | — | on-policy draw |
-| *random floor* | *0.094* | *[0.068, 0.120]* | *reference* |
+## Reproduce
 
-Both deterministic intervals cover the random floor: the collapse is **total, not partial**. (An earlier n=30 estimate of 0.17 was small-sample noise — superseded.)
-
-`mean ≈ argmax` to the decimal ⇒ the per-state conditionals are ~unimodal, so "deploy the mean, not the mode" **cannot** help. The collapse is the **deterministic-map / OOD-drift** effect — only sampling is robust to it, and the actor was *trained* on sampled actions, so sampling is the training-consistent deployment.
-
----
-
-## The world model
-
-<p align="center">
-  <img src="assets/policy_stochastic_catch.gif" width="300">
-  <img src="assets/world_model_rollout.gif" width="420"><br>
-  <em>Left: the trained agent catching and holding the ball (stochastic policy). Right: the learned flow-matching world model — ground truth vs. autoregressive prediction, decoded to pixels.</em>
-</p>
-
-The dynamics model is a 12-layer block-causal transformer trained with a **flow-matching** objective (+ bootstrap loss + curriculum) to denoise future latents given past latents, actions, and the (τ, d) flow parameters. Agent tokens read the world-model state through an asymmetric attention mask so the policy can be trained without contaminating the frozen world model.
-
----
-
-## Quickstart — reproduce the result
+Each step needs the output of the one before it. The launch scripts under `launch/` are the commands that produced the paper's runs; the `cd /workspace/dreamer_v4` and checkpoint paths at their top are my pod layout, so set them to yours.
 
 ```bash
-git clone https://github.com/vijayabhaskar-ev/dreamer_v4.git && cd dreamer_v4
 pip install -r requirements.txt
-pip install dm_control mujoco            # for the real-env eval
-export MUJOCO_GL=egl                     # headless render (osmesa on CPU-only hosts)
-
-# pull the pretrained checkpoints (~814 MB) from the Hugging Face Hub
-hf download vijayabhaskarev/dreamer-v4 --include "ball_in_cup/*" --local-dir checkpoints-hf
-
-# reproduce the headline table (random vs BC vs imagination-RL)
-python -m dynamics.evaluate_env \
-  --phase2-ckpt    checkpoints-hf/ball_in_cup/agent_bc.pt \
-  --phase3-ckpt    checkpoints-hf/ball_in_cup/agent_imagination_rl.pt \
-  --tokenizer-ckpt checkpoints-hf/ball_in_cup/tokenizer.pt \
-  --task ball_in_cup_catch --action-dim 2 \
-  --num-episodes 50 --policies phase3,bc,random \
-  --device cuda --readout sample --wandb-disabled --output-dir eval-stoch    # --readout argmax → deterministic column
+pip install dm_control mujoco          # closed loop evaluation
+export MUJOCO_GL=egl                   # headless rendering
 ```
 
-Expected at n=500: `random` 0.094 ≪ `bc` 0.356, `phase3` 0.374 (catch rate; exact on same hardware — the eval is seed-deterministic). Short runs differ: at n=50 these read ≈0.10 / 0.32 / 0.38 — sampling noise, not a broken pipeline. Note this reproduces the **released checkpoint** (training run 1 of 6); the headline result averages six runs — see the Results table, and `run_seed_study.sh` + `analysis/paper_stats.py` to reproduce the full study. Outputs land in `eval-stoch/`.
+1. **Dataset.** Download the `cup-catch` demonstrations (`expert`, `mixed-small`, `mixed-large`) from [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4) into `hansen_data/`, then
+   `python convert_hansen_to_npz.py --hansen-root hansen_data --out-path ball_in_cup_catch_aligned.npz`.
+   The script shifts the stored actions one row earlier per episode (the fix of defect 1). The data are not redistributed here.
+2. **Tokenizer.** `python -m tokenizer.train_tokenizer --dataset offline --dataset-path ball_in_cup_catch_aligned.npz --image-size 128 ...` with the settings in the paper's hyperparameter table (`--help` lists every flag).
+3. **Phase 1, world model.** `bash launch/phase1.sh` after pointing `--tokenizer-ckpt` and `--dataset-path` at your files.
+4. **Phase 2, heads and BC policy**, one retrain per seed. Set `BASE`, `TOK` and `NPZ` at the top of `launch/phase2.sh`, then `SEEDS="10 11 12 13 14 15 16 17" bash launch/phase2.sh`.
+5. **Phase 3, imagination training and evaluation**, one job per (retrain, seed): `JOBS="10:1 10:2 10:3" bash launch/phase3.sh`, and so on for retrains 11 to 17.
+6. **Evaluation on its own**, as recorded under `opts` in every `evaluation/*/summary.json`:
+   ```bash
+   python -m dynamics.evaluate_env --phase2-ckpt <phase2.pt> --phase3-ckpt <phase3.pt> --tokenizer-ckpt <tokenizer.pt> \
+     --num-episodes 500 --seed-base 0 --image-size 128 --action-repeat 2 --policies phase3 --output-dir evaluation/<name>
+   ```
+   (`--policies bc` for a BC parent.) It writes `episodes.csv` with one row per game.
+7. **Unit tests** of the RL math: `python -m tests.test_imagination_algorithms`, `python -m tests.test_imagination_rollout`, `python -m tests.test_gradient_isolation`.
 
-### Pretrained checkpoints
+### Checkpoints
 
-Hosted on the Hub at [`vijayabhaskarev/dreamer-v4`](https://huggingface.co/vijayabhaskarev/dreamer-v4) — inference-only (optimizer state stripped).
-
-| file | what it is | size |
-|---|---|---|
-| `ball_in_cup/tokenizer.pt` | masked-autoencoder tokenizer (128×128) | 300 MB |
-| `ball_in_cup/agent_bc.pt` | BC agent — world model + categorical policy + reward/continue heads | 507 MB |
-| `ball_in_cup/agent_imagination_rl.pt` | imagination-RL policy + value heads (loads **on top of** `agent_bc`) | 7 MB |
-| `ball_in_cup/world_model.pt` | world-model base, before agent finetuning — optional, only to retrain the agent | 491 MB |
-
-> Dataset: derived from expert demos in [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4); the data itself is not redistributed — regenerate it with `convert_hansen_to_npz.py`.
-
----
-
-## Architecture at a glance
-
-```
-   raw frames (B, T, 3, H, W)            H = W = 128  (ball_in_cup_catch)
-            │
-            ▼
-   ┌──────────────────────┐
-   │  Tokenizer  (MAE)    │   spatial 8×8 patches → 32 latent tokens / frame
-   │  encoder ─► z_clean  │   bottleneck latent_dim, tanh
-   │  decoder ─► recon    │   loss = masked MSE + 0.2 · masked LPIPS
-   └──────────┬───────────┘
-              │ frozen after Phase 1
-              ▼
-   ┌──────────────────────┐
-   │  Dynamics            │   12-layer transformer, embed_dim 512, GQA
-   │  (flow matching)     │   spatial attn every layer, temporal every 4
-   │  z_noised, τ, d, a   │   block-causal across time, sliding window C = 16
-   │  ─► ẑ                │   loss = flow MSE + bootstrap (curriculum-mixed)
-   │  + agent tokens ─► h │   asymmetric mask: agent sees all, world ignores agent
-   └──────────┬───────────┘
-              │
-              ▼
-   ┌──────────────────────┐
-   │  Heads (on h)        │   reward:   255 symexp-twohot bins
-   │                      │   continue: Bernoulli
-   │                      │   value:    255 symexp-twohot bins  (Phase 3)
-   │                      │   policy:   categorical (per-dim, 41 bins)  ← multimodal,
-   │                      │             a drop-in for the paper's diagonal Gaussian
-   └──────────┬───────────┘
-              │
-              ▼
-   ┌──────────────────────┐
-   │  Imagination loop    │   H = 15 steps, K = 4 Euler denoise sub-steps
-   │  (Phase 3)           │   λ-returns (γ = 0.997, λ = 0.95)
-   │                      │   PMPO policy loss (α = 0.5, β = 0.3, reverse KL)
-   └──────────────────────┘
-```
-
-The three phases, in one line each:
-- **Phase 1 — Tokenizer.** Spatio-temporal masked autoencoder; 8×8 patches → 32 latent tokens/frame; loss = masked MSE + 0.2·LPIPS; tube masking for temporal consistency.
-- **Phase 2 — Dynamics + agent.** Block-causal flow-matching transformer with bootstrap-loss curriculum; agent tokens + multi-token-prediction heads (reward/continue/policy) are finetuned on top, **behavior-cloning** the demos.
-- **Phase 3 — Imagination RL.** Freeze the world model; roll out H steps inside it; train policy + value heads with λ-returns and **PMPO** (preference-based MPO, reverse-KL to a frozen prior).
-
----
-
-## Training from scratch
-
-> **Dataset.** The eval above needs no data (it uses the checkpoints). To train from scratch, build the offline buffer from Hansen's cup-catch demos: get them from [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4), arrange as `hansen_data/{expert,mixed-small,mixed-large}/` (each with `cup-catch-*.png` + `cup-catch.pt`), then convert to the project's `.npz`:
-> ```bash
-> python convert_hansen_to_npz.py --hansen-root hansen_data --out-path ball_in_cup_catch.npz
-> ```
-> Yields a 240-episode, **mixed-quality** buffer (mean ~0.57 normalized return — see [Results](#results--ball_in_cup_catch--real-env-closed-loop-n--50)). The data itself is not redistributed; only the conversion script is.
-
-The training commands log to Weights & Biases by default — append `--wandb-disabled` to any of them to skip it.
-
-```bash
-# Phase 1 — tokenizer
-python -m tokenizer.train_tokenizer --dataset offline --dataset-path data/episodes.npz --epochs 100 --batch-size 32
-
-# Phase 2 — world model + BC agent (categorical policy head)
-python -m dynamics.train_agent \
-  --dynamics-ckpt checkpoints/dynamics/base.pt --tokenizer-ckpt checkpoints/tokenizer/final.pt \
-  --dataset offline --dataset-path ball_in_cup_catch.npz --task ball_in_cup_catch --action-dim 2 \
-  --policy-type categorical --policy-num-bins 41 --mtp-length 8 \
-  --epochs 40 --steps-per-epoch 500 --batch-size 32 --amp
-
-# Phase 3 — imagination RL
-python -m imagination.train_imagination \
-  --phase2-ckpt checkpoints/agent/final.pt --tokenizer-ckpt checkpoints/tokenizer/final.pt \
-  --dataset offline --dataset-path ball_in_cup_catch.npz --action-dim 2 \
-  --policy-type categorical --epochs 15 --batch-size 48 --horizon 15
-```
-
-Unit tests (run from the project root):
-```bash
-python -m tests.test_imagination_algorithms   # λ-returns / advantages / value loss / PMPO
-python -m tests.test_imagination_rollout       # imagine_rollout output contract + grad isolation
-python -m tests.test_gradient_isolation        # forward-mask firewall: z_hat ⊥ agent token
-```
-
----
+The checkpoints on the Hugging Face Hub at [`vijayabhaskarev/dreamer-v4`](https://huggingface.co/vijayabhaskarev/dreamer-v4) are the **defective pipeline's** and are kept for the record. The corrected pipeline's checkpoints (tokenizer, world model, the 8 Phase 2 retrains and the 24 imagination policies) will be uploaded after the review.
 
 ## Repository layout
 
 ```
 dreamer_v4/
-├── tokenizer/         Phase 1 — masked-autoencoder tokenizer (model, masking, losses, trainer)
-├── dynamics/          Phase 2 — flow-matching world model + agent finetuning + real-env eval
-│   ├── dynamic_model.py    transformer + register/agent tokens
-│   ├── flow_matching.py    add_noise, on-device (τ, d) sampling
-│   ├── trainer.py          curriculum, MTP, behavior cloning
-│   ├── evaluate_dynamics.py   world-model rollout GIFs + per-τ metrics
-│   └── evaluate_env.py        ← closed-loop real-env eval (the results above)
-├── imagination/       Phase 3 — imagine_rollout, λ-returns, PMPO, trainer
-├── heads.py           reward / continue / value / policy heads (Gaussian + categorical)
-├── convert_hansen_to_npz.py    build the offline dataset from Hansen's demos
-├── tests/             imagination algebra, rollout contract, mask-firewall checks
+├── tokenizer/         masked autoencoder tokenizer (model, masking, losses, trainer)
+├── dynamics/          world model with shortcut forcing, Phase 2 finetune, real environment evaluation
+│   ├── dynamic_model.py      transformer with register and agent tokens
+│   ├── flow_matching.py      noise schedule and (signal level, step size) sampling
+│   ├── trainer.py            the shortcut loss as one normalized term (defect 2 fix)
+│   ├── evaluate_dynamics.py  error by step size and signal level (the step size test)
+│   └── evaluate_env.py       closed loop evaluation, paired games, reward calibration
+├── imagination/       Phase 3: imagined rollouts, lambda returns, PMPO, trainer
+├── heads.py           reward, continue, value and policy heads (categorical and Gaussian)
+├── analysis/          the timing test and the scripts behind every number and table of the paper
+├── launch/            the launch scripts of the three phases
+├── evaluation/        per game results of every evaluated policy
+├── convert_hansen_to_npz.py   builds the dataset file (defect 1 fix lives here)
+├── tests/             unit tests of the imagination algebra, the rollout contract and the attention firewall
 └── requirements.txt
 ```
 
----
+## Limitations
 
-## What's noteworthy in this implementation
-
-- **Categorical policy head** (`heads.py`) — a per-dim discretized (41-bin) head, a multimodal drop-in for the paper's diagonal Gaussian, with a head-agnostic `act(readout=mean|argmax|sample)` deployment interface. The readout ablation above is run through it.
-- **Asymmetric agent-token mask** (`dynamics/dynamic_model.py`) — adds an agent stream to a pretrained world model without leaking agent state into world-model predictions. This forward-mask firewall is unit-tested: `tests/test_gradient_isolation.py` confirms `∂z_hat/∂agent_token = 0` exactly, while the agent stream still reads the world.
-- **On-device flow-matching RNG** (`dynamics/flow_matching.py`) — keeps the training step on the accelerator, no per-step host sync.
-- **PMPO** (`imagination/algorithms.py`) — preference-based MPO with reverse KL to a frozen prior, partitioned by advantage sign rather than softmax weights; λ-returns detached at the source.
-- **Closed-loop real-env evaluator** (`dynamics/evaluate_env.py`) — the world model acts as a belief encoder (no denoising loop); three policies compared on identical seeds; full calibration + GIFs.
-
----
-
-## Honest limitations
-
-- This is a **single, simple task** (`ball_in_cup_catch`), trained **fully offline** from a fixed, mixed-quality demo set — the relevant ceiling is the demos (0.57 normalized return / 0.84 catch rate — compare like with like), **not** online DreamerV3's ~0.96. Not a state-of-the-art agent.
-- The headline (+5.9 pts, 95% CI [+1.5, +10.4]) averages **six training runs against one BC training run**; BC's own seed variance is unmeasured, and per-run outcomes range from null to +10.4 pts. Claims are about *this recipe on this task*, not offline MBRL in general.
-- Earlier versions of this README reported a single-run null ("imagination-RL ≈ BC, p=0.63"); it is superseded by the six-run study above — kept visible as the project's main methodological lesson.
-- Distributed/multi-GPU training is not implemented; the code targets single-GPU CUDA.
-- Checkpoints embed `dynamics_cfg`/`imagination_cfg` dataclasses — load them with the repo importable (run from the repo root, as the commands above do).
-
----
+- One task, one dataset, one tokenizer and one Phase 1 world model. Whether the gain holds elsewhere is untested.
+- The BC parents were weak compared with the demonstrations, partly because the BC head was trained on every episode, including those that never catch. The result covers a weak BC start.
+- The two fixes and a fresh Phase 1 training run entered together, so the change between the two pipelines cannot be attributed to either fix alone.
+- Two silent defects passed 12 checks, so a third one that these checks would also miss cannot be ruled out.
+- Single GPU CUDA only; no distributed training.
 
 ## References
 
-- Hafner, Yan, Lillicrap — *Training Agents Inside of Scalable World Models* (DreamerV4). [arXiv:2509.24527](https://arxiv.org/abs/2509.24527), 2025.
-- Hafner et al. — *Mastering Diverse Domains through World Models* (DreamerV3). [arXiv:2301.04104](https://arxiv.org/abs/2301.04104), 2023.
-- Lipman et al. — *Flow Matching for Generative Modeling*, 2023.
-- Abdolmaleki et al. — *Maximum a Posteriori Policy Optimization* (MPO), 2018.
+- Hafner, Yan, Lillicrap. *Training Agents Inside of Scalable World Models* (Dreamer 4). [arXiv:2509.24527](https://arxiv.org/abs/2509.24527), 2025.
+- Hansen, Su, Wang. *TD-MPC2: Scalable, Robust World Models for Continuous Control*. ICLR 2024. The demonstrations were collected with TD-MPC2 agents and released at [nicklashansen/dreamer4](https://github.com/nicklashansen/dreamer4).
+- Abdolmaleki et al. *Learning from Negative Feedback, or Positive Feedback or Both* (PMPO). ICLR 2025. The policy objective used in Phase 3.
 
 ## Citation
 
-Independent reproduction — please cite the original DreamerV4 paper; optionally cite this repo:
+Please cite the Dreamer 4 paper for the method. For this implementation:
 
 ```bibtex
-@article{hafner2025dreamerv4,
-  title   = {Training Agents Inside of Scalable World Models},
-  author  = {Hafner, Danijar and Yan, Wilson and Lillicrap, Timothy},
-  journal = {arXiv preprint arXiv:2509.24527},
-  year    = {2025}
-}
-
 @software{eswaran2026dreamerv4,
   title  = {Dreamer V4 --- PyTorch reproduction},
   author = {Eswaran, Vijaya Bhaskar},
@@ -278,6 +131,8 @@ Independent reproduction — please cite the original DreamerV4 paper; optionall
 }
 ```
 
+A citation for the paper will be added once the review is complete.
+
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT, see [`LICENSE`](LICENSE).
