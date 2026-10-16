@@ -24,7 +24,7 @@ IDENTITY = ["vijay", "eswaran", "outlook.com", "gmail.com", "github", "huggingfa
 ALLOWED = ["github.com/nicklashansen/dreamer4"]    # the public dataset source, not the authors
 TEXT = {".py", ".sh", ".md", ".txt", ".cff", ".json", ".csv", ".yaml", ".yml", ".toml", ".cfg", ".gitignore", ".log", ".out", ""}
 
-README = """# Code for "One Retrain Is Not Enough" (anonymous review copy)
+README = """# Code for "Does Imagination Training Improve on Behavior Cloning?" (anonymous review copy)
 
 PyTorch reimplementation of Dreamer 4 (tokenizer, world model with shortcut forcing, Phase 2 finetune with
 reward, continue and BC heads, Phase 3 imagination training with PMPO) on `ball_in_cup` catch, plus the
