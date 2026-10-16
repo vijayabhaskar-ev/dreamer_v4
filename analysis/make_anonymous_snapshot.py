@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "release" / "code_anonymous.zip"
-DROP = ["evaluation/tmlr-cat-seed1-ext300", "evaluation/tmlr-cat-seed1-n200", "evaluation/tmlr-cat-seed2-ext300", "evaluation/tmlr-cat-seed2-n200", "evaluation/tmlr-cat-seed3-ext300", "evaluation/tmlr-cat-seed3-n200", "evaluation/tmlr-cat-seed4-n500", "evaluation/tmlr-cat-seed5-n500", "evaluation/tmlr-cat-seed5-n500-mj337", "evaluation/tmlr-readout-argmax-n500", "CITATION.cff", "README.md", "assets/", "analysis/render_hero.py", "analysis/paper_lint_v2.py",
+DROP = ["evaluation/tmlr-cat-seed5-n500-mj337", "CITATION.cff", "README.md", "assets/", "analysis/render_hero.py", "analysis/paper_lint_v2.py",
         "analysis/make_anonymous_snapshot.py",   # this script carries the identity list it scans for
         ".gitignore"]                            # its comments mention the public release and local tool folders   # this script carries the identity list it scans for
 HOME_PREFIX = "/home/vijay/Documents/Projects/dreamer_v4_phase1_aligned_backup/"
