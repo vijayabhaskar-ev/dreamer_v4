@@ -5,7 +5,7 @@
 
 A PyTorch implementation of **Dreamer 4** (Hafner, Yan & Lillicrap, 2025, [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)), the agent that improves a cloned policy by practicing inside a learned world model. All three phases run end to end on one GPU: a masked autoencoder tokenizer, a block causal transformer world model trained with shortcut forcing, a Phase 2 finetune that adds reward, continue and behavior cloning (BC) heads, and Phase 3 imagination training with PMPO. Every policy is scored closed loop in the real `dm_control` environment.
 
-I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is under review (double blind). The code of the submitted version is tagged `paper-submitted`.
+I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is **Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study** ([PDF](https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf); an arXiv link will follow). The code behind it is tagged `arxiv-v1`.
 
 ## Result
 
@@ -132,7 +132,17 @@ Please cite the Dreamer 4 paper for the method. For this implementation:
 }
 ```
 
-A citation for the paper will be added once the review is complete.
+For the paper (an arXiv entry will replace this when it is live):
+
+```bibtex
+@misc{eswaran2026silentdefects,
+  title  = {Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study},
+  author = {Eswaran, Vijaya Bhaskar},
+  year   = {2026},
+  note   = {Preprint},
+  url    = {https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf}
+}
+```
 
 ## License
 
