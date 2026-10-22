@@ -1,0 +1,51 @@
+% Hyperparameters. Written by analysis/paper_tables_v2.py; every cell is a macro from numbers.tex (read from the checkpoints and launch scripts).
+\begin{table}[H]
+\centering
+\small
+\caption{Settings of the corrected pipeline, read from the checkpoints and launch scripts. Dreamer 4 trains a \dreamerParamsTokenizer M tokenizer and a \dreamerParamsDynamics B world model, which it calls the dynamics model \citep{hafner2025dreamer4}.}
+\label{tab:hparams}
+\begin{tabular}{@{}L{7.2cm}L{6.6cm}@{}}
+\toprule
+setting & value \\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Data}} \\
+episodes (expert / mixed small / mixed large) & \nDemos\ (\nExpertDemos\ / \nMixedSmallDemos\ / \nMixedLargeDemos) \\
+training / held out episodes & \nTrainEps\ / \nHeldOut \\
+decisions per game (action repeat); image size & \episodeSteps\ (\actionRepeat); \imgSize\ by \imgSize\ pixels \\
+\multicolumn{2}{@{}l}{\textit{Tokenizer}} \\
+parameters & \nParamsTokenizer M \\
+patch size; depth; width & \tokPatch; \tokDepth; \embedDim \\
+latent tokens per frame; latent dimension & \latentTokens; \latentDim \\
+learning rate, constant; weight decay & $\lrTok$; \wdTok \\
+epochs; steps per epoch; clip length & \tokEpochs; \tokStepsPerEpoch; \tokClipLen\ frames \\
+batch size; precision & \tokBatchEarly, then \tokBatchLate\ after epoch \tokAllEpsEpochs; fp32, then fp16 mixed precision \\
+mask ratio & uniform from 0 to \tokMaskMax, one value per clip \\
+loss; gradient clip & MSE on masked patches plus \lpipsWeight\ LPIPS (VGG); \clipTok \\
+\multicolumn{2}{@{}l}{\textit{World model (Phase 1)}} \\
+parameters & \nParamsWorldModel M \\
+depth; width; attention heads (key/value heads) & \dynDepth; \embedDim; \dynHeads\ (\dynKvHeads) \\
+step sizes; context signal level & $1/\kMax$ to 1; \ctxSignal \\
+epochs trained (length of the cosine schedule); batch size & \epochsPOne\ (\cosineEpochsPOne); \batchPOne \\
+steps per epoch; gradient clip & \stepsPerEpochPOne; \clipPOne \\
+peak learning rate; warmup steps; weight decay (on attention and feed forward matrices) & $\lrPOne$; \warmupPOne; \wdPOne\ (\wdHeavyPOne) \\
+training windows, short and long (share of long batches) & \seqShort\ and \seqLong\ frames (\longBatchRatio) \\
+context length; register tokens & \contextLength\ frames; \registerTokens \\
+bootstrap curriculum & \curriculumWarmup\ flow only steps, then the bootstrap loss ramps in linearly until step \curriculumRamp \\
+\multicolumn{2}{@{}l}{\textit{Phase 2}} \\
+epochs; steps; batch size & \epochsPTwo; \stepsPTwo; \batchPTwo \\
+base learning rate; world model multiplier; heads multiplier & $\lrPTwo$; \lrMultDyn; \lrMultHeads \\
+cosine decay of the base learning rate to; warmup steps & $\minLrPTwo$; \warmupPTwo \\
+policy head & categorical, \policyBins\ bins per action dimension \\
+heads parameters & \nParamsHeads M \\
+\multicolumn{2}{@{}l}{\textit{Phase 3 (imagination)}} \\
+epochs; steps; batch size & \epochsPThree; \stepsPThree; \batchPThree \\
+real context frames; imagination horizon; sampling steps & \ctxFrames; \horizon; \kSample \\
+PMPO $\alpha$, $\beta$; discount; $\lambda$ & \pmpoAlpha, \pmpoBeta; \discount; \lambdaRet \\
+learning rate (cosine decay to); warmup steps; weight decay; gradient clip & $\lrPThree$ ($\minLrPThree$); \warmupPThree; \wdPThree; \clipPThree \\
+\multicolumn{2}{@{}l}{\textit{Evaluation}} \\
+paired games per policy; action readout & \nBoards; sampled \\
+decisions per game (action repeat); MuJoCo; dm\_control (laptop) & \episodeSteps\ (\actionRepeat); \mujocoVersion; \dmControlLaptop \\
+optimizer (all phases); PyTorch (Python) on the rented GPUs and on the laptop & AdamW; \torchPods\ (\pythonPods) and \torchLaptop\ (\pythonLaptop) \\
+\bottomrule
+\end{tabular}
+\end{table}

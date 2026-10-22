@@ -1,0 +1,17 @@
+% Run inventory. Written by analysis/paper_tables_v2.py from the launch records. No run identifiers (anonymity).
+\begin{table}[H]
+\centering
+\small
+\caption{Training launches behind the reported results, and the GPU family used to evaluate each policy. Ada and Blackwell cards agreed exactly on the games we repeated, and an Ampere card differed on \gpuDivergedBoards of \nBoards games (\Cref{sec:limitations}).}
+\label{tab:runs}
+\begin{tabular}{@{}L{3.0cm}cL{1.2cm}L{5.0cm}L{3.6cm}@{}}
+\toprule
+stage & launches & results & aborted or discarded & evaluation GPU family \\
+\midrule
+Phase 1 & \nLaunchesPOne & \nResultsPOne & the first launch kept the two separate normalizers of defect 2, collapsed and was discarded; the second stopped before its first training step and was relaunched with the same settings and live logging & -- \\
+Phase 2 & \nLaunchesPTwo & \nDraws & \nAbortedPTwo\ aborted (one stopped to restart its rented machine, one out of GPU memory at start) and relaunched with the same seeds & -- \\
+Phase 3 & \nLaunchesPThree & \nRuns & \nAbortedPThree aborted (one stopped on purpose on a slow rented machine; two failed on a corrupted tokenizer file) and relaunched with the same seeds & draws 11 and 12 on Ada, draws 15 and 16 on Blackwell; draws 10, 13, 14, 17 on Ampere \\
+BC parents, evaluation & -- & \nDraws & -- & Blackwell (one RTX 5070 Ti) \\
+\bottomrule
+\end{tabular}
+\end{table}

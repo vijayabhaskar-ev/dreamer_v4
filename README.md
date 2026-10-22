@@ -44,7 +44,7 @@ Per game results of the 8 BC parents, the 24 imagination policies and the epoch 
 python analysis/recompute_from_results.py
 ```
 
-reads only `evaluation/*/episodes.csv`, `evaluation/*/summary.json` and `results_corrected/` and recomputes 55 numbers of the paper, from Table 1 and the headline interval to the defective pipeline's gains, the readout ablation, the reward calibration counts, the error by step size and the timing test, printing each next to the paper's value. All 55 match. The two inputs it does not cover are the demonstration statistics (they need the dataset file, which is not redistributed) and the Phase 2 training curves.
+reads only `evaluation/*/episodes.csv`, `evaluation/*/summary.json` and `results_corrected/` and recomputes 55 numbers of the paper, from Table 1 and the headline interval to the defective pipeline's gains, the readout ablation, the reward calibration counts, the error by step size and the timing test, printing each next to the paper's value. All 55 match. Every number printed in the paper is also listed, with the file it comes from, in `results_paper/NUMBERS.md`. The two inputs it does not cover are the demonstration statistics (they need the dataset file, which is not redistributed) and the Phase 2 training curves.
 
 ## Two silent defects, and the checks that catch them
 
@@ -117,6 +117,7 @@ dreamer_v4/
 ├── analysis/          the timing test and the scripts behind every number and table of the paper
 ├── launch/            the launch scripts of the three phases
 ├── evaluation/        per game results of every evaluated policy
+├── results_paper/    every number and table of the paper as printed (NUMBERS.md, table_*.tex, Tables 5 and 6 as CSV)
 ├── results_corrected/ the analysis outputs behind the tables (per run table, timing and step size tests, reward calibration, readouts)
 ├── assets/            the paper's figures as PNG
 ├── convert_hansen_to_npz.py   builds the dataset file (defect 1 fix lives here)

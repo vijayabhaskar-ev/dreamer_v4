@@ -1,0 +1,21 @@
+% Leave-one-draw-out table. Written by analysis/paper_tables_v2.py; checked against numbers.tex.
+\begin{table}[H]
+\centering
+\small
+\caption{Leave one draw out. Each row leaves out one draw and gives the mean gain over the remaining draws with its 95\% $t$ interval, and the standard deviations between draws and within a draw from the one way random effects fit. With all \nDraws draws the mean gain is \gainMeanExact points. Its interval runs from \gainLoExact to \gainHiExact points. The standard deviation between draws is \sdBetween points and within a draw \sdWithin points.}
+\label{tab:loo}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+draw left out & its mean gain & mean gain of the rest & sd between draws & sd within a draw \\
+\midrule
+10 & 15.2 & 28.86 [25.44, 32.27] & 3.33 & 2.77 \\
+11 & 33.5 & 26.24 [20.92, 31.56] & 5.50 & 2.89 \\
+12 & 27.9 & 27.04 [21.14, 32.94] & 6.16 & 2.91 \\
+13 & 33.3 & 26.27 [20.91, 31.62] & 5.57 & 2.75 \\
+14 & 26.1 & 27.30 [21.41, 33.20] & 6.17 & 2.78 \\
+15 & 29.1 & 26.87 [21.01, 32.72] & 6.17 & 2.45 \\
+16 & 28.7 & 26.92 [21.05, 32.80] & 6.17 & 2.64 \\
+17 & 23.3 & 27.70 [22.01, 33.40] & 5.94 & 2.83 \\
+\bottomrule
+\end{tabular}
+\end{table}

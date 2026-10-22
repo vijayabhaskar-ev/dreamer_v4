@@ -1,0 +1,27 @@
+% Deviations from Dreamer 4. Written by analysis/paper_tables_v2.py; transcribed from DEVIATIONS.md Table 1. TODO(author): review.
+\begin{table}[H]
+\centering
+\scriptsize
+\caption{Where the corrected pipeline still differs from Dreamer 4 \citep{hafner2025dreamer4}, and whether the difference could hide a silent defect.}
+\label{tab:deviations}
+\begin{tabular}{@{}L{2.6cm}L{3.4cm}L{5.2cm}L{3.2cm}@{}}
+\toprule
+component & Dreamer 4 & this paper & could it hide a defect? \\
+\midrule
+bootstrap curriculum & none; shortcut models train without schedules & Phase 1 starts flow only for \curriculumWarmup\ steps and ramps the bootstrap loss in until step \curriculumRamp; off in Phase 2 & low under one normalizer \\
+context corruption at training time & past inputs are corrupted at inference only & frame 0 of every training window is kept at signal level \ctxSignal & yes; with separate normalizers it caused defect 2 \\
+frame 0 step size & no special case & frame 0 always gets the smallest step size, $1/\kMax$ & a patch for the row above \\
+attention soft cap & on & off; the latent rank collapsed with it on & medium \\
+tokenizer loss & MSE plus \lpipsWeight\ LPIPS, normalized; mask ratio drawn per image, including no mask & MSE on masked patches only; LPIPS on a composite image; no normalization; one mask ratio per clip & the unmasked case gives zero loss \\
+tokenizer encoding context & causal in time, so a frame's code can depend on its past frames & training encodes \seqShort\ or \seqLong\ frames jointly; deployment encodes each frame alone, without its past frames & latent codes depend on the slot position \\
+frozen tokenizer & the world model trains on the output of a frozen tokenizer & weights frozen, but dropout and drop path stayed active while the tokenizer encoded the training windows of Phases 1 and 2; both are off in imagination and at evaluation & unintended; untested \\
+policy head and readout & categorical or binary, readout unspecified & \policyBins\ bins per action dimension; actions sampled at evaluation & deterministic readouts collapse (Discussion) \\
+Phase 2 data and learning rates & half uniform, half task relevant; BC on the relevant half; learning rates unspecified & uniform windows over all \nTrainEps\ training episodes; BC on all of them; world model at \lrMultDyn\ times the learning rate, heads at \lrMultHeads\ times & clones failed episodes \\
+first imagined transition & action from the policy & the first imagined step gets a zero action & every rollout starts with a step the policy did not choose \\
+signal level when the agent state is read & unspecified & imagination reads at \imagReadSignal\ with step size $1/\kSample$; deployment at \ctxSignal\ with step size $1/\kMax$ & the policy is deployed on a differently noised state; untested \\
+RL targets & continue flag marks non terminal steps; bootstrap from the last value & done is set only on the last row of each episode; bootstrap from the value of the last imagined state & the time limit is treated as terminal \\
+scale & 20 tasks, \dreamerParamsTokenizer M and \dreamerParamsDynamics B parameters, single image batches and a final stage of long batches & one task, \nParamsTokenizer M and \nParamsWorldModel M parameters, one dataset of \nDemos\ episodes for all phases & external validity only \\
+data split & 90/10 & \nTrainEps\ training and \nHeldOut\ held out episodes of \nDemos; the tokenizer saw the \nHeldOut\ held out episodes during its first \tokAllEpsEpochs\ epochs & tests on held out episodes are clean for the world model but not for the tokenizer \\
+\bottomrule
+\end{tabular}
+\end{table}

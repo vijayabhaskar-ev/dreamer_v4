@@ -1,0 +1,39 @@
+% Every imagination run. Written by analysis/paper_tables_v2.py from p3_runs.csv, p3_wandb_curves.csv and the evaluation summaries.
+\begin{table}[H]
+\centering
+\scriptsize
+\caption{Every imagination run of the corrected pipeline on the same \nBoards games. SE is the paired standard error of the gain over those games. Imagined return is the mean $\lambda$ return of the imagined rollouts over the \horizon step horizon, including the bootstrapped value at the last step, averaged over the last \riseWindow training steps; it is on a different scale from the real return and is read under each draw's own reward head, so it is comparable across the seeds of one draw and only loosely across draws. Reward correlation is the Pearson correlation between predicted and real reward over all steps of the policy's evaluation games. The evaluation GPU is the card that scored the imagination policy; every BC parent was evaluated on one Blackwell card, an RTX 5070 Ti.}
+\label{tab:runs_all}
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{@{}rrrrrrrrrrl@{}}
+\toprule
+draw & seed & BC catch & imag.\ catch & gain & SE & BC return & imag.\ return & imagined return & reward corr. & evaluation GPU \\
+ & & (\%) & (\%) & (pts) & (pts) & (real) & (real) & ($\lambda$) & & \\
+\midrule
+10 & 1 & 55.8 & 68.8 & +13.0 & 3.0 & 294 & 426 & 45 & 0.980 & A4500 \\
+10 & 2 & 55.8 & 70.2 & +14.4 & 3.0 & 294 & 441 & 45 & 0.983 & A4500 \\
+10 & 3 & 55.8 & 74.0 & +18.2 & 2.8 & 294 & 486 & 45 & 0.981 & A4500 \\
+11 & 1 & 53.8 & 89.0 & +35.2 & 2.6 & 292 & 610 & 44 & 0.978 & RTX 4090 \\
+11 & 2 & 53.8 & 86.0 & +32.2 & 2.6 & 292 & 564 & 45 & 0.980 & RTX 4090 \\
+11 & 3 & 53.8 & 87.0 & +33.2 & 2.7 & 292 & 577 & 45 & 0.980 & RTX 4090 \\
+12 & 1 & 51.2 & 79.0 & +27.8 & 2.8 & 277 & 492 & 47 & 0.980 & RTX 4000 Ada \\
+12 & 2 & 51.2 & 80.4 & +29.2 & 2.7 & 277 & 474 & 46 & 0.982 & RTX 4000 Ada \\
+12 & 3 & 51.2 & 78.0 & +26.8 & 2.9 & 277 & 473 & 46 & 0.982 & RTX 4000 Ada \\
+13 & 1 & 54.4 & 90.6 & +36.2 & 2.5 & 280 & 598 & 48 & 0.974 & A4500 \\
+13 & 2 & 54.4 & 85.0 & +30.6 & 2.8 & 280 & 557 & 50 & 0.979 & A4500 \\
+13 & 3 & 54.4 & 87.6 & +33.2 & 2.5 & 280 & 573 & 48 & 0.972 & A4500 \\
+14 & 1 & 56.4 & 85.4 & +29.0 & 2.7 & 289 & 559 & 52 & 0.979 & A40 \\
+14 & 2 & 56.4 & 80.8 & +24.4 & 2.7 & 289 & 494 & 51 & 0.981 & A40 \\
+14 & 3 & 56.4 & 81.2 & +24.8 & 2.8 & 289 & 519 & 52 & 0.982 & A40 \\
+15 & 1 & 54.6 & 85.6 & +31.0 & 2.8 & 297 & 558 & 52 & 0.984 & RTX 5080 \\
+15 & 2 & 54.6 & 78.8 & +24.2 & 2.7 & 297 & 497 & 50 & 0.985 & RTX 5080 \\
+15 & 3 & 54.6 & 86.8 & +32.2 & 2.5 & 297 & 560 & 50 & 0.984 & RTX 5080 \\
+16 & 1 & 53.6 & 83.0 & +29.4 & 2.8 & 290 & 543 & 50 & 0.984 & RTX 5090 \\
+16 & 2 & 53.6 & 78.6 & +25.0 & 2.9 & 290 & 506 & 50 & 0.985 & RTX 5090 \\
+16 & 3 & 53.6 & 85.4 & +31.8 & 2.6 & 290 & 537 & 49 & 0.982 & RTX 5090 \\
+17 & 1 & 56.6 & 77.8 & +21.2 & 2.9 & 320 & 469 & 46 & 0.979 & A4500 \\
+17 & 2 & 56.6 & 79.6 & +23.0 & 2.8 & 320 & 490 & 49 & 0.979 & A4500 \\
+17 & 3 & 56.6 & 82.2 & +25.6 & 2.8 & 320 & 512 & 47 & 0.979 & A4500 \\
+\bottomrule
+\end{tabular}
+\end{table}
