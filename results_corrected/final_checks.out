@@ -1,0 +1,27 @@
+##### PAIRED ROLLOUT
+OLD  e040: rollout error by generated frame 0.0192  0.0288  0.0310  0.0421   | average 0.0303
+NEW  e240: rollout error by generated frame 0.0137  0.0228  0.0214  0.0344   | average 0.0231
+NEW  e320: rollout error by generated frame 0.0123  0.0189  0.0179  0.0265   | average 0.0189
+1280 shared windows from 24 held-out episodes
+NEW e320 minus OLD e040: mean difference -0.01139 (-37.6%), 95% CI [-0.01317, -0.00929], episode-clustered z = -11.97, better in 81% of windows
+NEW e240 minus OLD e040: mean difference -0.00722 (-23.8%), 95% CI [-0.00926, -0.00508], episode-clustered z = -7.11, better in 74% of windows
+NEW e320 minus NEW e240: mean difference -0.00417 (-18.1%), 95% CI [-0.00556, -0.00256], episode-clustered z = -5.59, better in 65% of windows
+##### TIMING CONTROL
+===== NEW run, epoch 320 FINAL (aligned data, joint loss) =====
+  training-style noise, frames 1..7:   error at k=0 (correct timing) = 0.01068
+      two rows back           +128.11% vs correct   (episode-clustered z = +12.3)
+      STALE (previous row)     +52.84% vs correct   (episode-clustered z = +11.7)
+      next row                 +68.62% vs correct   (episode-clustered z = +11.2)
+      shuffled                +384.26% vs correct   (episode-clustered z = +19.8)
+      --> lowest error at k=+0  (CORRECT timing)
+  next frame from pure noise (d=1/4):   error at k=0 (correct timing) = 0.00738
+      two rows back           +271.03% vs correct   (episode-clustered z = +10.9)
+      STALE (previous row)    +120.77% vs correct   (episode-clustered z = +10.5)
+      next row                +119.06% vs correct   (episode-clustered z = +9.6)
+      shuffled                +708.82% vs correct   (episode-clustered z = +18.4)
+      --> lowest error at k=+0  (CORRECT timing)
+##### HORIZON 15
+OLD_e040:   rollout latent_mse:     0.076148 (avg), 0.089580 (final step)
+JOINT_e320:   rollout latent_mse:     0.053443 (avg), 0.060612 (final step)
+OLD_P2_seed11:   rollout latent_mse:     0.176746 (avg), 0.206561 (final step)
+ALL FINAL CHECKS DONE

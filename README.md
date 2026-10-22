@@ -1,11 +1,20 @@
-# Dreamer V4 — PyTorch reproduction
+# Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study
 
-[![arXiv](https://img.shields.io/badge/arXiv-2509.24527-b31b1b.svg)](https://arxiv.org/abs/2509.24527)
+[![Paper](https://img.shields.io/badge/paper-PDF-b31b1b.svg)](https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf)
+[![Checkpoints](https://img.shields.io/badge/%F0%9F%A4%97%20checkpoints-dreamer--v4-blue)](https://huggingface.co/vijayabhaskarev/dreamer-v4)
+[![Dreamer 4](https://img.shields.io/badge/Dreamer%204-arXiv%202509.24527-lightgrey.svg)](https://arxiv.org/abs/2509.24527)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A PyTorch implementation of **Dreamer 4** (Hafner, Yan & Lillicrap, 2025, [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)), the agent that improves a cloned policy by practicing inside a learned world model. All three phases run end to end on one GPU: a masked autoencoder tokenizer, a block causal transformer world model trained with shortcut forcing, a Phase 2 finetune that adds reward, continue and behavior cloning (BC) heads, and Phase 3 imagination training with PMPO. Every policy is scored closed loop in the real `dm_control` environment.
+Code, results and checkpoints for the paper **Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study** (Vijaya Bhaskar Eswaran, 2026, [PDF](https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf); arXiv link to follow).
 
-I used this implementation to test Dreamer 4's claim that imagination training improves on the BC policy it starts from, on one task (`ball_in_cup_catch`) with a fixed dataset of 240 demonstrations. The paper on this study is **Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study** ([PDF](https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf); an arXiv link will follow). The code behind it is tagged `arxiv-v1`.
+The paper reports a PyTorch reimplementation of **Dreamer 4** (Hafner, Yan & Lillicrap, 2025, [arXiv:2509.24527](https://arxiv.org/abs/2509.24527)), the agent that improves a cloned policy by practicing inside a learned world model, and a test of its claim that imagination training improves on the behavior cloning (BC) policy it starts from. The test runs at small scale on one DeepMind Control task, `ball_in_cup_catch`, from a fixed dataset of 240 demonstrations, with every policy scored closed loop in the real environment. The first version of the pipeline had two silent defects that passed all 12 of its verification checks and produced a convincing but wrong result; the paper documents them, the corrected study (imagination training beat its BC parent in all 24 runs), and three cheap checks that catch such defects.
+
+<p align="center">
+  <img src="assets/fig_beforeafter.png" width="820"><br>
+  <em>Figure 1 of the paper. Gain in catch rate of imagination training over its own BC parent, per run. Left, the defective pipeline: the sign of the gain depended on the Phase 2 retrain. Right, the corrected pipeline: all 24 runs positive, mean of the retrain means 27.15 points.</em>
+</p>
+
+This repository holds everything behind the paper: the implementation (tokenizer, world model with shortcut forcing, Phase 2 heads, Phase 3 imagination training with PMPO), the launch scripts that produced the runs, the per game results of every evaluated policy, the analysis outputs behind every table, and a script that recomputes the paper's numbers from these files. The checkpoints are on the Hugging Face Hub.
 
 ## Result
 
@@ -28,6 +37,14 @@ The imagination policy beat its BC parent in all 24 runs. Averaged over the 8 re
 The BC parents caught the ball in 54.55% of games, against 84.2% for the demonstrations. So the claim this evidence supports is that imagination training improves on a weak BC start. Whether it improves on a strong one is untested here.
 
 Per game results of the 8 BC parents, the 24 imagination policies and the epoch 10 checkpoint of the first seed of each retrain are in `evaluation/*-aligned-*/episodes.csv`. `analysis/paper_numbers_v2.py` and `analysis/paper_tables_v2.py` are the scripts behind every number and table in the paper. They also read training side files (run summaries, timing and step size logs) that are not in this repository, so they do not run from this checkout; the table above can be recomputed from the `episodes.csv` files alone.
+
+## Every number is recomputable here
+
+```bash
+python analysis/recompute_from_results.py
+```
+
+reads only `evaluation/*/episodes.csv`, `evaluation/*/summary.json` and `results_corrected/` and recomputes 55 numbers of the paper, from Table 1 and the headline interval to the defective pipeline's gains, the readout ablation, the reward calibration counts, the error by step size and the timing test, printing each next to the paper's value. All 55 match. The two inputs it does not cover are the demonstration statistics (they need the dataset file, which is not redistributed) and the Phase 2 training curves.
 
 ## Two silent defects, and the checks that catch them
 
@@ -100,6 +117,8 @@ dreamer_v4/
 ├── analysis/          the timing test and the scripts behind every number and table of the paper
 ├── launch/            the launch scripts of the three phases
 ├── evaluation/        per game results of every evaluated policy
+├── results_corrected/ the analysis outputs behind the tables (per run table, timing and step size tests, reward calibration, readouts)
+├── assets/            the paper's figures as PNG
 ├── convert_hansen_to_npz.py   builds the dataset file (defect 1 fix lives here)
 ├── tests/             unit tests of the imagination algebra, the rollout contract and the attention firewall
 └── requirements.txt
@@ -121,19 +140,6 @@ dreamer_v4/
 
 ## Citation
 
-Please cite the Dreamer 4 paper for the method. For this implementation:
-
-```bibtex
-@software{eswaran2026dreamerv4,
-  title  = {Dreamer V4 --- PyTorch reproduction},
-  author = {Eswaran, Vijaya Bhaskar},
-  year   = {2026},
-  url    = {https://github.com/vijayabhaskar-ev/dreamer_v4}
-}
-```
-
-For the paper (an arXiv entry will replace this when it is live):
-
 ```bibtex
 @misc{eswaran2026silentdefects,
   title  = {Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study},
@@ -141,6 +147,17 @@ For the paper (an arXiv entry will replace this when it is live):
   year   = {2026},
   note   = {Preprint},
   url    = {https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf}
+}
+```
+
+An arXiv entry will replace this when the preprint is live. Please also cite the Dreamer 4 paper for the method. For the implementation itself:
+
+```bibtex
+@software{eswaran2026dreamerv4,
+  title  = {Dreamer V4 --- PyTorch reproduction},
+  author = {Eswaran, Vijaya Bhaskar},
+  year   = {2026},
+  url    = {https://github.com/vijayabhaskar-ev/dreamer_v4}
 }
 ```
 

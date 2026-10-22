@@ -1,0 +1,19 @@
+model,cond,failed,err_correct,argmin_k,km1_pct,km1_z,km2_pct,km2_z,kp1_pct,kp1_z,shuf_pct,shuf_z
+"NEW P2 draw 10 (aligned data + joint loss, epoch 40)",A,False,0.00951,0,64.22,12.1,154.46,12.8,81.68,11.8,481.73,14.7
+"NEW P2 draw 10 (aligned data + joint loss, epoch 40)",B,False,0.00538,0,178.18,10.7,399.0,11.3,178.38,10.2,1168.5,17.5
+"NEW P2 draw 11 (aligned data + joint loss, epoch 40)",A,False,0.00941,0,65.34,12.1,157.17,12.8,82.91,11.9,490.17,14.5
+"NEW P2 draw 11 (aligned data + joint loss, epoch 40)",B,False,0.00535,0,180.3,10.6,403.27,11.2,180.19,10.2,1187.83,17.3
+"NEW P2 draw 12 (aligned data + joint loss, epoch 40)",A,False,0.00945,0,65.19,12.0,156.4,12.8,82.3,11.8,484.74,15.0
+"NEW P2 draw 12 (aligned data + joint loss, epoch 40)",B,False,0.00536,0,179.95,10.6,404.19,11.2,181.38,10.2,1190.88,17.7
+"NEW P2 draw 13 (aligned data + joint loss, epoch 40)",A,False,0.0095,0,64.46,12.0,155.06,12.8,82.02,11.8,483.9,14.7
+"NEW P2 draw 13 (aligned data + joint loss, epoch 40)",B,False,0.00534,0,180.63,10.6,404.17,11.2,181.09,10.2,1204.14,17.1
+"NEW P2 draw 14 (aligned data + joint loss, epoch 40)",A,False,0.00955,0,64.2,12.0,154.11,12.8,80.63,11.8,480.06,14.6
+"NEW P2 draw 14 (aligned data + joint loss, epoch 40)",B,False,0.0054,0,177.24,10.7,398.65,11.2,179.44,10.2,1183.87,17.2
+"NEW P2 draw 15 (aligned data + joint loss, epoch 40)",A,False,0.00953,0,64.32,12.0,154.3,12.8,81.83,11.8,478.97,15.2
+"NEW P2 draw 15 (aligned data + joint loss, epoch 40)",B,False,0.00533,0,180.09,10.6,405.03,11.2,181.89,10.1,1192.66,17.6
+"NEW P2 draw 16 (aligned data + joint loss, epoch 40)",A,False,0.00947,0,64.72,12.0,155.33,12.8,82.6,11.9,487.02,14.1
+"NEW P2 draw 16 (aligned data + joint loss, epoch 40)",B,False,0.00533,0,181.13,10.6,404.89,11.2,181.41,10.3,1202.14,16.5
+"NEW P2 draw 17 (aligned data + joint loss, epoch 40)",A,False,0.0094,0,66.07,12.1,157.7,12.8,83.06,11.8,489.02,15.0
+"NEW P2 draw 17 (aligned data + joint loss, epoch 40)",B,False,0.00535,0,181.13,10.6,404.92,11.2,180.52,10.2,1184.52,17.8
+OLD Phase-1 epoch 320 (released; old Phase 2 started from it),A,False,0.17128,-1,-1.84,-6.2,1.78,3.5,6.42,11.4,25.67,14.0
+OLD Phase-1 epoch 320 (released; old Phase 2 started from it),B,False,0.01343,-1,-20.66,-7.6,45.62,10.9,95.74,10.9,378.43,14.8

@@ -1,37 +1,27 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite both this reproduction and the original DreamerV4 paper (see references)."
-title: "Dreamer V4 — from-scratch PyTorch reproduction"
-abstract: >-
-  A faithful, from-scratch PyTorch implementation of DreamerV4 (Hafner, Yan &
-  Lillicrap, 2025): tokenizer → flow-matching world model → behavior-cloned
-  agent → imagination RL (PMPO), evaluated closed-loop on dm_control
-  ball_in_cup_catch with an honest analysis of where offline learning plateaus.
+message: "If you use this code or these results, please cite the paper below and the original Dreamer 4 paper."
+title: "Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study (code and results)"
 type: software
 authors:
   - family-names: Eswaran
     given-names: Vijaya Bhaskar
 year: 2026
-date-released: "2026-06-24"
+date-released: "2026-10-22"
 license: MIT
 url: "https://github.com/vijayabhaskar-ev/dreamer_v4"
 repository-code: "https://github.com/vijayabhaskar-ev/dreamer_v4"
 keywords:
-  - reinforcement-learning
-  - model-based-rl
   - world-models
-  - dreamer
-  - flow-matching
-  - pytorch
-references:
-  - type: article
-    title: "Training Agents Inside of Scalable World Models"
-    authors:
-      - family-names: Hafner
-        given-names: Danijar
-      - family-names: Yan
-        given-names: Wilson
-      - family-names: Lillicrap
-        given-names: Timothy
-    year: 2025
-    url: "https://arxiv.org/abs/2509.24527"
-    notes: "DreamerV4 — the paper this repository reproduces."
+  - model-based-rl
+  - offline-rl
+  - reproducibility
+  - dreamer-4
+preferred-citation:
+  type: generic
+  title: "Silent Pipeline Defects in World-Model RL: A Dreamer 4 Case Study"
+  authors:
+    - family-names: Eswaran
+      given-names: Vijaya Bhaskar
+  year: 2026
+  url: "https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf"
+  notes: "Preprint; an arXiv entry will replace this URL."
