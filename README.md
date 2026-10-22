@@ -46,6 +46,24 @@ python analysis/recompute_from_results.py
 
 reads only `evaluation/*/episodes.csv`, `evaluation/*/summary.json` and `results_corrected/` and recomputes 55 numbers of the paper, from Table 1 and the headline interval to the defective pipeline's gains, the readout ablation, the reward calibration counts, the error by step size and the timing test, printing each next to the paper's value. All 55 match. Every number printed in the paper is also listed, with the file it comes from, in `results_paper/NUMBERS.md`. The two inputs it does not cover are the demonstration statistics (they need the dataset file, which is not redistributed) and the Phase 2 training curves.
 
+## Where each result of the paper comes from
+
+| Paper | Produced by | Data |
+|---|---|---|
+| Table 1 (catch rate per retrain, headline interval) | `make check` | `results_paper/table1_results.csv`, from `evaluation/tmlr-aligned-*/episodes.csv` and `results_corrected/p3_runs.csv` |
+| Table 5 (every run) | `analysis/paper_tables_v2.py` | `results_paper/table5_every_run.csv`, `results_corrected/p3_runs.csv` |
+| Table 6 (leave one draw out) | `analysis/paper_tables_v2.py`, `make check` | `results_paper/table6_leave_one_draw_out.csv` |
+| Tables 2, 3, 4, 7 (settings, deviations, launches, checks) | `analysis/paper_tables_v2.py` | `results_paper/table_*.tex`, `launch/*.sh` |
+| Figure 1 (gain per run, both pipelines) | `make figures` | `evaluation/tmlr-*/episodes.csv`, `results_corrected/p3_runs.csv` |
+| Figure 2 (error by step size and signal level) | `make figures` | `results_corrected/evaldyn_*/` |
+| Timing test (Sections 4 and 5) | `results_corrected/run_timing.py`, `summarize.py` | `results_corrected/timing_summary.csv`, `timing_tests*.log` |
+| Reward calibration and mirage counts (Section 5) | `results_corrected/perstep_metrics.py` | `results_corrected/perstep_metrics.csv`, `evaluation/*/summary.json` |
+| Readout ablation (Section 6) | `make check` | `results_corrected/readout_table.csv` |
+| Imagined versus real return (Section 6) | `results_corrected/imagined_vs_real.py` | `results_corrected/p3_runs.csv`, `p3_wandb_curves.csv` |
+| Every other number | `analysis/paper_numbers_v2.py` | listed with its source file in `results_paper/NUMBERS.md` |
+
+`make all` runs the number check, redraws both figures and runs the unit tests in a few minutes on a CPU; exact package versions are in `requirements-pinned.txt`. Training the models themselves takes days on a GPU (see Reproduce).
+
 ## Two silent defects, and the checks that catch them
 
 My first version of this pipeline had two defects that passed all 12 checks I used to verify it.
@@ -117,6 +135,8 @@ dreamer_v4/
 ├── analysis/          the timing test and the scripts behind every number and table of the paper
 ├── launch/            the launch scripts of the three phases
 ├── evaluation/        per game results of every evaluated policy
+├── Makefile           make check, make figures, make tests
+├── analysis/figures/  the scripts that draw Figures 1 and 2
 ├── results_paper/    every number and table of the paper as printed (NUMBERS.md, table_*.tex, Tables 5 and 6 as CSV)
 ├── results_corrected/ the analysis outputs behind the tables (per run table, timing and step size tests, reward calibration, readouts)
 ├── assets/            the paper's figures as PNG

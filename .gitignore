@@ -54,3 +54,4 @@ assets/hero_work/
 !evaluation/wm-split-check/*/
 evaluation/wm-split-check/*/*.gif
 evaluation/wm-split-check/*/*.png
+analysis/figures/fig_*.pdf

@@ -1,0 +1,15 @@
+# Exact versions behind the paper's results.
+# Training (rented GPUs, recorded by the corrected runs): Python 3.12
+torch==2.8.0
+torchvision==0.23.0
+numpy==2.1.2
+pillow==11.0.0
+einops==0.8.2
+wandb==0.30.0
+# Tokenizer loss
+lpips==0.1.4
+# Closed loop evaluation and analysis (laptop): Python 3.10, torch 2.9.1 was used there
+dm_control==1.0.34
+mujoco==3.3.7
+scipy==1.15.3
+matplotlib
