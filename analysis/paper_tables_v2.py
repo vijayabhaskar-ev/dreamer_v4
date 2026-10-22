@@ -56,7 +56,7 @@ t1 = rf"""% Table 1. Written by analysis/paper_tables_v2.py from phase3/analysis
 \begin{{table}}[t]
 \centering
 \small
-\caption{{Catch rate of each BC parent and of the imagination policies trained from it (\nBoards paired games each, actions sampled), and the gain of each run over its parent in points. The imagination column is the mean over the \nSeeds seeds of the draw. The last row averages the \nDraws draws; the interval is a 95\% $t$ confidence interval over the draw means. Every run is listed in \Cref{{tab:runs_all}}.}}
+\caption{{Catch rate of each BC parent and of the imagination policies trained from it (\nBoards paired games each, actions sampled), and the gain of each run over its parent in points. The imagination column is the mean over the \nSeeds seeds of the draw. The last row averages the \nDraws draws; the interval is a 95\% $t$ confidence interval over the draw means. Every run is listed in \Cref{{tab:runs_all}}. Data \href{{https://github.com/vijayabhaskar-ev/dreamer_v4/blob/paper-v1/results_paper/table1_results.csv}}{{\texttt{{table1\_results.csv}}}}.}}
 \label{{tab:results}}
 \begin{{tabular}}{{@{{}}lcc{'c' * len(seeds)}c@{{}}}}
 \toprule
