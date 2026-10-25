@@ -252,19 +252,26 @@ for group, items in hp:
     hrows.append(r"\multicolumn{2}{@{}l}{\textit{" + group + r"}} \\")
     hrows += [f"{k} & {v} \\\\" for k, v in items]
 t6 = rf"""% Hyperparameters. Written by analysis/paper_tables_v2.py; every cell is a macro from numbers.tex (read from the checkpoints and launch scripts).
-\begin{{table}}[H]
-\centering
-\small
-\caption{{Settings of the corrected pipeline, read from the checkpoints and launch scripts. Dreamer 4 trains a \dreamerParamsTokenizer M tokenizer and a \dreamerParamsDynamics B world model, which it calls the dynamics model \citep{{hafner2025dreamer4}}.}}
-\label{{tab:hparams}}
-\begin{{tabular}}{{@{{}}L{{7.2cm}}L{{6.6cm}}@{{}}}}
+% A longtable, so the table can continue on the next page instead of leaving the appendix heading alone on a page.
+\begingroup\small
+\begin{{longtable}}{{@{{}}L{{7.2cm}}L{{6.6cm}}@{{}}}}
+\caption{{Settings of the corrected pipeline, read from the checkpoints and launch scripts. Dreamer 4 trains a \dreamerParamsTokenizer M tokenizer and a \dreamerParamsDynamics B world model, which it calls the dynamics model \citep{{hafner2025dreamer4}}.}}\label{{tab:hparams}}\\
 \toprule
 setting & value \\
 \midrule
-{chr(10).join(hrows)}
+\endfirsthead
+\multicolumn{{2}}{{@{{}}l}}{{\textit{{Table \ref{{tab:hparams}}, continued}}}}\\
+\toprule
+setting & value \\
+\midrule
+\endhead
+\midrule
+\endfoot
 \bottomrule
-\end{{tabular}}
-\end{{table}}
+\endlastfoot
+{chr(10).join(hrows)}
+\end{{longtable}}
+\endgroup
 """
 (GEN / "table_hparams.tex").write_text(t6)
 print("wrote table_hparams.tex")
