@@ -23,7 +23,7 @@ preferred-citation:
   authors:
     - family-names: Eswaran
       given-names: Vijaya Bhaskar
-    orcid: "https://orcid.org/0009-0000-8180-9722"
+      orcid: "https://orcid.org/0009-0000-8180-9722"
   year: 2026
   url: "https://github.com/vijayabhaskar-ev/dreamer_v4/releases/download/paper-v1/silent_pipeline_defects_dreamer4.pdf"
   notes: "Preprint; an arXiv entry will replace this URL."
